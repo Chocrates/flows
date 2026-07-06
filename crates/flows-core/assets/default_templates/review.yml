@@ -1,0 +1,20 @@
+# flows template: review
+# Agent reviews code or a document, then pauses for human approval.
+template: review
+
+llm:
+  model: claude-sonnet-4-6
+  # api_key: ${ANTHROPIC_API_KEY}
+
+phases:
+  - name: review
+    type: agent
+    tools: files
+    max_clarification_rounds: 2
+
+  - name: approve
+    type: human
+    instructions: "Review the agent's findings. Type 'approve' to accept or provide feedback to request a deeper look."
+    loop_back_to: review
+    loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'y', 'yes', 'lgtm', 'approve', 'approved')"
+    max_loop_iterations: 3

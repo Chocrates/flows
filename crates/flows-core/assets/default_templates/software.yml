@@ -1,0 +1,59 @@
+# flows template: software
+# Build a project from scratch — requirements through commit.
+template: software
+
+llm:
+  model: claude-sonnet-4-6
+  # api_key: ${ANTHROPIC_API_KEY}
+
+phases:
+  - name: requirements
+    type: agent
+    tools: research_ro
+    max_clarification_rounds: 5
+
+  - name: spec
+    type: agent
+    tools: research_ro
+
+  - name: design
+    type: agent
+    tools: research_ro
+
+  - name: implement
+    type: agent
+    tools: files_and_test
+    on_failure: stop
+    max_tool_rounds: 40
+
+  # Resolved in the runner (no LLM): make lint/test target, else the language's
+  # tool. Stops the run if no tool can be detected.
+  - name: lint
+    type: script
+    command: "@auto:lint"
+    on_failure: retry:implement
+
+  - name: test
+    type: script
+    command: "@auto:test"
+    on_failure: retry:implement
+
+  - name: review
+    type: agent
+    tools: files_and_test
+    on_failure: stop
+    loop_back_to: implement
+    loop_condition: "content.get('verdict') not in ('approved', 'approved_with_suggestions')"
+    max_loop_iterations: 3
+
+  - name: approve
+    type: human
+    instructions: "Review the implementation. Type feedback to request changes, or press Enter to accept."
+    loop_back_to: implement
+    loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'y', 'yes', 'lgtm', 'approve', 'approved')"
+    max_loop_iterations: 5
+
+  - name: commit
+    type: script
+    command: "git add -A && git commit -m 'feat: {{ idea[:60] }}'"
+    on_failure: continue

@@ -1,0 +1,1311 @@
+//! `flows` CLI — the command-line entry point and the launcher. Subcommands:
+//! doctor, config, init, templates, plan, run, runs, usage, attach, completions.
+
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use async_trait::async_trait;
+use clap::{CommandFactory, Parser, Subcommand};
+use flows_core::config::{
+    apply_user_project_override, load_global_config, load_project_config,
+    load_user_project_override, merge_llm,
+};
+use flows_core::detect::{detect_stack, generate_config};
+use flows_core::dryrun::dry_run;
+use flows_core::models::{Artifact, GlobalConfig, PhaseConfig, ProjectConfig};
+use flows_core::pricing::format_cost;
+use flows_core::state::Store;
+use flows_core::templates::{builtin_files, list_templates, load_template};
+use flows_llm::make_provider;
+use flows_runner::runner::{run_pipeline, RunnerCallbacks};
+
+#[derive(Parser)]
+#[command(
+    name = "flows",
+    version,
+    about = "Local LLM workflow runner (Rust port)"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Check environment: config, sandbox, available templates.
+    Doctor,
+    /// Generate a `.flows.yml` for the current project (or sync global templates).
+    Init {
+        /// Sync shipped templates into ~/.flows/templates instead.
+        #[arg(long)]
+        global: bool,
+        /// Template to target in the generated config.
+        #[arg(long, default_value = "feature")]
+        template: String,
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Template management.
+    Templates {
+        #[command(subcommand)]
+        command: TemplatesCmd,
+    },
+    /// Show or set global config (~/.flows/config.yml).
+    Config {
+        #[command(subcommand)]
+        command: ConfigCmd,
+    },
+    /// Validate config and show the execution plan + cost estimate.
+    Plan {
+        /// The idea / task for the run.
+        idea: Vec<String>,
+        /// Template to use (defaults to project config or `feature`).
+        #[arg(long)]
+        template: Option<String>,
+    },
+    /// Run a pipeline against the configured model.
+    Run {
+        /// The idea / task for the run.
+        idea: Vec<String>,
+        /// Template to use (defaults to project config or `feature`).
+        #[arg(long)]
+        template: Option<String>,
+        /// Run in the full-screen TUI instead of plain foreground output.
+        #[arg(long)]
+        tui: bool,
+        /// Detach and run in the background; returns immediately.
+        #[arg(long)]
+        background: bool,
+    },
+    /// List recent runs and their status.
+    Runs,
+    /// Delete a single run by id (use --force to stop + delete a running one).
+    Delete {
+        run_id: String,
+        /// Cancel + kill the worker first if the run is still active.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Delete finished runs from ~/.flows/runs (use --all to delete everything).
+    Clean {
+        /// Also delete runs that are still running / waiting for input.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show token usage + cost for a run.
+    Usage { run_id: String },
+    /// Attach a TUI view to a run (shows phase progress from its state).
+    Attach { run_id: String },
+    /// Print a shell completion script (bash/zsh/fish/…).
+    Completions { shell: clap_complete::Shell },
+    /// Internal: run a backgrounded pipeline (spawned by `run --background`).
+    #[command(hide = true)]
+    Worker { run_id: String },
+}
+
+#[derive(Subcommand)]
+enum TemplatesCmd {
+    /// List available templates (project → global → builtin).
+    List,
+    /// Write shipped templates into ~/.flows/templates.
+    Sync {
+        /// Overwrite existing files.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Show the resolved config (model, provider, endpoint, limits).
+    Show,
+    /// Set a value: `model`, `api-base`, `api-key`, or `max-cost`.
+    Set { key: String, value: String },
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+fn flows_dir() -> PathBuf {
+    home_dir().join(".flows")
+}
+
+fn which(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(bin))
+        .find(|p| p.is_file())
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let Some(command) = cli.command else {
+        // No subcommand → the standalone launcher/home TUI.
+        return match cmd_home() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("error: {msg}");
+                ExitCode::FAILURE
+            }
+        };
+    };
+    let result = match command {
+        Command::Doctor => cmd_doctor(),
+        Command::Init {
+            global,
+            template,
+            force,
+        } => cmd_init(global, &template, force),
+        Command::Templates { command } => match command {
+            TemplatesCmd::List => cmd_templates_list(),
+            TemplatesCmd::Sync { force } => cmd_templates_sync(force),
+        },
+        Command::Config { command } => match command {
+            ConfigCmd::Show => cmd_config_show(),
+            ConfigCmd::Set { key, value } => cmd_config_set(&key, &value),
+        },
+        Command::Plan { idea, template } => cmd_plan(&idea.join(" "), template.as_deref()),
+        Command::Run {
+            idea,
+            template,
+            tui,
+            background,
+        } => cmd_run(&idea.join(" "), template.as_deref(), tui, background),
+        Command::Runs => cmd_runs(),
+        Command::Delete { run_id, force } => cmd_delete(&run_id, force),
+        Command::Clean { all } => cmd_clean(all),
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "flows", &mut std::io::stdout());
+            Ok(())
+        }
+        Command::Usage { run_id } => cmd_usage(&run_id),
+        Command::Attach { run_id } => {
+            let store = Store::new(flows_dir());
+            match resolve_run_id(&store, &run_id) {
+                Ok(id) => flows_tui::attach_tui(store, id).map_err(|e| e.to_string()),
+                Err(e) => Err(e),
+            }
+        }
+        Command::Worker { run_id } => cmd_worker(&run_id),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// doctor
+// ---------------------------------------------------------------------------
+
+/// Probe the platform sandbox and, if it's not usable, print the right fix for
+/// this OS (bubblewrap/userns on Linux, Seatbelt on macOS).
+fn check_sandbox() {
+    let name = flows_tools::sandbox::backend_name();
+    if flows_tools::sandbox::sandbox_available() {
+        println!("  sandbox:   OK ({name})");
+        return;
+    }
+    println!("  sandbox:   {name} NOT usable — shell commands (bash/plugin) fail closed.");
+
+    #[cfg(target_os = "linux")]
+    {
+        if which("bwrap").is_none() {
+            println!("             bubblewrap is not installed:");
+            println!("               sudo apt install bubblewrap        # Debian/Ubuntu");
+            println!("               sudo dnf install bubblewrap        # Fedora");
+        } else {
+            println!("             bwrap is installed but unprivileged user namespaces are");
+            println!("             blocked (Ubuntu 23.10+ restricts them via AppArmor). Enable:");
+            println!("               # temporary (until reboot):");
+            println!(
+                "               sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+            );
+            println!("               # persist across reboots:");
+            println!("               echo 'kernel.apparmor_restrict_unprivileged_userns=0' | \\");
+            println!("                 sudo tee /etc/sysctl.d/60-flows-userns.conf");
+            println!("               sudo sysctl --system");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        println!("             Seatbelt uses /usr/bin/sandbox-exec, which ships with macOS.");
+        if which("sandbox-exec").is_none() {
+            println!("             It was not found on PATH — check /usr/bin/sandbox-exec exists");
+            println!("             and that SIP has not been modified.");
+        } else {
+            println!("             sandbox-exec is present but the probe failed — check Console");
+            println!(
+                "             for a Seatbelt denial, or that a security tool isn't blocking it."
+            );
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        println!(
+            "             No sandbox backend for this platform; disable the bash/plugin tools."
+        );
+    }
+}
+
+fn cmd_doctor() -> Result<(), String> {
+    println!("flows doctor\n");
+
+    let cfg_path = flows_dir().join("config.yml");
+    println!(
+        "  config:    {} {}",
+        cfg_path.display(),
+        if cfg_path.exists() {
+            "(found)"
+        } else {
+            "(missing — using defaults)"
+        }
+    );
+
+    check_sandbox();
+
+    // Show the resolved model + which provider/endpoint it routes to.
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut global = load_global_config(None).map_err(|e| e.to_string())?;
+    if let Some(ov) = load_user_project_override(&cwd, None).map_err(|e| e.to_string())? {
+        global = apply_user_project_override(&global, &ov);
+    }
+    let project = load_project_config(&cwd)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(default_project);
+    let llm = merge_llm(&global, &project);
+    let provider = if llm.model.to_lowercase().contains("claude") {
+        "anthropic"
+    } else if !llm.api_base.is_empty() {
+        "openai-compatible (local/custom)"
+    } else {
+        "openai"
+    };
+    let endpoint = if llm.api_base.is_empty() {
+        "(default cloud)"
+    } else {
+        &llm.api_base
+    };
+    let key = if llm.api_key.is_empty() {
+        "no key"
+    } else {
+        "key set"
+    };
+    println!(
+        "  model:     {}  →  {provider}  {endpoint}  [{key}]",
+        llm.model
+    );
+
+    let info = detect_stack(&cwd);
+    println!(
+        "  project:   {} ({})",
+        info.language,
+        info.detected.join(", ")
+    );
+
+    let templates = list_templates(Some(&flows_dir().join("templates")), Some(&cwd));
+    println!("  templates: {}", templates.join(", "));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// init
+// ---------------------------------------------------------------------------
+
+fn cmd_init(global: bool, template: &str, force: bool) -> Result<(), String> {
+    if global {
+        return cmd_templates_sync(force);
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let target = cwd.join(".flows.yml");
+    if target.exists() && !force {
+        return Err(format!(
+            "{} already exists (use --force to overwrite)",
+            target.display()
+        ));
+    }
+    let info = detect_stack(&cwd);
+    let yaml = generate_config(&info, template);
+    std::fs::write(&target, yaml).map_err(|e| e.to_string())?;
+    println!(
+        "Wrote {} (detected: {})",
+        target.display(),
+        info.detected.join(", ")
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// templates
+// ---------------------------------------------------------------------------
+
+fn cmd_templates_list() -> Result<(), String> {
+    let cwd = std::env::current_dir().ok();
+    let names = list_templates(Some(&flows_dir().join("templates")), cwd.as_deref());
+    for n in names {
+        println!("{n}");
+    }
+    Ok(())
+}
+
+fn cmd_templates_sync(force: bool) -> Result<(), String> {
+    let dir = flows_dir().join("templates");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let (mut written, mut skipped) = (0, 0);
+    for (name, contents) in builtin_files() {
+        let path = dir.join(&name);
+        if path.exists() && !force {
+            skipped += 1;
+            continue;
+        }
+        std::fs::write(&path, contents).map_err(|e| e.to_string())?;
+        written += 1;
+    }
+    println!(
+        "Synced templates to {} ({written} written, {skipped} skipped)",
+        dir.display()
+    );
+
+    // Also sync the agent prompts so users can customize them.
+    let pdir = flows_dir().join("prompts");
+    let (mut pw, mut ps) = (0, 0);
+    for (rel, contents) in flows_runner::builtin_prompt_files() {
+        let path = pdir.join(&rel);
+        if path.exists() && !force {
+            ps += 1;
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, contents).map_err(|e| e.to_string())?;
+        pw += 1;
+    }
+    println!(
+        "Synced prompts to {} ({pw} written, {ps} skipped)",
+        pdir.display()
+    );
+
+    if (skipped > 0 || ps > 0) && !force {
+        println!("  (some already present — use --force to overwrite)");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// plan (dry-run)
+// ---------------------------------------------------------------------------
+
+/// Pre-flight: a run needs a model and a way to reach it. Returns a clear,
+/// actionable error rather than letting the LLM call fail with a cryptic 401.
+fn preflight_llm(llm: &flows_core::models::LLMConfig) -> Result<(), String> {
+    if llm.model.is_empty() {
+        return Err("no model configured — run `flows config set model <name>` \
+(e.g. claude-sonnet-4-6, or your llama.cpp model)"
+            .into());
+    }
+    // A custom api_base (e.g. a local llama.cpp server) needs no API key.
+    if llm.api_key.is_empty() && llm.api_base.is_empty() {
+        return Err(
+            "no model endpoint — set a cloud key (ANTHROPIC_API_KEY / OPENAI_API_KEY, \
+or `flows config set api-key`) or a local server (`flows config set api-base \
+http://localhost:8080/v1`)"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn resolve(
+    repo: &Path,
+    template_flag: Option<&str>,
+) -> Result<(Vec<PhaseConfig>, GlobalConfig, ProjectConfig, String), String> {
+    let mut global = load_global_config(None).map_err(|e| e.to_string())?;
+    if let Some(ov) = load_user_project_override(repo, None).map_err(|e| e.to_string())? {
+        global = apply_user_project_override(&global, &ov);
+    }
+    let project = load_project_config(repo)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(default_project);
+
+    let template_name = template_flag
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| (!project.template.is_empty()).then(|| project.template.clone()))
+        .unwrap_or_else(|| "feature".to_string());
+
+    let phases = if !project.phases.is_empty() {
+        project.phases.clone()
+    } else {
+        load_template(Some(&template_name), repo, None)
+            .map_err(|e| e.to_string())?
+            .0
+    };
+
+    Ok((phases, global, project, template_name))
+}
+
+fn default_project() -> ProjectConfig {
+    // No .flows.yml → an *empty* project llm (model = "") so merge_llm falls
+    // through to the global config. LLMConfig::default() has model =
+    // "claude-sonnet-4-6", which would wrongly override the global model.
+    ProjectConfig {
+        llm: flows_core::models::LLMConfig {
+            model: String::new(),
+            ..Default::default()
+        },
+        phases: vec![],
+        template: String::new(),
+        context: Default::default(),
+    }
+}
+
+fn cmd_plan(idea: &str, template: Option<&str>) -> Result<(), String> {
+    if idea.trim().is_empty() {
+        return Err("provide an idea, e.g. `flows plan \"add a feature\"`".into());
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let (phases, global, project, template_name) = resolve(&cwd, template)?;
+
+    let report = dry_run(idea, &phases, &template_name, &global, &project, &cwd);
+
+    println!("Template: {template_name}\n");
+    println!("Execution plan:");
+    for line in &report.plan_lines {
+        println!("{line}");
+    }
+
+    println!("\nCost estimate:");
+    for e in &report.estimates {
+        if e.model.is_empty() {
+            println!("  {:<20} [{}]  —", e.phase, e.phase_type.as_str());
+        } else {
+            println!(
+                "  {:<20} {}  {}–{}",
+                e.phase,
+                e.model,
+                format_cost(e.cost_low),
+                format_cost(e.cost_high)
+            );
+        }
+    }
+    println!(
+        "\nTotal: {}–{}",
+        format_cost(report.total_cost_low),
+        format_cost(report.total_cost_high)
+    );
+
+    if !report.errors.is_empty() {
+        println!("\nValidation errors:");
+        for err in &report.errors {
+            println!("  - {err}");
+        }
+        return Err("pipeline has validation errors".into());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// run
+// ---------------------------------------------------------------------------
+
+struct Foreground;
+
+fn read_line(prompt: &str) -> String {
+    use std::io::Write;
+    print!("{prompt} ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    line.trim().to_string()
+}
+
+#[async_trait]
+impl RunnerCallbacks for Foreground {
+    async fn on_questions(&self, _phase: &str, questions: &[String]) -> String {
+        for q in questions {
+            println!("  ? {q}");
+        }
+        read_line("  your answer >")
+    }
+    async fn on_human_gate(&self, _phase: &str, instructions: &str) -> String {
+        println!("  ⏸ {instructions}");
+        read_line("  press Enter to accept, or type feedback >")
+    }
+    fn on_phase_start(&self, phase: &str, index: usize, total: usize) {
+        println!("\n▶ [{}/{}] {phase}", index + 1, total);
+    }
+    fn on_status(&self, _phase: &str, message: &str) {
+        println!("    {message}");
+    }
+    fn on_token(&self, _phase: &str, token: &str) {
+        use std::io::Write;
+        print!("{token}");
+        let _ = std::io::stdout().flush();
+    }
+    fn on_tool_call(&self, _phase: &str, _name: &str, summary: &str) {
+        println!("    ⚙ {summary}");
+    }
+    fn on_tool_result(&self, _phase: &str, _name: &str, summary: &str, is_error: bool) {
+        println!("    {} {summary}", if is_error { "✗" } else { "✓" });
+    }
+    fn on_script_result(&self, _phase: &str, exit_code: i32, _stdout: &str, _stderr: &str) {
+        println!("    script exited {exit_code}");
+    }
+    fn on_cost(&self, total_usd: f64) {
+        println!("    cost so far: {}", format_cost(total_usd));
+    }
+    fn on_loop_back(&self, from: &str, to: &str, iteration: u32, max: u32) {
+        println!("    ↻ {from} → {to} (iteration {iteration}/{max})");
+    }
+    fn on_phase_end(&self, phase: &str, _artifact: Option<&Artifact>) {
+        println!("  ✓ {phase} done");
+    }
+    fn on_run_complete(&self, _run_id: &str, phases: &[String]) {
+        println!("\n✓ complete: {}", phases.join(" → "));
+    }
+    fn on_run_failed(&self, _run_id: &str, phase: &str, error: &str) {
+        eprintln!("\n✗ failed at {phase}: {error}");
+    }
+}
+
+/// Background-run callbacks: publish questions / human gates to `state.json`
+/// and block until `attach` (or `flows`) sends an answer / advance signal, so a
+/// detached run pauses for input instead of silently auto-proceeding.
+struct Waiting {
+    store: Store,
+    run_id: String,
+    notify: bool,
+    sound: bool,
+}
+
+impl Waiting {
+    /// Publish a pause into the run state so `attach` can display + answer it.
+    fn publish(&self, status: &str, prompts: Vec<String>) {
+        if let Ok(Some(mut st)) = self.store.read_state(&self.run_id) {
+            st.status = status.into();
+            st.questions = prompts;
+            let _ = self.store.write_state(&st);
+        }
+    }
+    fn resume_running(&self) {
+        if let Ok(Some(mut st)) = self.store.read_state(&self.run_id) {
+            st.status = "running".into();
+            st.questions = vec![];
+            let _ = self.store.write_state(&st);
+        }
+    }
+    fn ping(&self, title: &str, body: &str) {
+        if self.notify {
+            flows_core::notify::notify(title, body, self.sound);
+        }
+    }
+
+    /// Append streamed output to `<run_dir>/output.log` so `flows attach` can
+    /// tail it live (a backgrounded worker has no terminal of its own). Written
+    /// as JSONL `{"c": category, "x": text}` so the reader can restore the
+    /// thinking/normal/tool categories (and their toggles). `c`: n=normal,
+    /// t=thinking, o=tool, s=system.
+    fn emit(&self, cat: &str, text: &str) {
+        use std::io::Write;
+        let line = serde_json::json!({ "c": cat, "x": text }).to_string();
+        let path = self.store.run_dir(&self.run_id).join("output.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
+#[async_trait]
+impl RunnerCallbacks for Waiting {
+    async fn on_questions(&self, _p: &str, q: &[String]) -> String {
+        self.publish("waiting_input", q.to_vec());
+        self.ping("flows: needs input", &q.join("  •  "));
+        loop {
+            if self.store.poll_cancel(&self.run_id) {
+                return String::new();
+            }
+            if let Some(answer) = self.store.read_answer(&self.run_id) {
+                let _ = self.store.poll_advance(&self.run_id); // clear paired advance
+                self.resume_running();
+                return answer;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    async fn on_human_gate(&self, _p: &str, instructions: &str) -> String {
+        self.publish("waiting_approval", vec![instructions.to_string()]);
+        self.ping("flows: approval needed", instructions);
+        loop {
+            if self.store.poll_cancel(&self.run_id) {
+                return String::new();
+            }
+            // An answer (typed feedback) also advances; capture it so the human
+            // gate's loop condition sees the feedback rather than just "approved".
+            if let Some(answer) = self.store.read_answer(&self.run_id) {
+                let _ = self.store.poll_advance(&self.run_id);
+                self.resume_running();
+                return if answer.is_empty() {
+                    "approved".into()
+                } else {
+                    answer
+                };
+            }
+            if self.store.poll_advance(&self.run_id) {
+                self.resume_running();
+                return "approved".into();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    // -- live output streamed to output.log (tailed by `flows attach`) --------
+    fn on_phase_start(&self, phase: &str, index: usize, total: usize) {
+        self.emit(
+            "s",
+            &format!("━━ phase {}/{}: {phase} ━━", index + 1, total),
+        );
+    }
+    fn on_token(&self, _phase: &str, token: &str) {
+        self.emit("n", token);
+    }
+    fn on_json(&self, _phase: &str, token: &str) {
+        self.emit("j", token);
+    }
+    fn on_thinking(&self, _phase: &str, text: &str) {
+        self.emit("t", text);
+    }
+    fn on_tool_call(&self, _phase: &str, name: &str, summary: &str) {
+        self.emit("o", &format!("⚙ {name} {summary}"));
+    }
+    fn on_tool_result(&self, _phase: &str, name: &str, summary: &str, is_error: bool) {
+        let glyph = if is_error { '✗' } else { '✓' };
+        self.emit("o", &format!("{glyph} {name} {summary}"));
+    }
+    fn on_script_result(&self, _phase: &str, exit_code: i32, stdout: &str, _stderr: &str) {
+        self.emit("s", &format!("script → exit {exit_code}\n{stdout}"));
+    }
+}
+
+fn cmd_home() -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let store = Store::new(flows_dir());
+    let templates = list_templates(Some(&flows_dir().join("templates")), Some(&cwd));
+
+    // Pre-flight before opening the TUI, so a misconfigured first run gets clear
+    // guidance instead of a cryptic failure inside the attach view.
+    let (_, global, project, _) = resolve(&cwd, None)?;
+    preflight_llm(&merge_llm(&global, &project))?;
+
+    // Launcher loop: a New run spawns a *background worker* and attaches to it, so
+    // the running job and a later reattach are the exact same view (and the
+    // worker streams to output.log for the live pane).
+    loop {
+        match flows_tui::home_screen(&templates, &store).map_err(|e| e.to_string())? {
+            flows_tui::HomeAction::Quit => break,
+            flows_tui::HomeAction::Attach { run_id } => {
+                flows_tui::attach_tui(store.clone(), run_id).map_err(|e| e.to_string())?;
+            }
+            flows_tui::HomeAction::StartRun { template, idea } => {
+                let run_id = uuid::Uuid::new_v4().to_string();
+                spawn_background(&run_id, &idea, &template, &cwd, &store, false)?;
+                flows_tui::attach_tui(store.clone(), run_id).map_err(|e| e.to_string())?;
+            }
+            flows_tui::HomeAction::Plan { template, idea } => {
+                // Dry run (no LLM): preview the plan + cost, then optionally start.
+                let (phases, global, project, tname) = resolve(&cwd, Some(&template))?;
+                let report = dry_run(&idea, &phases, &tname, &global, &project, &cwd);
+                let start =
+                    flows_tui::plan_screen(&report, &tname, &idea).map_err(|e| e.to_string())?;
+                if start {
+                    let run_id = uuid::Uuid::new_v4().to_string();
+                    spawn_background(&run_id, &idea, &tname, &cwd, &store, false)?;
+                    flows_tui::attach_tui(store.clone(), run_id).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_run(idea: &str, template: Option<&str>, tui: bool, background: bool) -> Result<(), String> {
+    if idea.trim().is_empty() {
+        return Err("provide an idea, e.g. `flows run \"add a feature\"`".into());
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let (phases, global, project, template_name) = resolve(&cwd, template)?;
+
+    let llm = merge_llm(&global, &project);
+    preflight_llm(&llm)?;
+    let provider = make_provider(&llm);
+    let store = Store::new(flows_dir());
+    let run_id = uuid::Uuid::new_v4().to_string();
+
+    if background {
+        return spawn_background(&run_id, idea, &template_name, &cwd, &store, true);
+    }
+
+    if tui {
+        return flows_tui::run_tui(
+            run_id,
+            idea.to_string(),
+            cwd,
+            phases,
+            template_name,
+            global,
+            project,
+            provider,
+            store,
+            None,
+        )
+        .map_err(|e| e.to_string());
+    }
+
+    println!("Run {run_id}  (template: {template_name})");
+    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let result = rt.block_on(run_pipeline(
+        &run_id,
+        idea,
+        &cwd,
+        &phases,
+        &template_name,
+        &global,
+        &project,
+        provider.as_ref(),
+        &Foreground,
+        &store,
+        None,
+        None,
+    ));
+    notify_run_result(&global, &run_id, idea, &result);
+    result.map(|_| ()).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// background worker + runs listing
+// ---------------------------------------------------------------------------
+
+fn spawn_background(
+    run_id: &str,
+    idea: &str,
+    template_name: &str,
+    repo: &std::path::Path,
+    store: &Store,
+    announce: bool,
+) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    // Pre-create the run dir so we can point the worker's stdio at a log file.
+    store.ensure_run_dir(run_id).map_err(|e| e.to_string())?;
+
+    // Pre-write meta + state so an immediate `attach` finds the run (the worker
+    // overwrites both with the full record when it starts).
+    let (phases, _g, _p, tname) = resolve(repo, Some(template_name))?;
+    let meta = flows_core::models::RunMeta {
+        run_id: run_id.into(),
+        idea: idea.into(),
+        slug: String::new(),
+        repo_path: repo.display().to_string(),
+        template: tname,
+        phases: phases
+            .iter()
+            .filter_map(|p| serde_json::to_value(p).ok())
+            .collect(),
+        created_at: String::new(),
+        pid: None,
+    };
+    let _ = store.write_meta(&meta);
+    let _ = store.write_state(&flows_core::models::RunState {
+        run_id: run_id.into(),
+        status: "running".into(),
+        current_phase: phases.first().map(|p| p.name.clone()).unwrap_or_default(),
+        current_phase_index: 0,
+        round: 0,
+        questions: vec![],
+        error: None,
+        completed_phases: vec![],
+    });
+
+    let log = store.run_dir(run_id).join("worker.log");
+    let log_file = std::fs::File::create(&log).map_err(|e| e.to_string())?;
+    let err_file = log_file.try_clone().map_err(|e| e.to_string())?;
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    Command::new(exe)
+        .arg("worker")
+        .arg(run_id)
+        .env("FLOWS_IDEA", idea)
+        .env("FLOWS_TEMPLATE", template_name)
+        .env("FLOWS_REPO", repo)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(err_file))
+        .process_group(0) // detach from the parent's job control
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    if announce {
+        println!("Started background run {run_id}");
+        println!("  track with: flows runs   (log: {})", log.display());
+    }
+    Ok(())
+}
+
+fn cmd_worker(run_id: &str) -> Result<(), String> {
+    let idea = std::env::var("FLOWS_IDEA").unwrap_or_default();
+    let template = std::env::var("FLOWS_TEMPLATE").ok();
+    let repo = PathBuf::from(std::env::var("FLOWS_REPO").map_err(|_| "FLOWS_REPO not set")?);
+
+    let (phases, global, project, template_name) = resolve(&repo, template.as_deref())?;
+    let llm = merge_llm(&global, &project);
+    let provider = make_provider(&llm);
+    let store = Store::new(flows_dir());
+
+    let waiting = Waiting {
+        store: store.clone(),
+        run_id: run_id.to_string(),
+        notify: global.notifications.enabled,
+        sound: global.notifications.sound,
+    };
+    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let result = rt.block_on(run_pipeline(
+        run_id,
+        &idea,
+        &repo,
+        &phases,
+        &template_name,
+        &global,
+        &project,
+        provider.as_ref(),
+        &waiting,
+        &store,
+        None,
+        None,
+    ));
+
+    notify_run_result(&global, run_id, &idea, &result);
+    result.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Fire a desktop notification for a finished run, if enabled.
+fn notify_run_result(
+    global: &GlobalConfig,
+    run_id: &str,
+    idea: &str,
+    result: &Result<Vec<String>, flows_runner::RunError>,
+) {
+    if !global.notifications.enabled {
+        return;
+    }
+    let sound = global.notifications.sound;
+    let short: String = run_id.chars().take(8).collect();
+    match result {
+        Ok(_) => flows_core::notify::notify("flows: run complete", idea, sound),
+        Err(e) => flows_core::notify::notify(
+            &format!("flows: run failed ({short})"),
+            &e.to_string(),
+            sound,
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// config
+// ---------------------------------------------------------------------------
+
+fn cmd_config_show() -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut global = load_global_config(None).map_err(|e| e.to_string())?;
+    if let Some(ov) = load_user_project_override(&cwd, None).map_err(|e| e.to_string())? {
+        global = apply_user_project_override(&global, &ov);
+    }
+    let project = load_project_config(&cwd)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(default_project);
+    let llm = merge_llm(&global, &project);
+
+    println!("config file:  {}", flows_dir().join("config.yml").display());
+    println!("model:        {}", llm.model);
+    println!(
+        "api_base:     {}",
+        if llm.api_base.is_empty() {
+            "(default cloud)"
+        } else {
+            &llm.api_base
+        }
+    );
+    println!(
+        "api_key:      {}",
+        if llm.api_key.is_empty() {
+            "(not set)"
+        } else {
+            "(set)"
+        }
+    );
+    println!(
+        "thinking:     {}",
+        llm.thinking
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "(default)".into())
+    );
+    println!("max_cost_usd: {}", global.max_cost_usd);
+    println!("notifications: {}", global.notifications.enabled);
+    println!("web_search:   {}", global.tools.web_search.backend);
+    Ok(())
+}
+
+fn cmd_config_set(key: &str, value: &str) -> Result<(), String> {
+    use serde_yaml_ng::Value;
+
+    let path = flows_dir().join("config.yml");
+    let mut root: Value = if path.exists() {
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_yaml_ng::from_str(&text).unwrap_or(Value::Mapping(Default::default()))
+    } else {
+        Value::Mapping(Default::default())
+    };
+    if !root.is_mapping() {
+        root = Value::Mapping(Default::default());
+    }
+    let map = root.as_mapping_mut().unwrap();
+
+    let set_llm = |map: &mut serde_yaml_ng::Mapping, field: &str, v: Value| {
+        let llm_key = Value::String("llm".into());
+        if !map.contains_key(&llm_key) {
+            map.insert(llm_key.clone(), Value::Mapping(Default::default()));
+        }
+        map.get_mut(&llm_key)
+            .and_then(Value::as_mapping_mut)
+            .unwrap()
+            .insert(Value::String(field.into()), v);
+    };
+
+    match key {
+        "model" => set_llm(map, "model", Value::String(value.into())),
+        "api-base" | "api_base" => set_llm(map, "api_base", Value::String(value.into())),
+        "api-key" | "api_key" => set_llm(map, "api_key", Value::String(value.into())),
+        "max-cost" | "max_cost" | "max_cost_usd" => {
+            let n: f64 = value
+                .parse()
+                .map_err(|_| format!("max-cost must be a number, got {value:?}"))?;
+            map.insert(
+                Value::String("max_cost_usd".into()),
+                Value::Number(n.into()),
+            );
+        }
+        other => {
+            return Err(format!(
+                "unknown config key {other:?} (valid: model, api-base, api-key, max-cost)"
+            ))
+        }
+    }
+
+    std::fs::create_dir_all(flows_dir()).map_err(|e| e.to_string())?;
+    let yaml = serde_yaml_ng::to_string(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, yaml).map_err(|e| e.to_string())?;
+    println!("set {key} = {value}  ({})", path.display());
+    Ok(())
+}
+
+fn cmd_usage(run_id: &str) -> Result<(), String> {
+    let store = Store::new(flows_dir());
+    let run_id = &resolve_run_id(&store, run_id).unwrap_or_else(|_| run_id.to_string());
+    let log = flows_core::llm_log::log_path(&store.run_dir(run_id));
+    let report = flows_core::usage::parse_usage(&log, run_id, "");
+    if report.phases.is_empty() {
+        println!("no usage recorded for {run_id} (run not started, or no LLM calls yet)");
+        return Ok(());
+    }
+    println!(
+        "{:<16} {:<22} {:>10} {:>10} {:>12}",
+        "phase", "model", "in_tok", "out_tok", "cost"
+    );
+    for p in &report.phases {
+        let model = if p.model.is_empty() { "—" } else { &p.model };
+        println!(
+            "{:<16} {:<22} {:>10} {:>10} {:>12}",
+            p.phase,
+            model,
+            p.input_tokens,
+            p.output_tokens,
+            format_cost(p.cost_usd)
+        );
+    }
+    println!(
+        "{:<16} {:<22} {:>10} {:>10} {:>12}",
+        "TOTAL",
+        "",
+        report.total_input(),
+        report.total_output(),
+        format_cost(report.total_cost())
+    );
+    if report.any_unknown_pricing() {
+        println!("(some models have unknown pricing → cost shown as $0)");
+    }
+    Ok(())
+}
+
+/// Resolve a run id or unique **prefix** (the short ids shown by `flows runs`)
+/// to a full run id.
+fn resolve_run_id(store: &Store, partial: &str) -> Result<String, String> {
+    if store.run_dir(partial).exists() {
+        return Ok(partial.to_string());
+    }
+    let runs_dir = match store.runs_dir() {
+        Ok(d) => d,
+        Err(_) => return Err(format!("no such run: {partial}")),
+    };
+    let mut matches: Vec<String> = std::fs::read_dir(&runs_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .filter(|name| name.starts_with(partial))
+        .collect();
+    match matches.len() {
+        0 => Err(format!("no such run: {partial}")),
+        1 => Ok(matches.remove(0)),
+        n => Err(format!(
+            "ambiguous run id {partial:?} — matches {n} runs; use more characters"
+        )),
+    }
+}
+
+fn cmd_delete(run_id: &str, force: bool) -> Result<(), String> {
+    let store = Store::new(flows_dir());
+    let run_id = &resolve_run_id(&store, run_id)?;
+    let status = store
+        .read_state(run_id)
+        .ok()
+        .flatten()
+        .map(|s| s.status)
+        .unwrap_or_default();
+    let active = matches!(
+        status.as_str(),
+        "running" | "waiting_input" | "waiting_approval" | ""
+    );
+
+    if active && !force {
+        return Err(format!(
+            "run {run_id} is still active ({status}) — use `flows delete {run_id} --force` to stop and delete it"
+        ));
+    }
+    if active && force {
+        // Ask the worker to stop, and kill it if we know its pid, before deleting
+        // (so it isn't writing into a directory we're removing).
+        let _ = store.send_cancel(run_id);
+        if let Some(pid) = store.read_meta(run_id).ok().and_then(|m| m.pid) {
+            if pid > 0 {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    store.delete_run(run_id).map_err(|e| e.to_string())?;
+    println!("deleted run {run_id}");
+    Ok(())
+}
+
+fn cmd_clean(all: bool) -> Result<(), String> {
+    let store = Store::new(flows_dir());
+    let (mut removed, mut kept) = (0usize, 0usize);
+    for m in store.list_runs() {
+        let status = store
+            .read_state(&m.run_id)
+            .ok()
+            .flatten()
+            .map(|s| s.status)
+            .unwrap_or_default();
+        let finished = matches!(status.as_str(), "completed" | "failed" | "cancelled");
+        if all || finished {
+            let _ = store.delete_run(&m.run_id);
+            removed += 1;
+        } else {
+            kept += 1;
+        }
+    }
+    if kept > 0 {
+        println!(
+            "removed {removed} run(s); kept {kept} still running (use --all to remove those too)"
+        );
+    } else {
+        println!("removed {removed} run(s)");
+    }
+    Ok(())
+}
+
+fn cmd_runs() -> Result<(), String> {
+    let store = Store::new(flows_dir());
+    let runs = store.list_runs();
+    if runs.is_empty() {
+        println!("(no runs yet)");
+        return Ok(());
+    }
+    println!("{:<8}  {:<16}  {:>9}  idea", "id", "status", "cost");
+    for meta in runs {
+        let status = store
+            .read_state(&meta.run_id)
+            .ok()
+            .flatten()
+            .map(|s| s.status)
+            .unwrap_or_else(|| "?".into());
+        let log = flows_core::llm_log::log_path(&store.run_dir(&meta.run_id));
+        let cost = flows_core::usage::parse_usage(&log, &meta.run_id, "").total_cost();
+        let cost_s = if cost > 0.0 {
+            format_cost(cost)
+        } else {
+            "—".into()
+        };
+        let short: String = meta.run_id.chars().take(8).collect();
+        let idea: String = meta.idea.chars().take(50).collect();
+        println!("{short:<8}  {status:<16}  {cost_s:>9}  {idea}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::preflight_llm;
+    use flows_core::models::LLMConfig;
+
+    #[test]
+    fn empty_model_errors() {
+        let llm = LLMConfig {
+            model: String::new(),
+            ..Default::default()
+        };
+        assert!(preflight_llm(&llm).unwrap_err().contains("no model"));
+    }
+
+    #[test]
+    fn model_without_endpoint_errors() {
+        let llm = LLMConfig {
+            model: "claude-x".into(),
+            api_key: String::new(),
+            api_base: String::new(),
+            ..Default::default()
+        };
+        assert!(preflight_llm(&llm).unwrap_err().contains("endpoint"));
+    }
+
+    #[test]
+    fn api_base_is_enough() {
+        let llm = LLMConfig {
+            model: "qwen".into(),
+            api_base: "http://localhost:8080/v1".into(),
+            ..Default::default()
+        };
+        assert!(preflight_llm(&llm).is_ok());
+    }
+
+    #[test]
+    fn api_key_is_enough() {
+        let llm = LLMConfig {
+            model: "claude-x".into(),
+            api_key: "sk".into(),
+            ..Default::default()
+        };
+        assert!(preflight_llm(&llm).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod waiting_tests {
+    use super::*;
+    use flows_core::models::RunState;
+
+    fn seed(store: &Store, run_id: &str) {
+        store.ensure_run_dir(run_id).unwrap();
+        store
+            .write_state(&RunState {
+                run_id: run_id.into(),
+                status: "running".into(),
+                current_phase: "plan".into(),
+                current_phase_index: 0,
+                round: 0,
+                questions: vec![],
+                error: None,
+                completed_phases: vec![],
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn on_questions_blocks_until_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        seed(&store, "r1");
+        let w = Waiting {
+            store: store.clone(),
+            run_id: "r1".into(),
+            notify: false,
+            sound: false,
+        };
+
+        let s2 = store.clone();
+        let sender = tokio::spawn(async move {
+            // wait until the run publishes the question, then answer it
+            loop {
+                if let Ok(Some(st)) = s2.read_state("r1") {
+                    if st.status == "waiting_input" && st.questions == vec!["color?".to_string()] {
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            s2.send_answer("r1", "blue").unwrap();
+        });
+
+        let answer = w.on_questions("plan", &["color?".into()]).await;
+        assert_eq!(answer, "blue");
+        sender.await.unwrap();
+        // status restored to running after answering
+        assert_eq!(store.read_state("r1").unwrap().unwrap().status, "running");
+    }
+
+    #[tokio::test]
+    async fn on_human_gate_unblocks_on_advance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        seed(&store, "r1");
+        let w = Waiting {
+            store: store.clone(),
+            run_id: "r1".into(),
+            notify: false,
+            sound: false,
+        };
+        store.send_advance("r1").unwrap(); // already advanced
+        assert_eq!(w.on_human_gate("approve", "ok?").await, "approved");
+    }
+
+    #[tokio::test]
+    async fn cancel_unblocks_questions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        seed(&store, "r1");
+        let w = Waiting {
+            store: store.clone(),
+            run_id: "r1".into(),
+            notify: false,
+            sound: false,
+        };
+        store.send_cancel("r1").unwrap();
+        assert_eq!(w.on_questions("plan", &["q?".into()]).await, "");
+    }
+}

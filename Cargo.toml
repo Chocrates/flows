@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/flows-core",
+    "crates/flows-tools",
+    "crates/flows-llm",
+    "crates/flows-runner",
+    "crates/flows-tui",
+    "crates/flows-cli",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

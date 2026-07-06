@@ -1,0 +1,13 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Dev logs
+logs/
+
+# Config / secrets
+.flows.yml
+infra/k8s/langfuse/secrets.yaml
+
+# Storage
+.flows-cache/
