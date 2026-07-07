@@ -319,8 +319,35 @@ fn cmd_doctor() -> Result<(), String> {
 // init
 // ---------------------------------------------------------------------------
 
+const STARTER_CONFIG: &str = r#"# ~/.flows/config.yml — global defaults (edit me, or use `flows config set`)
+llm:
+  # Local llama.cpp (or any OpenAI-compatible server) — no API key needed:
+  #   model: qwen2.5-coder
+  #   api_base: http://localhost:8080/v1
+  #
+  # …or a cloud model:
+  model: claude-sonnet-4-6
+  # api_key: ${ANTHROPIC_API_KEY}    # else falls back to $ANTHROPIC_API_KEY / $OPENAI_API_KEY
+  thinking: false
+
+max_cost_usd: 0.0                    # 0 = no cap
+
+notifications:
+  enabled: true
+  sound: false
+"#;
+
 fn cmd_init(global: bool, template: &str, force: bool) -> Result<(), String> {
     if global {
+        // Scaffold a starter config.yml (if absent), then sync templates + prompts.
+        let cfg = flows_dir().join("config.yml");
+        std::fs::create_dir_all(flows_dir()).map_err(|e| e.to_string())?;
+        if cfg.exists() && !force {
+            println!("config:   {} (exists — left unchanged)", cfg.display());
+        } else {
+            std::fs::write(&cfg, STARTER_CONFIG).map_err(|e| e.to_string())?;
+            println!("config:   wrote {}", cfg.display());
+        }
         return cmd_templates_sync(force);
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;

@@ -148,7 +148,7 @@ For a **cloud** model instead, drop `api_base` and set `model: claude-sonnet-4-6
 Generate a project config tailored to your stack:
 ```bash
 flows init            # writes .flows.yml (detects Python / Rust / Node / Go)
-flows init --global   # sync shipped templates + prompts into ~/.flows for customizing
+flows init --global   # scaffold ~/.flows/config.yml + sync templates + prompts for customizing
 ```
 
 ---

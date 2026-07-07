@@ -258,3 +258,26 @@ fn delete_ambiguous_prefix_errors() {
     // both still present
     assert!(dir.path().join(".flows/runs/abcd1111").exists());
 }
+
+#[test]
+fn init_global_writes_config_and_templates() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(&["init", "--global"], dir.path(), dir.path());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.path().join(".flows/config.yml").exists());
+    assert!(dir.path().join(".flows/templates/feature.yml").exists());
+    assert!(dir.path().join(".flows/prompts/feature/plan.md").exists());
+    // a second run must not clobber the config
+    std::fs::write(
+        dir.path().join(".flows/config.yml"),
+        "llm:\n  model: mine\n",
+    )
+    .unwrap();
+    let _ = run(&["init", "--global"], dir.path(), dir.path());
+    let cfg = std::fs::read_to_string(dir.path().join(".flows/config.yml")).unwrap();
+    assert!(cfg.contains("model: mine"), "config was clobbered");
+}
