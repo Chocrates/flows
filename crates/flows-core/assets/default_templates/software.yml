@@ -1,5 +1,6 @@
-# flows template: software
-# Build a project from scratch — requirements through commit.
+# flows template: software (spec-driven)
+# Build a project from scratch, spec-first: write the spec, sign it off, then
+# implement to it and verify the build against it before shipping.
 template: software
 
 llm:
@@ -12,9 +13,18 @@ phases:
     tools: research_ro
     max_clarification_rounds: 5
 
+  # The spec is the contract. Read-only research — it describes, it doesn't build.
   - name: spec
     type: agent
     tools: research_ro
+
+  # Spec-driven: sign off the spec BEFORE any code is written.
+  - name: approve_spec
+    type: human
+    instructions: "Review the spec. Type feedback to revise it, or press Enter to approve and start building."
+    loop_back_to: spec
+    loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'y', 'yes', 'lgtm', 'approve', 'approved')"
+    max_loop_iterations: 5
 
   - name: design
     type: agent
@@ -38,7 +48,9 @@ phases:
     command: "@auto:test"
     on_failure: retry:implement
 
-  - name: review
+  # Spec-driven: verify the implementation satisfies every requirement in the
+  # signed-off spec (and that tests/lint pass); loop back to implement if not.
+  - name: verify
     type: agent
     tools: files_and_test
     on_failure: stop
