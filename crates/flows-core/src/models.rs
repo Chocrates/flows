@@ -3,6 +3,8 @@
 //! Serde derives keep the on-disk JSON/YAML shape identical to the Python
 //! implementation (state.json, meta.json, artifacts/*.yml, llm.jsonl).
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value;
 
@@ -300,16 +302,80 @@ impl Default for LLMConfig {
     }
 }
 
+/// Resolve a model selection (a `phase.model` / `llm.model` string) against the
+/// configured profiles and a base `LLMConfig`. Returns the effective config.
+///
+/// Precedence (D2): an empty selection uses the base model as the selection; a
+/// selection that names a profile yields that profile merged over the base
+/// (profile fields win where set); otherwise the selection is a literal model on
+/// the base endpoint (today's backward-compatible behavior). The `api_key` here
+/// is the profile's explicit key (possibly empty) for a profile match, or the
+/// base key for a literal — env-key fallback is applied by the config layer.
+pub fn resolve_profile(
+    selection: &str,
+    base: &LLMConfig,
+    profiles: &HashMap<String, LLMConfig>,
+) -> LLMConfig {
+    let sel = if selection.is_empty() {
+        base.model.as_str()
+    } else {
+        selection
+    };
+    match profiles.get(sel) {
+        Some(p) => LLMConfig {
+            model: if p.model.is_empty() {
+                base.model.clone()
+            } else {
+                p.model.clone()
+            },
+            api_base: if p.api_base.is_empty() {
+                base.api_base.clone()
+            } else {
+                p.api_base.clone()
+            },
+            api_key: p.api_key.clone(),
+            thinking: p.thinking.or(base.thinking),
+            thinking_budget_tokens: p.thinking_budget_tokens.or(base.thinking_budget_tokens),
+        },
+        None => LLMConfig {
+            model: sel.to_string(),
+            ..base.clone()
+        },
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextConfig {
     #[serde(default = "default_exclude")]
     pub exclude: Vec<String>,
+    /// Context-delivery feature flags. All default off = the pre-change baseline.
+    /// These gate the planned context features (search, repo map, budgeting,
+    /// retrieval); they are configurable + selectable now (e.g. by the eval
+    /// harness), but no runner/tool reads them until those features land.
+    #[serde(default)]
+    pub search_tool: bool,
+    #[serde(default)]
+    pub range_reads: bool,
+    #[serde(default)]
+    pub slim_tree: bool,
+    #[serde(default)]
+    pub repo_map: bool,
+    #[serde(default)]
+    pub budgeting: bool,
+    #[serde(default)]
+    pub retrieval: bool,
 }
 
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             exclude: default_exclude(),
+            search_tool: false,
+            range_reads: false,
+            slim_tree: false,
+            repo_map: false,
+            budgeting: false,
+            retrieval: false,
         }
     }
 }
@@ -322,6 +388,10 @@ impl Default for ContextConfig {
 pub struct ProjectConfig {
     #[serde(default)]
     pub llm: LLMConfig,
+    /// Named model profiles (each a full model + endpoint + key + thinking).
+    /// Project profiles override same-named global profiles.
+    #[serde(default)]
+    pub models: HashMap<String, LLMConfig>,
     #[serde(default)]
     pub phases: Vec<PhaseConfig>,
     #[serde(default)]
@@ -378,6 +448,9 @@ impl Default for NotificationsConfig {
 pub struct GlobalConfig {
     #[serde(default)]
     pub llm: LLMConfig,
+    /// Named model profiles (see [`ProjectConfig::models`]).
+    #[serde(default)]
+    pub models: HashMap<String, LLMConfig>,
     #[serde(default)]
     pub notifications: NotificationsConfig,
     #[serde(default)]

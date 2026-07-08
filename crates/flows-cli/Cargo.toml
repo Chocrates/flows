@@ -17,12 +17,15 @@ flows-runner = { path = "../flows-runner" }
 flows-tui   = { path = "../flows-tui" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
+serde = { version = "1", features = ["derive"] }
 serde_yaml_ng = { workspace = true }
 serde_json = { workspace = true }
 libc = "0.2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+include_dir = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

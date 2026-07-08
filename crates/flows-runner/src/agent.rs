@@ -163,6 +163,8 @@ pub trait AgentCallbacks: Send + Sync {
     fn on_token(&self, _token: &str) {}
     /// A token belonging to a structured JSON artifact envelope.
     fn on_json(&self, _token: &str) {}
+    /// Input tokens of the latest request (current context-window usage).
+    fn on_context(&self, _input_tokens: u64) {}
     fn on_thinking(&self, _text: &str) {}
     fn on_tool_call(&self, _name: &str, _summary: &str) {}
     fn on_tool_result(&self, _name: &str, _summary: &str, _is_error: bool) {}
@@ -473,11 +475,9 @@ pub async fn run_agent_phase(
     }
 
     let tool_defs = build_tool_defs(&phase.tools);
-    let model = if phase.model.as_deref().unwrap_or("").is_empty() {
-        llm.model.clone()
-    } else {
-        phase.model.clone().unwrap()
-    };
+    // `llm` is already the phase's resolved config (profile/literal resolved by
+    // the runner), so its model is the one to send — no per-phase re-derivation.
+    let model = llm.model.clone();
     let (thinking_enabled, thinking_budget) = resolve_thinking(phase, llm);
     let thinking_budget =
         (thinking_enabled && model_supports_thinking(&model)).then_some(thinking_budget);
@@ -549,6 +549,11 @@ pub async fn run_agent_phase(
                 completion.usage.output_tokens,
                 latency_ms,
             );
+        }
+
+        // Surface the request's input tokens as the live context-window size.
+        if completion.usage.input_tokens > 0 {
+            callbacks.on_context(completion.usage.input_tokens);
         }
 
         if let Some(reasoning) = &completion.reasoning {

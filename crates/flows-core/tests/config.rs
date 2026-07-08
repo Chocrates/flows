@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use flows_core::config::{
     apply_user_project_override, load_global_config, load_project_config,
-    load_user_project_override, merge_llm, ConfigError,
+    load_user_project_override, merge_llm, merge_profiles, resolve_llm, ConfigError,
 };
 use flows_core::models::{GlobalConfig, LLMConfig, PhaseType, ProjectConfig};
 use serde_yaml_ng::Value;
@@ -66,6 +66,144 @@ fn global_config_api_key_from_env_when_absent() {
     let g = load_global_config(Some(&p)).unwrap();
     std::env::remove_var("ANTHROPIC_API_KEY");
     assert_eq!(g.llm.api_key, "sk-from-env");
+}
+
+// ---------------------------------------------------------------------------
+// Model profiles
+// ---------------------------------------------------------------------------
+
+#[test]
+fn global_config_parses_model_profiles() {
+    let dir = tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "config.yml",
+        "llm:\n  model: claude-sonnet-4-6\nmodels:\n  reasoner:\n    model: o3\n  coder:\n    model: qwen2.5-coder\n    api_base: http://localhost:8080/v1\n",
+    );
+    let g = load_global_config(Some(&p)).unwrap();
+    assert_eq!(g.models.len(), 2);
+    assert_eq!(g.models["reasoner"].model, "o3");
+    assert_eq!(g.models["coder"].api_base, "http://localhost:8080/v1");
+    // A profile with no explicit api_key stays empty at load (filled at resolve).
+    assert_eq!(g.models["coder"].api_key, "");
+}
+
+#[test]
+fn project_profiles_override_global() {
+    let global = GlobalConfig {
+        models: [(
+            "coder".to_string(),
+            LLMConfig {
+                model: "global-coder".into(),
+                ..LLMConfig::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..GlobalConfig::default()
+    };
+    let project = ProjectConfig {
+        llm: LLMConfig {
+            model: String::new(),
+            ..LLMConfig::default()
+        },
+        models: [(
+            "coder".to_string(),
+            LLMConfig {
+                model: "project-coder".into(),
+                ..LLMConfig::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        phases: vec![],
+        template: String::new(),
+        context: Default::default(),
+    };
+    let merged = merge_profiles(&global, &project);
+    assert_eq!(merged["coder"].model, "project-coder"); // project wins
+}
+
+#[test]
+fn resolve_llm_fills_dialect_env_key_for_profile() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    std::env::set_var("OPENAI_API_KEY", "sk-openai");
+    std::env::set_var("ANTHROPIC_API_KEY", "sk-anthropic");
+
+    let base = LLMConfig {
+        model: "claude-sonnet-4-6".into(),
+        api_key: "sk-anthropic".into(),
+        ..LLMConfig::default()
+    };
+    let mut profiles = std::collections::HashMap::new();
+    // OpenAI-dialect profile with no explicit key → OPENAI_API_KEY.
+    profiles.insert(
+        "coder".to_string(),
+        LLMConfig {
+            model: "gpt-4o".into(),
+            ..LLMConfig::default()
+        },
+    );
+    let eff = resolve_llm("coder", &base, &profiles);
+
+    std::env::remove_var("OPENAI_API_KEY");
+    std::env::remove_var("ANTHROPIC_API_KEY");
+
+    assert_eq!(eff.model, "gpt-4o");
+    assert_eq!(eff.api_key, "sk-openai"); // dialect-default, not the anthropic base key
+}
+
+// ---------------------------------------------------------------------------
+// Context feature flags
+// ---------------------------------------------------------------------------
+
+#[test]
+fn context_config_baseline_all_off() {
+    let cfg = flows_core::config::parse_context_config("baseline").unwrap();
+    assert!(
+        !cfg.search_tool
+            && !cfg.range_reads
+            && !cfg.slim_tree
+            && !cfg.repo_map
+            && !cfg.budgeting
+            && !cfg.retrieval
+    );
+    // empty name is also baseline.
+    assert_eq!(flows_core::config::parse_context_config("").unwrap(), cfg);
+}
+
+#[test]
+fn context_config_named_enables_only_selected() {
+    let cfg = flows_core::config::parse_context_config("+search+map").unwrap();
+    assert!(cfg.search_tool && cfg.repo_map);
+    assert!(!cfg.range_reads && !cfg.slim_tree && !cfg.budgeting && !cfg.retrieval);
+}
+
+#[test]
+fn context_config_all_on_and_unknown_errors() {
+    let all = flows_core::config::parse_context_config("all").unwrap();
+    assert!(
+        all.search_tool
+            && all.range_reads
+            && all.slim_tree
+            && all.repo_map
+            && all.budgeting
+            && all.retrieval
+    );
+    assert!(flows_core::config::parse_context_config("+search+bogus").is_err());
+}
+
+#[test]
+fn project_config_parses_context_flags() {
+    let dir = tempdir().unwrap();
+    write(
+        dir.path(),
+        ".flows.yml",
+        "llm:\n  model: gpt-4o\ncontext:\n  search_tool: true\n  repo_map: true\n",
+    );
+    let cfg = load_project_config(dir.path()).unwrap().unwrap();
+    assert!(cfg.context.search_tool && cfg.context.repo_map);
+    assert!(!cfg.context.budgeting); // unset → default off
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +323,7 @@ fn merge_llm_project_overrides_and_falls_back() {
             api_key: String::new(),
             ..LLMConfig::default()
         },
+        models: Default::default(),
         phases: vec![],
         template: String::new(),
         context: Default::default(),
@@ -200,6 +339,7 @@ fn merge_llm_thinking_tristate() {
     global.llm.thinking = Some(true);
     let mut project = ProjectConfig {
         llm: LLMConfig::default(),
+        models: Default::default(),
         phases: vec![],
         template: String::new(),
         context: Default::default(),

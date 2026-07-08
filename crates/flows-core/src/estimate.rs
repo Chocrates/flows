@@ -5,9 +5,10 @@
 //! latter cost $0 so precision is moot). Prompts are estimated with a stub
 //! (the real prompt render isn't needed for a ballpark).
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use crate::models::{LLMConfig, PhaseConfig, PhaseType};
+use crate::models::{resolve_profile, LLMConfig, PhaseConfig, PhaseType};
 use crate::pricing::lookup_pricing;
 use crate::thinking::{model_supports_thinking, resolve_thinking};
 
@@ -94,6 +95,7 @@ pub fn estimate_pipeline(
     _template_name: &str,
     _repo_root: &Path,
     llm: &LLMConfig,
+    profiles: &HashMap<String, LLMConfig>,
 ) -> Vec<PhaseEstimate> {
     let mut results = Vec::with_capacity(phases.len());
 
@@ -111,11 +113,10 @@ pub fn estimate_pipeline(
             continue;
         }
 
-        let model = if phase.model.as_deref().unwrap_or("").is_empty() {
-            llm.model.clone()
-        } else {
-            phase.model.clone().unwrap()
-        };
+        // Resolve the phase's selection (profile name or literal) to its
+        // effective model — mixed-model plans price each phase by its own model.
+        let eff = resolve_profile(phase.model.as_deref().unwrap_or(""), llm, profiles);
+        let model = eff.model.clone();
 
         // A representative stub of the prompt (the real prompt template isn't
         // rendered here) — enough for a ballpark input-token count.
@@ -126,7 +127,7 @@ pub fn estimate_pipeline(
         let out_low = (out_mid / 2).max(1);
         let mut out_high = out_mid * 2;
 
-        let (thinking_enabled, thinking_budget) = resolve_thinking(phase, llm);
+        let (thinking_enabled, thinking_budget) = resolve_thinking(phase, &eff);
         if thinking_enabled && model_supports_thinking(&model) {
             out_mid += thinking_budget as u64;
             out_high += thinking_budget as u64;

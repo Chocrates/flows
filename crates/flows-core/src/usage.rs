@@ -45,6 +45,10 @@ pub struct UsageReport {
     pub run_id: String,
     pub idea: String,
     pub phases: Vec<PhaseUsage>,
+    /// Input tokens of the most recent request — the current context-window size.
+    pub last_input_tokens: u64,
+    /// Largest input-token count seen across the run — the peak context size.
+    pub peak_input_tokens: u64,
 }
 
 impl UsageReport {
@@ -88,6 +92,8 @@ fn get_or_insert(phases: &mut Vec<PhaseUsage>, phase: &str) -> usize {
 
 pub fn parse_usage(log_path: &Path, run_id: &str, idea: &str) -> UsageReport {
     let mut phases: Vec<PhaseUsage> = Vec::new();
+    let mut last_input_tokens: u64 = 0;
+    let mut peak_input_tokens: u64 = 0;
 
     let text = match std::fs::read_to_string(log_path) {
         Ok(t) => t,
@@ -96,6 +102,8 @@ pub fn parse_usage(log_path: &Path, run_id: &str, idea: &str) -> UsageReport {
                 run_id: run_id.into(),
                 idea: idea.into(),
                 phases,
+                last_input_tokens,
+                peak_input_tokens,
             };
         }
     };
@@ -129,6 +137,11 @@ pub fn parse_usage(log_path: &Path, run_id: &str, idea: &str) -> UsageReport {
                     .unwrap_or(0);
                 let latency = ev.get("latency_ms").and_then(Value::as_i64).unwrap_or(0);
 
+                // The latest response's input tokens = the live context size.
+                if in_tok > 0 {
+                    last_input_tokens = in_tok;
+                    peak_input_tokens = peak_input_tokens.max(in_tok);
+                }
                 let pu = &mut phases[i];
                 pu.input_tokens += in_tok;
                 pu.output_tokens += out_tok;
@@ -150,5 +163,7 @@ pub fn parse_usage(log_path: &Path, run_id: &str, idea: &str) -> UsageReport {
         run_id: run_id.into(),
         idea: idea.into(),
         phases,
+        last_input_tokens,
+        peak_input_tokens,
     }
 }

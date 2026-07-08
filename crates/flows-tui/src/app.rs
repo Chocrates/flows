@@ -46,6 +46,10 @@ pub enum UiEvent {
     Cost {
         total_usd: f64,
     },
+    /// Input tokens of the latest request (current context-window usage).
+    Context {
+        input_tokens: u64,
+    },
     PhaseEnd {
         name: String,
     },
@@ -137,6 +141,9 @@ impl RunnerCallbacks for ChannelCallbacks {
     fn on_script_result(&self, _phase: &str, exit_code: i32, _stdout: &str, _stderr: &str) {
         self.send(UiEvent::ScriptResult { exit_code });
     }
+    fn on_context(&self, input_tokens: u64) {
+        self.send(UiEvent::Context { input_tokens });
+    }
     fn on_cost(&self, total_usd: f64) {
         self.send(UiEvent::Cost { total_usd });
     }
@@ -167,6 +174,10 @@ pub struct App {
     pub cancel_requested: bool,
     pub finished: bool,
     pub total_cost: f64,
+    /// Input tokens of the latest request — current context-window usage.
+    pub context_tokens: u64,
+    /// Model context window, if known (for a `12k/200k` display).
+    pub context_window: Option<u64>,
     output_area: Rect,
     dragging: bool,
     input: Option<InputState>,
@@ -184,6 +195,8 @@ impl App {
             cancel_requested: false,
             finished: false,
             total_cost: 0.0,
+            context_tokens: 0,
+            context_window: None,
             output_area: Rect::default(),
             dragging: false,
             input: None,
@@ -234,6 +247,7 @@ impl App {
             }
             UiEvent::Status { message } => self.status = message,
             UiEvent::Cost { total_usd } => self.total_cost = total_usd,
+            UiEvent::Context { input_tokens } => self.context_tokens = input_tokens,
             UiEvent::ScriptResult { exit_code } => self
                 .output
                 .push_line(Category::System, format!("script exited {exit_code}")),
@@ -415,15 +429,16 @@ impl App {
         self.set_output_area(output_inner);
         crate::render::draw_output(f.buffer_mut(), output_inner, &self.output);
 
-        let status_line = if self.total_cost > 0.0 {
-            format!(
-                "{}   ·   {}",
-                self.status,
+        let mut status_line = self.status.clone();
+        if self.context_tokens > 0 {
+            status_line.push_str(&format!("   ·   ctx {}", self.context_readout()));
+        }
+        if self.total_cost > 0.0 {
+            status_line.push_str(&format!(
+                "   ·   {}",
                 flows_core::pricing::format_cost(self.total_cost)
-            )
-        } else {
-            self.status.clone()
-        };
+            ));
+        }
         f.render_widget(Paragraph::new(status_line), rows[1]);
         f.render_widget(Paragraph::new(self.help_line()), rows[2]);
         if let Some((prompt, buffer)) = self.input_prompt() {
@@ -433,6 +448,18 @@ impl App {
 
     /// The bottom help bar: toggle keys with their live on/off state, plus the
     /// main shortcuts — so the user can see how to hide thinking / JSON.
+    /// Compact context readout: `12.3k`, or `12.3k/200k (6%)` if the window is known.
+    fn context_readout(&self) -> String {
+        let cur = fmt_tokens(self.context_tokens);
+        match self.context_window {
+            Some(w) if w > 0 => {
+                let pct = (self.context_tokens as f64 / w as f64 * 100.0).round() as u64;
+                format!("{cur}/{} ({pct}%)", fmt_tokens(w))
+            }
+            _ => cur,
+        }
+    }
+
     fn help_line(&self) -> ratatui::text::Line<'static> {
         use ratatui::style::{Color, Modifier, Style};
         use ratatui::text::{Line, Span};
@@ -468,5 +495,16 @@ impl App {
             key("q"),
             Span::styled(" quit", dim),
         ])
+    }
+}
+
+/// Compact token count: `842`, `12.3k`, `1.0M`.
+fn fmt_tokens(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
     }
 }

@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -10,13 +11,25 @@ use minijinja::{context, Environment};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use flows_core::config::merge_llm;
+use flows_core::config::{merge_llm, merge_profiles, resolve_llm};
 use flows_core::models::{
     Artifact, GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig, RunMeta, RunState,
 };
 use flows_core::pipeline::{is_dag, validate_pipeline};
 use flows_core::state::Store;
 use flows_llm::Provider;
+
+/// Builds (or reuses) a [`Provider`] for a resolved [`LLMConfig`]. Production
+/// passes [`default_provider_factory`] (dispatch by model → Anthropic/OpenAI);
+/// tests inject a mock. `Arc` so a provider can be shared across phases that
+/// resolve to the same config.
+pub type ProviderFactory<'a> = &'a (dyn Fn(&LLMConfig) -> Arc<dyn Provider> + Send + Sync);
+
+/// The production provider factory: `flows_llm::make_provider` per resolved
+/// config, wrapped in an `Arc` for the runner's per-config cache.
+pub fn default_provider_factory(llm: &LLMConfig) -> Arc<dyn Provider> {
+    Arc::from(flows_llm::make_provider(llm))
+}
 
 use crate::agent::{run_agent_phase, AgentCallbacks};
 use crate::script::run_script;
@@ -43,6 +56,8 @@ pub trait RunnerCallbacks: Send + Sync {
     fn on_thinking(&self, _phase: &str, _text: &str) {}
     /// Running total USD cost after a phase completes.
     fn on_cost(&self, _total_usd: f64) {}
+    /// Input tokens of the latest request (current context-window usage).
+    fn on_context(&self, _input_tokens: u64) {}
     fn on_tool_call(&self, _phase: &str, _name: &str, _summary: &str) {}
     fn on_tool_result(&self, _phase: &str, _name: &str, _summary: &str, _is_error: bool) {}
     fn on_phase_start(&self, _phase: &str, _index: usize, _total: usize) {}
@@ -74,6 +89,9 @@ impl AgentCallbacks for PhaseCb<'_> {
     fn on_json(&self, t: &str) {
         self.cb.on_json(&self.phase, t);
     }
+    fn on_context(&self, input_tokens: u64) {
+        self.cb.on_context(input_tokens);
+    }
     fn on_thinking(&self, t: &str) {
         self.cb.on_thinking(&self.phase, t);
     }
@@ -88,7 +106,8 @@ impl AgentCallbacks for PhaseCb<'_> {
     }
 }
 
-/// Shared, read-only run context.
+/// Shared run context. `providers` is a per-resolved-config provider cache
+/// (interior mutability so concurrent DAG phases can share it).
 struct Ctx<'a> {
     run_id: &'a str,
     idea: &'a str,
@@ -96,12 +115,38 @@ struct Ctx<'a> {
     phases: &'a [PhaseConfig],
     template_name: &'a str,
     global_cfg: &'a GlobalConfig,
+    /// Base (merged global+project) LLM config; `llm.model` may itself name a
+    /// profile — per-phase resolution happens in [`Ctx::resolve_phase_llm`].
     llm: LLMConfig,
-    provider: &'a dyn Provider,
+    profiles: HashMap<String, LLMConfig>,
+    factory: ProviderFactory<'a>,
+    providers: StdMutex<HashMap<String, Arc<dyn Provider>>>,
     callbacks: &'a dyn RunnerCallbacks,
     store: &'a Store,
     flows_dir: Option<&'a Path>,
     logger: flows_core::LlmLogger,
+}
+
+impl Ctx<'_> {
+    /// Effective LLM config for a phase (profile/literal resolution + key).
+    fn resolve_phase_llm(&self, phase: &PhaseConfig) -> LLMConfig {
+        resolve_llm(
+            phase.model.as_deref().unwrap_or(""),
+            &self.llm,
+            &self.profiles,
+        )
+    }
+
+    /// Provider for a resolved config, built once per distinct
+    /// model+endpoint+key and reused across phases.
+    fn provider_for(&self, eff: &LLMConfig) -> Arc<dyn Provider> {
+        let key = format!("{}\u{0}{}\u{0}{}", eff.model, eff.api_base, eff.api_key);
+        let mut cache = self.providers.lock().unwrap();
+        cache
+            .entry(key)
+            .or_insert_with(|| (self.factory)(eff))
+            .clone()
+    }
 }
 
 fn idea_to_slug(idea: &str) -> String {
@@ -180,14 +225,17 @@ async fn execute_phase(
                 store: ctx.store,
                 run_id: ctx.run_id,
             };
+            // Resolve this phase's model/endpoint and route to its provider.
+            let eff = ctx.resolve_phase_llm(phase);
+            let provider = ctx.provider_for(&eff);
             let result = run_agent_phase(
                 phase,
                 ctx.idea,
                 ctx.repo_root,
                 prior_artifacts,
                 ctx.template_name,
-                &ctx.llm,
-                ctx.provider,
+                &eff,
+                provider.as_ref(),
                 &pcb,
                 ctx.flows_dir,
                 ctx.global_cfg.max_cost_usd,
@@ -309,7 +357,7 @@ pub async fn run_pipeline(
     template_name: &str,
     global_cfg: &GlobalConfig,
     project_cfg: &ProjectConfig,
-    provider: &dyn Provider,
+    provider_factory: ProviderFactory<'_>,
     callbacks: &dyn RunnerCallbacks,
     store: &Store,
     start_phase: Option<&str>,
@@ -317,6 +365,7 @@ pub async fn run_pipeline(
 ) -> Result<Vec<String>, RunError> {
     validate_pipeline(phases).map_err(RunError::Validation)?;
     let llm = merge_llm(global_cfg, project_cfg);
+    let profiles = merge_profiles(global_cfg, project_cfg);
 
     store
         .ensure_run_dir(run_id)
@@ -368,7 +417,9 @@ pub async fn run_pipeline(
         template_name,
         global_cfg,
         llm,
-        provider,
+        profiles,
+        factory: provider_factory,
+        providers: StdMutex::new(HashMap::new()),
         callbacks,
         store,
         flows_dir,

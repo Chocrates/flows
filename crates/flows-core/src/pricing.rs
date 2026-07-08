@@ -106,6 +106,35 @@ pub fn lookup_pricing(model: &str) -> Option<ModelPricing> {
     best
 }
 
+/// Context-window size (max input tokens) for known models, else None. Used to
+/// show how full the window is; for a local llama.cpp model the window is set by
+/// the server (unknown here), so callers fall back to showing the raw count.
+pub fn context_window(model: &str) -> Option<u64> {
+    let key = normalise(model);
+    // (prefix, window) — longest matching prefix wins.
+    const WINDOWS: &[(&str, u64)] = &[
+        ("claude", 200_000),
+        ("gpt-4o", 128_000),
+        ("gpt-4.1", 1_047_576),
+        ("gpt-4-turbo", 128_000),
+        ("gpt-4", 8_192),
+        ("gpt-3.5", 16_385),
+        ("o1", 200_000),
+        ("o3", 200_000),
+        ("gemini-1.5", 1_048_576),
+        ("gemini", 1_048_576),
+    ];
+    let mut best: Option<u64> = None;
+    let mut best_len = 0;
+    for (pat, win) in WINDOWS {
+        if key.starts_with(pat) && pat.len() > best_len {
+            best = Some(*win);
+            best_len = pat.len();
+        }
+    }
+    best
+}
+
 /// USD cost. Returns 0.0 for unknown models (not None).
 pub fn calculate_cost(model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
     match lookup_pricing(model) {

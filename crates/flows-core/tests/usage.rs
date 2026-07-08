@@ -107,3 +107,17 @@ fn overall_throughput() {
     // 200 output tokens over 2000ms = 100 tok/s
     assert!((r.overall_tokens_per_second() - 100.0).abs() < 1e-9);
 }
+
+#[test]
+fn last_input_tokens_tracks_latest_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("llm.jsonl");
+    let logger = flows_core::LlmLogger::new("r1", path.clone());
+    logger.phase_start("plan");
+    logger.response("plan", 0, "claude-sonnet-4-6", 1000, 50, 10);
+    logger.response("plan", 1, "claude-sonnet-4-6", 3200, 80, 10);
+    let rep = flows_core::usage::parse_usage(&path, "r1", "");
+    // latest request's input tokens, not the sum
+    assert_eq!(rep.last_input_tokens, 3200);
+    assert_eq!(rep.total_input(), 4200);
+}

@@ -1,12 +1,12 @@
 //! Linear runner tests with a scripted mock Provider.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use flows_core::models::{GlobalConfig, PhaseConfig, PhaseType, ProjectConfig};
+use flows_core::models::{GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig};
 use flows_core::state::Store;
 use flows_llm::types::{Completion, CompletionRequest, LlmError, Usage};
 use flows_llm::Provider;
@@ -96,11 +96,13 @@ fn script(name: &str, cmd: &str) -> PhaseConfig {
 
 async fn run(
     phases: &[PhaseConfig],
-    provider: &Mock,
+    provider: Mock,
     cb: &Cb,
     repo: &Path,
     store: &Store,
 ) -> Result<Vec<String>, RunError> {
+    let provider: Arc<dyn Provider> = Arc::new(provider);
+    let factory = move |_: &LLMConfig| provider.clone();
     run_pipeline(
         "r1",
         "build a thing",
@@ -110,11 +112,12 @@ async fn run(
         &GlobalConfig::default(),
         &ProjectConfig {
             llm: Default::default(),
+            models: Default::default(),
             phases: vec![],
             template: String::new(),
             context: Default::default(),
         },
-        provider,
+        &factory,
         cb,
         store,
         None,
@@ -124,6 +127,88 @@ async fn run(
 }
 
 // -- tests -------------------------------------------------------------------
+
+/// A provider that always returns the same canned artifact (serves any number of
+/// phases), used to test per-profile routing + the provider cache.
+struct Canned;
+#[async_trait]
+impl Provider for Canned {
+    async fn complete(&self, _req: &CompletionRequest) -> Result<Completion, LlmError> {
+        Ok(artifact("{}"))
+    }
+}
+
+#[tokio::test]
+async fn per_phase_profiles_route_to_distinct_cached_providers() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+
+    // Two profiles: a local coder (different endpoint) + a cloud reasoner.
+    let mut models = HashMap::new();
+    models.insert(
+        "coder".to_string(),
+        LLMConfig {
+            model: "qwen2.5-coder".into(),
+            api_base: "http://localhost:8080/v1".into(),
+            ..LLMConfig::default()
+        },
+    );
+    let project = ProjectConfig {
+        llm: Default::default(),
+        models,
+        phases: vec![],
+        template: String::new(),
+        context: Default::default(),
+    };
+
+    // Phases: a → coder, b → default, c → coder (reuses a's provider).
+    let mk = |name: &str, model: Option<&str>| {
+        let mut p = agent(name);
+        p.model = model.map(str::to_string);
+        p
+    };
+    let phases = vec![
+        mk("a", Some("coder")),
+        mk("b", None),
+        mk("c", Some("coder")),
+    ];
+
+    // Record the (model, endpoint) the factory is asked to build.
+    let built: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let built2 = built.clone();
+    let factory = move |llm: &LLMConfig| -> Arc<dyn Provider> {
+        built2
+            .lock()
+            .unwrap()
+            .push((llm.model.clone(), llm.api_base.clone()));
+        Arc::new(Canned)
+    };
+
+    let cb = Cb::default();
+    let completed = run_pipeline(
+        "r1",
+        "idea",
+        d.path(),
+        &phases,
+        "feature",
+        &GlobalConfig::default(),
+        &project,
+        &factory,
+        &cb,
+        &store,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed, vec!["a", "b", "c"]);
+
+    // Built exactly twice (coder + default); phase c reused coder's provider.
+    let built = built.lock().unwrap();
+    assert_eq!(built.len(), 2, "provider built once per distinct config");
+    assert!(built.contains(&("qwen2.5-coder".into(), "http://localhost:8080/v1".into())));
+    assert!(built.contains(&("claude-sonnet-4-6".into(), String::new())));
+}
 
 #[tokio::test]
 async fn linear_agent_script_human_completes() {
@@ -136,9 +221,7 @@ async fn linear_agent_script_human_completes() {
     }];
     let provider = Mock::new(vec![artifact(r#"{"summary": "planned"}"#)]);
     let cb = Cb::default();
-    let completed = run(&phases, &provider, &cb, d.path(), &store)
-        .await
-        .unwrap();
+    let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
     assert_eq!(completed, vec!["plan", "lint", "approve"]);
     // state + artifacts persisted
     assert_eq!(store.read_state("r1").unwrap().unwrap().status, "completed");
@@ -155,7 +238,7 @@ async fn script_failure_stops_run() {
     let phases = vec![agent("plan"), lint, agent("after")];
     let provider = Mock::new(vec![artifact("{}")]); // only plan runs
     let cb = Cb::default();
-    let err = run(&phases, &provider, &cb, d.path(), &store)
+    let err = run(&phases, provider, &cb, d.path(), &store)
         .await
         .unwrap_err();
     assert!(matches!(err, RunError::Failed { .. }));
@@ -171,7 +254,7 @@ async fn script_failure_continue_proceeds() {
     lint.on_failure = "continue".into();
     let phases = vec![lint, script("done", "echo done")];
     let cb = Cb::default();
-    let completed = run(&phases, &Mock::new(vec![]), &cb, d.path(), &store)
+    let completed = run(&phases, Mock::new(vec![]), &cb, d.path(), &store)
         .await
         .unwrap();
     assert!(completed.contains(&"done".to_string()));
@@ -186,7 +269,7 @@ async fn agent_error_artifact_stops() {
     let provider = Mock::new(vec![artifact(r#"{"error": "boom"}"#)]);
     // an artifact whose content is {"error": ...} → treated as failure
     let cb = Cb::default();
-    let err = run(&[plan, agent("next")], &provider, &cb, d.path(), &store)
+    let err = run(&[plan, agent("next")], provider, &cb, d.path(), &store)
         .await
         .unwrap_err();
     assert!(matches!(err, RunError::Failed { .. }));
@@ -210,9 +293,7 @@ async fn retry_on_failure_jumps_back() {
     }];
     let provider = Mock::new(vec![artifact("{}")]); // implement runs once, test passes
     let cb = Cb::default();
-    let completed = run(&phases, &provider, &cb, d.path(), &store)
-        .await
-        .unwrap();
+    let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
     assert_eq!(completed, vec!["implement", "test"]);
 }
 
@@ -234,9 +315,7 @@ async fn loop_back_on_condition_bounded() {
         artifact(r#"{"verdict": "approved"}"#),
     ]);
     let cb = Cb::default();
-    let completed = run(&phases, &provider, &cb, d.path(), &store)
-        .await
-        .unwrap();
+    let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
     assert_eq!(store.read_state("r1").unwrap().unwrap().status, "completed");
     // implement appears started twice (looped once)
     let started = cb.started.lock().unwrap();
@@ -284,9 +363,7 @@ async fn writes_llm_jsonl_and_parse_usage_reads_it() {
         },
     )]);
     let cb = Cb::default();
-    run(&phases, &provider, &cb, d.path(), &store)
-        .await
-        .unwrap();
+    run(&phases, provider, &cb, d.path(), &store).await.unwrap();
 
     let log = flows_core::llm_log::log_path(&store.run_dir("r1"));
     assert!(log.exists(), "llm.jsonl should be written");
@@ -310,9 +387,7 @@ async fn auto_advance_human_phase_skips_gate() {
     let phases = vec![agent("plan"), gate];
     let provider = Mock::new(vec![artifact("{}")]);
     let cb = Cb::default();
-    let completed = run(&phases, &provider, &cb, d.path(), &store)
-        .await
-        .unwrap();
+    let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
     assert_eq!(completed, vec!["plan", "approve"]);
     // the interactive gate callback must NOT have been called
     assert!(cb.gates.lock().unwrap().is_empty());
@@ -326,7 +401,7 @@ async fn manual_human_phase_calls_gate() {
     gate.phase_type = PhaseType::Human;
     let phases = vec![gate];
     let cb = Cb::default();
-    run(&phases, &Mock::new(vec![]), &cb, d.path(), &store)
+    run(&phases, Mock::new(vec![]), &cb, d.path(), &store)
         .await
         .unwrap();
     assert_eq!(*cb.gates.lock().unwrap(), vec!["approve".to_string()]);
@@ -338,7 +413,7 @@ async fn persisted_artifact_carries_run_id() {
     let store = Store::new(d.path().join(".flows"));
     let provider = Mock::new(vec![artifact(r#"{"ok": true}"#)]);
     let cb = Cb::default();
-    run(&[agent("plan")], &provider, &cb, d.path(), &store)
+    run(&[agent("plan")], provider, &cb, d.path(), &store)
         .await
         .unwrap();
 
@@ -363,7 +438,7 @@ async fn auto_test_unresolvable_stops_run_despite_retry() {
     let phases = vec![agent("implement"), test];
     let provider = Mock::new(vec![artifact("{}")]);
     let cb = Cb::default();
-    let err = run(&phases, &provider, &cb, d.path(), &store)
+    let err = run(&phases, provider, &cb, d.path(), &store)
         .await
         .unwrap_err();
     assert!(matches!(err, RunError::Failed { .. }));
@@ -379,8 +454,6 @@ async fn auto_test_resolves_and_runs_for_detected_stack() {
     let phases = vec![agent("plan"), script("test", "@auto:test")];
     let provider = Mock::new(vec![artifact("{}")]);
     let cb = Cb::default();
-    let completed = run(&phases, &provider, &cb, d.path(), &store)
-        .await
-        .unwrap();
+    let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
     assert!(completed.contains(&"test".to_string()));
 }

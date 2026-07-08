@@ -5,13 +5,14 @@
 //! field-by-field so the `None = inherit` / empty-string-falls-through semantics
 //! match the Python implementation exactly.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_yaml_ng::Value;
 
 use crate::models::{
-    resolve_tools, ContextConfig, GlobalConfig, GlobalToolsConfig, LLMConfig, ModelError,
-    NotificationsConfig, PhaseConfig, PhaseType, ProjectConfig, WebSearchConfig,
+    resolve_profile, resolve_tools, ContextConfig, GlobalConfig, GlobalToolsConfig, LLMConfig,
+    ModelError, NotificationsConfig, PhaseConfig, PhaseType, ProjectConfig, WebSearchConfig,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -143,6 +144,44 @@ fn env_api_key() -> String {
         .unwrap_or_default()
 }
 
+/// Parse a `models:` mapping into named profiles. Values are already
+/// env-expanded (so `api_key: ${FOO}` is resolved); an unset profile `api_key`
+/// stays empty here — the dialect-default env fallback is applied at resolution
+/// ([`resolve_llm`]), not at load, so it can pick the right key per model.
+fn parse_profiles(raw: &Value) -> HashMap<String, LLMConfig> {
+    let mut out = HashMap::new();
+    if let Some(Value::Mapping(m)) = raw.get("models") {
+        for (k, v) in m {
+            let Some(name) = k.as_str() else { continue };
+            out.insert(
+                name.to_string(),
+                LLMConfig {
+                    model: get_str(v, "model").unwrap_or_default(),
+                    api_base: get_str(v, "api_base").unwrap_or_default(),
+                    api_key: get_str(v, "api_key").unwrap_or_default(),
+                    thinking: get_bool(v, "thinking"),
+                    thinking_budget_tokens: get_u32(v, "thinking_budget_tokens"),
+                },
+            );
+        }
+    }
+    out
+}
+
+/// Dialect-default API key from the environment for a given model: Anthropic's
+/// key for `claude*` / `anthropic/*`, otherwise OpenAI's. Used as the per-profile
+/// key fallback when a profile sets no explicit `api_key` (D5).
+fn dialect_env_key(model: &str) -> String {
+    let m = model.to_lowercase();
+    let anthropic = m.contains("claude") || m.starts_with("anthropic/");
+    let var = if anthropic {
+        "ANTHROPIC_API_KEY"
+    } else {
+        "OPENAI_API_KEY"
+    };
+    std::env::var(var).unwrap_or_default()
+}
+
 fn read_yaml(path: &Path) -> Result<Option<Value>> {
     if !path.exists() {
         return Ok(None);
@@ -201,6 +240,7 @@ pub fn load_global_config(path: Option<&Path>) -> Result<GlobalConfig> {
 
     Ok(GlobalConfig {
         llm,
+        models: parse_profiles(&raw),
         notifications,
         tools: GlobalToolsConfig { web_search },
         max_cost_usd: raw
@@ -303,16 +343,21 @@ pub fn load_project_config(repo_path: &Path) -> Result<Option<ProjectConfig>> {
         _ => Vec::new(),
     };
 
+    let ctx_raw = raw.get("context").cloned().unwrap_or(Value::Null);
     let context = ContextConfig {
-        exclude: get_str_list(
-            &raw.get("context").cloned().unwrap_or(Value::Null),
-            "exclude",
-        )
-        .unwrap_or_else(|| ContextConfig::default().exclude),
+        exclude: get_str_list(&ctx_raw, "exclude")
+            .unwrap_or_else(|| ContextConfig::default().exclude),
+        search_tool: get_bool(&ctx_raw, "search_tool").unwrap_or(false),
+        range_reads: get_bool(&ctx_raw, "range_reads").unwrap_or(false),
+        slim_tree: get_bool(&ctx_raw, "slim_tree").unwrap_or(false),
+        repo_map: get_bool(&ctx_raw, "repo_map").unwrap_or(false),
+        budgeting: get_bool(&ctx_raw, "budgeting").unwrap_or(false),
+        retrieval: get_bool(&ctx_raw, "retrieval").unwrap_or(false),
     };
 
     Ok(Some(ProjectConfig {
         llm,
+        models: parse_profiles(&raw),
         phases,
         template: get_str(&raw, "template").unwrap_or_default(),
         context,
@@ -342,6 +387,74 @@ pub fn merge_llm(global: &GlobalConfig, project: &ProjectConfig) -> LLMConfig {
         thinking: p.thinking.or(g.thinking),
         thinking_budget_tokens: p.thinking_budget_tokens.or(g.thinking_budget_tokens),
     }
+}
+
+/// Merged model profiles: global profiles overlaid by same-named project
+/// profiles (project wins).
+pub fn merge_profiles(
+    global: &GlobalConfig,
+    project: &ProjectConfig,
+) -> HashMap<String, LLMConfig> {
+    let mut m = global.models.clone();
+    for (k, v) in &project.models {
+        m.insert(k.clone(), v.clone());
+    }
+    m
+}
+
+/// Resolve a model selection to a fully usable [`LLMConfig`]: profile/literal
+/// resolution ([`resolve_profile`]) plus per-profile API-key fallback — an empty
+/// resolved key is filled from the model's dialect-default env var (D5). This is
+/// the runner-facing resolver; estimation uses [`resolve_profile`] directly (it
+/// needs the model, not the key).
+pub fn resolve_llm(
+    selection: &str,
+    base: &LLMConfig,
+    profiles: &HashMap<String, LLMConfig>,
+) -> LLMConfig {
+    let mut eff = resolve_profile(selection, base, profiles);
+    if eff.api_key.is_empty() {
+        eff.api_key = dialect_env_key(&eff.model);
+    }
+    eff
+}
+
+/// Resolve a named context configuration into a [`ContextConfig`] (feature flags
+/// only; `exclude` stays at its default). Grammar: `baseline` (all off), `all`
+/// (all on), or one-or-more `+token` segments combined — `+search`, `+range`,
+/// `+slim`, `+map`, `+budget`, `+rag`. Any unrecognized token is an error. Used
+/// by the eval harness to A/B context configurations by name.
+pub fn parse_context_config(name: &str) -> std::result::Result<ContextConfig, String> {
+    let name = name.trim();
+    let mut cfg = ContextConfig {
+        // Feature flags start off; exclude keeps its default.
+        ..ContextConfig::default()
+    };
+    match name {
+        "baseline" | "" => return Ok(cfg),
+        "all" => {
+            cfg.search_tool = true;
+            cfg.range_reads = true;
+            cfg.slim_tree = true;
+            cfg.repo_map = true;
+            cfg.budgeting = true;
+            cfg.retrieval = true;
+            return Ok(cfg);
+        }
+        _ => {}
+    }
+    for token in name.split('+').filter(|t| !t.is_empty()) {
+        match token {
+            "search" => cfg.search_tool = true,
+            "range" => cfg.range_reads = true,
+            "slim" => cfg.slim_tree = true,
+            "map" => cfg.repo_map = true,
+            "budget" => cfg.budgeting = true,
+            "rag" => cfg.retrieval = true,
+            other => return Err(format!("unknown context config token: `{other}`")),
+        }
+    }
+    Ok(cfg)
 }
 
 // ---------------------------------------------------------------------------
@@ -430,8 +543,15 @@ pub fn apply_user_project_override(base: &GlobalConfig, override_val: &Value) ->
         .filter(|&c| c != 0.0)
         .unwrap_or(base.max_cost_usd);
 
+    // Override profiles overlay the base's (override wins per name).
+    let mut models = base.models.clone();
+    for (k, v) in parse_profiles(override_val) {
+        models.insert(k, v);
+    }
+
     GlobalConfig {
         llm,
+        models,
         notifications,
         tools: GlobalToolsConfig { web_search },
         max_cost_usd: max_cost,

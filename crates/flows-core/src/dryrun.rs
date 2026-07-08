@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::config::merge_llm;
+use crate::config::{merge_llm, merge_profiles};
 use crate::estimate::{estimate_pipeline, PhaseEstimate};
 use crate::models::{GlobalConfig, PhaseConfig, ProjectConfig};
 use crate::pipeline::{is_dag, validate_pipeline};
@@ -81,7 +81,8 @@ pub fn dry_run(
     let plan_lines = build_plan_lines(phases);
 
     let llm = merge_llm(global_cfg, project_cfg);
-    let estimates = estimate_pipeline(phases, idea, template_name, repo_root, &llm);
+    let profiles = merge_profiles(global_cfg, project_cfg);
+    let estimates = estimate_pipeline(phases, idea, template_name, repo_root, &llm, &profiles);
     let total_cost_low = estimates.iter().map(|e| e.cost_low).sum();
     let total_cost_high = estimates.iter().map(|e| e.cost_high).sum();
 

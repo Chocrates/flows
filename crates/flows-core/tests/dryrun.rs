@@ -16,6 +16,7 @@ fn empty_project() -> ProjectConfig {
             model: String::new(),
             ..Default::default()
         },
+        models: Default::default(),
         phases: vec![],
         template: String::new(),
         context: Default::default(),

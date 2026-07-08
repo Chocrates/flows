@@ -24,6 +24,7 @@ use crate::app::{App, UiEvent};
 use crate::output::Category;
 use crate::PhaseStatus;
 
+#[cfg(test)]
 fn total_cost(store: &Store, run_id: &str) -> f64 {
     let path = flows_core::llm_log::log_path(&store.run_dir(run_id));
     flows_core::usage::parse_usage(&path, run_id, "").total_cost()
@@ -206,7 +207,26 @@ fn attach_loop<B: ratatui::backend::Backend>(
                     prompting = false;
                 }
             }
-            app.total_cost = total_cost(store, run_id);
+            // One parse of llm.jsonl → running cost + current context size (the
+            // latest request's input tokens) + the model's window for a %.
+            let rep = flows_core::usage::parse_usage(
+                &flows_core::llm_log::log_path(&store.run_dir(run_id)),
+                run_id,
+                "",
+            );
+            app.total_cost = rep.total_cost();
+            app.context_tokens = rep.last_input_tokens;
+            if app.context_window.is_none() {
+                if let Some(model) = rep
+                    .phases
+                    .iter()
+                    .rev()
+                    .find(|p| !p.model.is_empty())
+                    .map(|p| p.model.clone())
+                {
+                    app.context_window = flows_core::pricing::context_window(&model);
+                }
+            }
         }
 
         // A finished run must never keep a pending gate prompt around.

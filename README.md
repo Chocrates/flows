@@ -145,6 +145,40 @@ For a **cloud** model instead, drop `api_base` and set `model: claude-sonnet-4-6
 - **Provider is chosen by model name:** `claude*` → Anthropic; anything else → OpenAI Chat Completions (which is what llama.cpp speaks). An `api_base` routes to your local/self-hosted endpoint — **no key required**.
 - **API keys** (cloud only) come from `llm.api_key`, else `$ANTHROPIC_API_KEY`, else `$OPENAI_API_KEY`.
 
+### Per-phase models (model profiles)
+
+Different phases can run on different models — and different endpoints. Define
+named **profiles** under `models:`, then point a phase at one with `model:`:
+
+```yaml
+llm:
+  model: claude-sonnet-4-6             # the run default (also a profile name if you want)
+
+models:
+  reasoner:                            # a cloud reasoner for planning/design
+    model: claude-opus-4-8
+    thinking: true
+  coder:                               # a local llama.cpp coder for implementation
+    model: qwen2.5-coder
+    api_base: http://localhost:8080/v1
+
+phases:
+  - name: design
+    model: reasoner                    # routes to the reasoner profile
+  - name: implement
+    model: coder                       # routes to the local coder — different endpoint
+```
+
+- A profile carries its own `model` and optional `api_base`, `api_key`, and
+  `thinking`; a profile that omits `api_base` inherits the default endpoint
+  (so **two models on the same endpoint** just need a `model:`).
+- A `phase.model` (or `llm.model`) that **doesn't** name a profile is treated as a
+  literal model string on the default endpoint — existing configs keep working.
+- Each profile's key is its explicit `api_key`, else the dialect default
+  (`$ANTHROPIC_API_KEY` for `claude*`, else `$OPENAI_API_KEY`). `flows plan`
+  shows the model each phase resolves to; `flows doctor` lists every profile and
+  flags an unusable one before you run.
+
 Generate a project config tailored to your stack:
 ```bash
 flows init            # writes .flows.yml (detects Python / Rust / Node / Go)
@@ -164,12 +198,74 @@ flows init --global   # scaffold ~/.flows/config.yml + sync templates + prompts 
 | `flows runs` | List recent runs with status + cost |
 | `flows delete <id> [--force]` | Delete one run by id (`--force` stops + deletes a running one) |
 | `flows clean [--all]` | Delete finished runs from `~/.flows/runs` (`--all` also removes running ones) |
+| `flows eval run \| list \| review \| report` | Benchmark models on task fixtures — matrix of model × context-config × suite × size, stored + compared |
 | `flows usage <id>` | Per-phase token usage + cost for a run |
 | `flows doctor` | Check config, model routing, sandbox, templates |
 | `flows config show \| set <key> <value>` | View / edit config (`model`, `api-base`, `api-key`, `max-cost`) |
 | `flows templates list \| sync` | List templates; write templates + prompts to `~/.flows` |
 | `flows init [--global]` | Generate `.flows.yml`, or sync global templates |
 | `flows completions <shell>` | Print a shell completion script |
+
+---
+
+## Benchmarking your model (`flows eval`)
+
+Small local models vary a lot in how well they drive an agent loop. `flows eval`
+measures it as a **matrix**: pick models, context configurations, and fixtures;
+each `(model × config × fixture × trial)` cell runs headless, and every result is
+stored so you can compare models over time.
+
+```bash
+# Run a matrix and store the results:
+flows eval run --models reasoner,coder --configs baseline,+search --suite coder
+flows eval run --models qwen2.5-coder --size small --trials 3   # 3 trials/cell
+flows eval run --fixtures ./my-fx                               # your own fixtures
+
+flows eval list                     # show discovered fixtures (filter --suite/--size)
+flows eval review                   # grade ungraded trials (reasoner pass signal)
+flows eval report                   # comparison table (filter --model/--config/--suite)
+```
+
+- **`--models`** — CSV of model-profile names (from your `models:` map) or literal
+  model strings. Each model is forced across the whole pipeline. Omit → your
+  configured default. Models failing preflight are skipped, not fatal.
+- **`--configs`** — CSV of context configurations: `baseline` (all off), `all`, or
+  combined feature tokens `+search`, `+range`, `+slim`, `+map`, `+budget`, `+rag`
+  (e.g. `+search+map`). These select the upcoming context-delivery features; until
+  those land every config runs identically (baseline).
+
+```
+model            config     suite    size        pass    in_tok      peak_ctx     cost  rounds   n
+qwen2.5-coder    baseline   coder    small   100% 3/3      3.1k        3.4k±0.2k  $0.00     3.0   3
+qwen2.5-coder    +search    coder    small   100% 3/3      2.4k        2.6k±0.1k  $0.00     2.3   3
+claude-opus-4-8  baseline   coder    medium  100% 3/3     12.0k       13.1k±0.4k  $0.14     5.0   3
+```
+
+**Fixtures.** A fixture is a folder with `fixture.yml` and a `repo/` subtree:
+
+```yaml
+suite: coder            # coder | reasoner
+size:  small            # small | medium | large
+task:  "…"
+template: blank
+verify: "cargo test"    # required for coder: exit 0 == success
+rubric: |               # required for reasoner: shown during `eval review`
+  - correct root cause?
+  - fix actionable / idiomatic?
+timeout_secs: 600
+```
+
+- **coder** fixtures are scored by the shell `verify` command (exit 0 = pass).
+- **reasoner** fixtures have no meaningful shell check — success is a **manual
+  grade** against the `rubric`, entered via `flows eval review` (it shows the task,
+  rubric, and the run's output). Ungraded reasoner trials show as `ungraded` in the
+  report rather than pass/fail.
+
+Results persist under `~/.flows/eval/` (an append-only `results.jsonl` plus saved
+per-trial output). `flows eval report` reads that store — no model calls — so
+comparison is offline and accumulates across runs. This is the yardstick the
+upcoming context-delivery features (search, repo map, retrieval) will be measured
+against, so you can decide what actually helps *your* model on *your* code.
 
 ---
 

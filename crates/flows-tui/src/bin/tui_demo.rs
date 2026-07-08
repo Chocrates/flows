@@ -62,11 +62,12 @@ fn main() {
         GlobalConfig::default(),
         ProjectConfig {
             llm: Default::default(),
+            models: Default::default(),
             phases: vec![],
             template: String::new(),
             context: Default::default(),
         },
-        Box::new(MockProvider),
+        Box::new(|_| std::sync::Arc::new(MockProvider)),
         store,
         None,
     );

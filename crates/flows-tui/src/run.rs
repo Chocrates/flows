@@ -14,12 +14,18 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
-use flows_core::models::{GlobalConfig, PhaseConfig, ProjectConfig};
+use std::sync::Arc;
+
+use flows_core::models::{GlobalConfig, LLMConfig, PhaseConfig, ProjectConfig};
 use flows_core::state::Store;
 use flows_llm::Provider;
 use flows_runner::runner::run_pipeline;
 
 use crate::app::{App, ChannelCallbacks};
+
+/// Owned provider factory (builds a [`Provider`] per resolved [`LLMConfig`]).
+/// Owned (not borrowed) because the pipeline runs on a spawned `'static` task.
+pub type ProviderFactory = Box<dyn Fn(&LLMConfig) -> Arc<dyn Provider> + Send + Sync>;
 
 /// Run a pipeline inside the full-screen TUI. Blocks until the run finishes and
 /// the user quits.
@@ -32,7 +38,7 @@ pub fn run_tui(
     template_name: String,
     global_cfg: GlobalConfig,
     project_cfg: ProjectConfig,
-    provider: Box<dyn Provider>,
+    provider_factory: ProviderFactory,
     store: Store,
     flows_dir: Option<PathBuf>,
 ) -> io::Result<()> {
@@ -41,6 +47,8 @@ pub fn run_tui(
 
     let names: Vec<String> = phases.iter().map(|p| p.name.clone()).collect();
     let mut app = App::new(&names);
+    let model = flows_core::config::merge_llm(&global_cfg, &project_cfg).model;
+    app.context_window = flows_core::pricing::context_window(&model);
     let loops: Vec<crate::phases::LoopEdge> = phases
         .iter()
         .filter_map(|p| {
@@ -66,7 +74,7 @@ pub fn run_tui(
             &template_name,
             &global_cfg,
             &project_cfg,
-            provider.as_ref(),
+            &*provider_factory,
             &cb,
             &task_store,
             None,

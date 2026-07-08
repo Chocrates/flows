@@ -2,11 +2,11 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use flows_core::models::{GlobalConfig, PhaseConfig, PhaseType, ProjectConfig};
+use flows_core::models::{GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig};
 use flows_core::state::Store;
 use flows_llm::types::{Completion, CompletionRequest, LlmError};
 use flows_llm::Provider;
@@ -70,11 +70,12 @@ async fn run(
         &GlobalConfig::default(),
         &ProjectConfig {
             llm: Default::default(),
+            models: Default::default(),
             phases: vec![],
             template: String::new(),
             context: Default::default(),
         },
-        &Mock(Mutex::new(VecDeque::new())),
+        &|_: &LLMConfig| -> Arc<dyn Provider> { Arc::new(Mock(Mutex::new(VecDeque::new()))) },
         cb,
         store,
         None,

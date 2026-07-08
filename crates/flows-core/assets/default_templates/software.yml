@@ -7,6 +7,16 @@ llm:
   model: claude-sonnet-4-6
   # api_key: ${ANTHROPIC_API_KEY}
 
+# Optional: run different phases on different models (and endpoints). Define
+# named profiles here, then set `model:` on a phase (see design/implement below).
+# models:
+#   reasoner:                          # cloud reasoner for spec/design
+#     model: claude-opus-4-8
+#     thinking: true
+#   coder:                             # local llama.cpp coder for implementation
+#     model: qwen2.5-coder
+#     api_base: http://localhost:8080/v1
+
 phases:
   - name: requirements
     type: agent
@@ -17,6 +27,7 @@ phases:
   - name: spec
     type: agent
     tools: research_ro
+    # model: reasoner                  # uncomment (with the `models:` block above)
 
   # Spec-driven: sign off the spec BEFORE any code is written.
   - name: approve_spec
@@ -29,12 +40,14 @@ phases:
   - name: design
     type: agent
     tools: research_ro
+    # model: reasoner                  # deep-reasoning model for design
 
   - name: implement
     type: agent
     tools: files_and_test
     on_failure: stop
     max_tool_rounds: 40
+    # model: coder                     # fast/local coder for implementation
 
   # Resolved in the runner (no LLM): make lint/test target, else the language's
   # tool. Stops the run if no tool can be detected.

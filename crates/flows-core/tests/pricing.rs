@@ -59,3 +59,14 @@ fn format_cost_tiers() {
     assert_eq!(format_cost(0.0001234), "$0.000123");
     assert_eq!(format_cost(1.23456), "$1.2346");
 }
+
+#[test]
+fn context_window_known_and_unknown() {
+    use flows_core::pricing::context_window;
+    assert_eq!(context_window("claude-sonnet-4-6"), Some(200_000));
+    assert_eq!(context_window("anthropic/claude-3-5-sonnet"), Some(200_000));
+    assert_eq!(context_window("gpt-4o"), Some(128_000));
+    assert_eq!(context_window("gpt-4o-mini"), Some(128_000));
+    // local / unknown model → None (window set by the server, not known here)
+    assert_eq!(context_window("qwen2.5-coder"), None);
+}

@@ -6,18 +6,24 @@ use std::process::ExitCode;
 
 use async_trait::async_trait;
 use clap::{CommandFactory, Parser, Subcommand};
+use std::collections::HashMap;
+
 use flows_core::config::{
     apply_user_project_override, load_global_config, load_project_config,
-    load_user_project_override, merge_llm,
+    load_user_project_override, merge_llm, merge_profiles, resolve_llm,
 };
 use flows_core::detect::{detect_stack, generate_config};
 use flows_core::dryrun::dry_run;
-use flows_core::models::{Artifact, GlobalConfig, PhaseConfig, ProjectConfig};
+use flows_core::models::{
+    Artifact, GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig,
+};
 use flows_core::pricing::format_cost;
 use flows_core::state::Store;
 use flows_core::templates::{builtin_files, list_templates, load_template};
-use flows_llm::make_provider;
-use flows_runner::runner::{run_pipeline, RunnerCallbacks};
+use flows_runner::runner::{default_provider_factory, run_pipeline, RunnerCallbacks};
+
+mod eval;
+mod eval_store;
 
 #[derive(Parser)]
 #[command(
@@ -93,6 +99,11 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Evaluate models on task fixtures (model × context-config × suite × size).
+    Eval {
+        #[command(subcommand)]
+        command: EvalCmd,
+    },
     /// Show token usage + cost for a run.
     Usage { run_id: String },
     /// Attach a TUI view to a run (shows phase progress from its state).
@@ -102,6 +113,56 @@ enum Command {
     /// Internal: run a backgrounded pipeline (spawned by `run --background`).
     #[command(hide = true)]
     Worker { run_id: String },
+}
+
+#[derive(Subcommand)]
+enum EvalCmd {
+    /// Run the eval matrix and store a record per trial.
+    Run {
+        /// Models to evaluate (CSV of profile names or literal models). Omit → configured default.
+        #[arg(long)]
+        models: Option<String>,
+        /// Context configs (CSV, e.g. `baseline,+search,+search+map`). Omit → baseline.
+        #[arg(long)]
+        configs: Option<String>,
+        /// Fixture suite filter: coder | reasoner | all.
+        #[arg(long, default_value = "all")]
+        suite: String,
+        /// Fixture size filter: small | medium | large | all.
+        #[arg(long, default_value = "all")]
+        size: String,
+        /// Directory of fixture folders (each with fixture.yml + repo/). Omit for built-ins.
+        #[arg(long)]
+        fixtures: Option<String>,
+        /// Trials per cell (>1 to expose model non-determinism).
+        #[arg(long, default_value_t = 1)]
+        trials: usize,
+    },
+    /// List discovered fixtures.
+    List {
+        #[arg(long)]
+        fixtures: Option<String>,
+        #[arg(long, default_value = "all")]
+        suite: String,
+        #[arg(long, default_value = "all")]
+        size: String,
+    },
+    /// Manually grade ungraded trials (the pass signal for reasoner tasks).
+    Review {
+        #[arg(long, default_value = "all")]
+        suite: String,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Print a comparison table from the stored results (no model calls).
+    Report {
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        config: Option<String>,
+        #[arg(long, default_value = "all")]
+        suite: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -178,6 +239,34 @@ fn main() -> ExitCode {
         Command::Runs => cmd_runs(),
         Command::Delete { run_id, force } => cmd_delete(&run_id, force),
         Command::Clean { all } => cmd_clean(all),
+        Command::Eval { command } => match command {
+            EvalCmd::Run {
+                models,
+                configs,
+                suite,
+                size,
+                fixtures,
+                trials,
+            } => eval::cmd_run(
+                models.as_deref(),
+                configs.as_deref(),
+                &suite,
+                &size,
+                fixtures.as_deref(),
+                trials,
+            ),
+            EvalCmd::List {
+                fixtures,
+                suite,
+                size,
+            } => eval::cmd_list(fixtures.as_deref(), &suite, &size),
+            EvalCmd::Review { suite, model } => eval::cmd_review(&suite, model.as_deref()),
+            EvalCmd::Report {
+                model,
+                config,
+                suite,
+            } => eval::cmd_report(model.as_deref(), config.as_deref(), &suite),
+        },
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "flows", &mut std::io::stdout());
             Ok(())
@@ -255,6 +344,28 @@ fn check_sandbox() {
     }
 }
 
+/// `provider  endpoint  [key]` summary for a resolved config (doctor display).
+fn route_summary(llm: &LLMConfig) -> String {
+    let provider = if llm.model.to_lowercase().contains("claude") {
+        "anthropic"
+    } else if !llm.api_base.is_empty() {
+        "openai-compatible (local/custom)"
+    } else {
+        "openai"
+    };
+    let endpoint = if llm.api_base.is_empty() {
+        "(default cloud)"
+    } else {
+        &llm.api_base
+    };
+    let key = if llm.api_key.is_empty() {
+        "no key"
+    } else {
+        "key set"
+    };
+    format!("{provider}  {endpoint}  [{key}]")
+}
+
 fn cmd_doctor() -> Result<(), String> {
     println!("flows doctor\n");
 
@@ -302,6 +413,24 @@ fn cmd_doctor() -> Result<(), String> {
         "  model:     {}  →  {provider}  {endpoint}  [{key}]",
         llm.model
     );
+
+    // Named model profiles (and where each routes). Pre-flight each so an
+    // unusable one is flagged before a run that would use it.
+    let profiles = merge_profiles(&global, &project);
+    if !profiles.is_empty() {
+        let mut names: Vec<&String> = profiles.keys().collect();
+        names.sort();
+        println!("  profiles:");
+        for name in names {
+            let eff = resolve_llm(name, &llm, &profiles);
+            let route = route_summary(&eff);
+            let status = match preflight_llm(&eff) {
+                Ok(()) => String::new(),
+                Err(e) => format!("  ⚠ {e}"),
+            };
+            println!("    {name:<12} {}  →  {route}{status}", eff.model);
+        }
+    }
 
     let info = detect_stack(&cwd);
     println!(
@@ -450,6 +579,30 @@ http://localhost:8080/v1`)"
     Ok(())
 }
 
+/// Pre-flight every distinct profile a run will actually use: the run default
+/// plus each agent phase's resolved selection. Errors name the offending phase
+/// so a bad profile is easy to find.
+fn preflight_run(
+    llm: &LLMConfig,
+    profiles: &HashMap<String, LLMConfig>,
+    phases: &[PhaseConfig],
+) -> Result<(), String> {
+    // The run default (a phase with no `model:` falls back to this).
+    preflight_llm(&resolve_llm("", llm, profiles))?;
+    for phase in phases {
+        if !matches!(phase.phase_type, PhaseType::Agent) {
+            continue;
+        }
+        let sel = phase.model.as_deref().unwrap_or("");
+        if sel.is_empty() {
+            continue; // uses the already-validated default
+        }
+        let eff = resolve_llm(sel, llm, profiles);
+        preflight_llm(&eff).map_err(|e| format!("phase {:?} (model {sel:?}): {e}", phase.name))?;
+    }
+    Ok(())
+}
+
 fn resolve(
     repo: &Path,
     template_flag: Option<&str>,
@@ -484,10 +637,11 @@ fn default_project() -> ProjectConfig {
     // through to the global config. LLMConfig::default() has model =
     // "claude-sonnet-4-6", which would wrongly override the global model.
     ProjectConfig {
-        llm: flows_core::models::LLMConfig {
+        llm: LLMConfig {
             model: String::new(),
             ..Default::default()
         },
+        models: Default::default(),
         phases: vec![],
         template: String::new(),
         context: Default::default(),
@@ -775,8 +929,8 @@ fn cmd_run(idea: &str, template: Option<&str>, tui: bool, background: bool) -> R
     let (phases, global, project, template_name) = resolve(&cwd, template)?;
 
     let llm = merge_llm(&global, &project);
-    preflight_llm(&llm)?;
-    let provider = make_provider(&llm);
+    let profiles = merge_profiles(&global, &project);
+    preflight_run(&llm, &profiles, &phases)?;
     let store = Store::new(flows_dir());
     let run_id = uuid::Uuid::new_v4().to_string();
 
@@ -793,7 +947,7 @@ fn cmd_run(idea: &str, template: Option<&str>, tui: bool, background: bool) -> R
             template_name,
             global,
             project,
-            provider,
+            Box::new(default_provider_factory),
             store,
             None,
         )
@@ -810,7 +964,7 @@ fn cmd_run(idea: &str, template: Option<&str>, tui: bool, background: bool) -> R
         &template_name,
         &global,
         &project,
-        provider.as_ref(),
+        &default_provider_factory,
         &Foreground,
         &store,
         None,
@@ -897,8 +1051,6 @@ fn cmd_worker(run_id: &str) -> Result<(), String> {
     let repo = PathBuf::from(std::env::var("FLOWS_REPO").map_err(|_| "FLOWS_REPO not set")?);
 
     let (phases, global, project, template_name) = resolve(&repo, template.as_deref())?;
-    let llm = merge_llm(&global, &project);
-    let provider = make_provider(&llm);
     let store = Store::new(flows_dir());
 
     let waiting = Waiting {
@@ -916,7 +1068,7 @@ fn cmd_worker(run_id: &str) -> Result<(), String> {
         &template_name,
         &global,
         &project,
-        provider.as_ref(),
+        &default_provider_factory,
         &waiting,
         &store,
         None,

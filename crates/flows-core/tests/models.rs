@@ -1,8 +1,91 @@
 //! Ports of the model-relevant cases from the Python test suite (test_models
 //! behavior is exercised via test_config there; these cover the types directly).
 
-use flows_core::models::{resolve_preset, resolve_tools, PhaseType};
+use std::collections::HashMap;
+
+use flows_core::models::{resolve_preset, resolve_profile, resolve_tools, PhaseType};
 use flows_core::{Artifact, LLMConfig, PhaseConfig, ToolsConfig, WebSearchConfig};
+
+fn base() -> LLMConfig {
+    LLMConfig {
+        model: "claude-sonnet-4-6".into(),
+        api_base: String::new(),
+        api_key: "base-key".into(),
+        thinking: Some(false),
+        thinking_budget_tokens: None,
+    }
+}
+
+#[test]
+fn resolve_profile_matches_named_profile() {
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "coder".to_string(),
+        LLMConfig {
+            model: "qwen2.5-coder".into(),
+            api_base: "http://localhost:8080/v1".into(),
+            api_key: "prof-key".into(),
+            thinking: Some(true),
+            thinking_budget_tokens: Some(1024),
+        },
+    );
+    let eff = resolve_profile("coder", &base(), &profiles);
+    assert_eq!(eff.model, "qwen2.5-coder");
+    assert_eq!(eff.api_base, "http://localhost:8080/v1");
+    assert_eq!(eff.api_key, "prof-key");
+    assert_eq!(eff.thinking, Some(true));
+    assert_eq!(eff.thinking_budget_tokens, Some(1024));
+}
+
+#[test]
+fn resolve_profile_falls_back_to_literal_model() {
+    // A selection that names no profile is a literal model on the base endpoint.
+    let eff = resolve_profile("gpt-4o", &base(), &HashMap::new());
+    assert_eq!(eff.model, "gpt-4o");
+    assert_eq!(eff.api_key, "base-key"); // literal keeps base key/endpoint
+    assert_eq!(eff.thinking, Some(false));
+}
+
+#[test]
+fn resolve_profile_empty_uses_base_model() {
+    // Empty selection resolves the base model (which may itself name a profile).
+    let eff = resolve_profile("", &base(), &HashMap::new());
+    assert_eq!(eff.model, "claude-sonnet-4-6");
+}
+
+#[test]
+fn resolve_profile_empty_selection_resolves_base_profile_name() {
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "reasoner".to_string(),
+        LLMConfig {
+            model: "o3".into(),
+            ..LLMConfig::default()
+        },
+    );
+    // base.model is a profile name → empty phase selection routes to it.
+    let mut b = base();
+    b.model = "reasoner".into();
+    let eff = resolve_profile("", &b, &profiles);
+    assert_eq!(eff.model, "o3");
+}
+
+#[test]
+fn resolve_profile_inherits_base_endpoint_when_unset() {
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "big".to_string(),
+        LLMConfig {
+            model: "claude-opus-4-8".into(),
+            ..LLMConfig::default()
+        },
+    );
+    let mut b = base();
+    b.api_base = "https://gw.example/v1".into();
+    let eff = resolve_profile("big", &b, &profiles);
+    // profile set no endpoint → inherits base endpoint
+    assert_eq!(eff.api_base, "https://gw.example/v1");
+}
 
 #[test]
 fn tools_config_defaults_files_on() {
