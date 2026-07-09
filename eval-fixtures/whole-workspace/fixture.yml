@@ -10,6 +10,7 @@
 # First compile is cold in the trial's temp dir — hence the long timeout.
 suite: coder
 size: large
+granularity: flow
 task: >
   This repository is the `flows` Rust workspace. The function
   `parse_context_config` in `crates/flows-core/src/config.rs` is unimplemented

@@ -86,6 +86,11 @@ snapshot_workspace "$FX/whole-workspace"
 stub_fn "$FX/whole-workspace/repo/crates/flows-core/src/config.rs" \
   "pub fn parse_context_config(name: &str)"
 
+echo "→ whole-workspace-phase (1 stub, blank template = phase granularity)"
+snapshot_workspace "$FX/whole-workspace-phase"
+stub_fn "$FX/whole-workspace-phase/repo/crates/flows-core/src/config.rs" \
+  "pub fn parse_context_config(name: &str)"
+
 echo "→ whole-workspace-hard (3 stubs across crates)"
 snapshot_workspace "$FX/whole-workspace-hard"
 stub_fn "$FX/whole-workspace-hard/repo/crates/flows-core/src/config.rs" \

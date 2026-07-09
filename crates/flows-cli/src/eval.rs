@@ -21,7 +21,9 @@ use include_dir::{include_dir, Dir};
 use serde::Deserialize;
 
 use flows_core::config::{merge_llm, merge_profiles, parse_context_config, resolve_llm};
-use flows_core::models::{ContextConfig, GlobalConfig, LLMConfig, PhaseConfig, ProjectConfig};
+use flows_core::models::{
+    ContextConfig, GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig,
+};
 use flows_core::state::Store;
 use flows_runner::runner::{run_pipeline, RunnerCallbacks};
 
@@ -84,6 +86,44 @@ impl Size {
     }
 }
 
+/// How much of the pipeline a fixture exercises. Different granularities answer
+/// different questions and MUST NOT be compared against each other — the report
+/// groups by granularity so they never mix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Granularity {
+    /// The whole pipeline (plan→implement→…): realistic end-to-end success, but
+    /// high variance — context-feature effects are confounded by orchestration.
+    #[default]
+    Flow,
+    /// A single agent phase (one tool loop): where context delivery actually
+    /// lives; the clean A/B unit for context features.
+    Phase,
+    /// A single deterministic turn (no agent loop): the retrieval-quality eval.
+    /// Reserved — implemented by the deterministic retrieval eval, not yet here.
+    Turn,
+}
+impl Granularity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Granularity::Flow => "flow",
+            Granularity::Phase => "phase",
+            Granularity::Turn => "turn",
+        }
+    }
+    fn parse_filter(s: &str) -> Result<Option<Granularity>, String> {
+        match s {
+            "all" | "" => Ok(None),
+            "flow" => Ok(Some(Granularity::Flow)),
+            "phase" => Ok(Some(Granularity::Phase)),
+            "turn" => Ok(Some(Granularity::Turn)),
+            other => Err(format!(
+                "unknown granularity `{other}` (flow|phase|turn|all)"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct FixtureSpec {
     task: String,
@@ -93,6 +133,8 @@ struct FixtureSpec {
     suite: Suite,
     #[serde(default)]
     size: Size,
+    #[serde(default)]
+    granularity: Granularity,
     /// Shell command whose exit 0 == success. Required for coder fixtures.
     #[serde(default)]
     verify: Option<String>,
@@ -128,6 +170,51 @@ fn validate_fixture(name: &str, spec: &FixtureSpec) -> Result<(), String> {
         )),
         Suite::Reasoner if spec.rubric.as_deref().unwrap_or("").trim().is_empty() => Err(format!(
             "fixture `{name}`: reasoner suite requires a `rubric`"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Resolve a fixture's template into its phases (profile routing stripped so the
+/// whole run stays on the pinned model). No repo needed — template resolution
+/// reads the named template, not the fixture repo.
+fn resolve_fixture_phases(template: &str) -> Result<Vec<PhaseConfig>, String> {
+    let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let (phases, _, _, _) = super::resolve(tmp.path(), Some(template))?;
+    Ok(phases
+        .into_iter()
+        .map(|mut p| {
+            p.model = None;
+            p
+        })
+        .collect())
+}
+
+/// Number of agent (LLM) phases in a resolved template.
+fn agent_phase_count(phases: &[PhaseConfig]) -> usize {
+    phases
+        .iter()
+        .filter(|p| matches!(p.phase_type, PhaseType::Agent))
+        .count()
+}
+
+/// Validate a fixture's declared granularity against its resolved phases:
+/// `phase` must be a single agent phase; `turn` is reserved.
+fn validate_granularity(
+    name: &str,
+    gran: Granularity,
+    template: &str,
+    phases: &[PhaseConfig],
+) -> Result<(), String> {
+    match gran {
+        Granularity::Turn => Err(format!(
+            "fixture `{name}`: granularity `turn` not yet supported \
+(deterministic retrieval eval — future)"
+        )),
+        Granularity::Phase if agent_phase_count(phases) != 1 => Err(format!(
+            "fixture `{name}`: granularity `phase` requires exactly one agent phase, \
+but template `{template}` has {}",
+            agent_phase_count(phases)
         )),
         _ => Ok(()),
     }
@@ -239,10 +326,16 @@ fn load_fixtures(fixtures_dir: Option<&str>) -> Result<Vec<Fixture>, String> {
     Ok(fx)
 }
 
-fn filtered(fx: &[Fixture], suite: Option<Suite>, size: Option<Size>) -> Vec<&Fixture> {
+fn filtered(
+    fx: &[Fixture],
+    suite: Option<Suite>,
+    size: Option<Size>,
+    gran: Option<Granularity>,
+) -> Vec<&Fixture> {
     fx.iter()
         .filter(|f| suite.map_or(true, |s| f.spec.suite == s))
         .filter(|f| size.map_or(true, |s| f.spec.size == s))
+        .filter(|f| gran.map_or(true, |g| f.spec.granularity == g))
         .collect()
 }
 
@@ -372,6 +465,7 @@ fn pin_config(
 fn run_trial(
     rt: &tokio::runtime::Runtime,
     fixture: &Fixture,
+    phases: &[PhaseConfig],
     model_label: &str,
     model_llm: &LLMConfig,
     config_name: &str,
@@ -392,6 +486,7 @@ fn run_trial(
         fixture: fixture.name.clone(),
         suite: fixture.spec.suite.as_str().to_string(),
         size: fixture.spec.size.as_str().to_string(),
+        granularity: fixture.spec.granularity.as_str().to_string(),
         verify_pass,
         manual_pass: None,
         manual_score: None,
@@ -409,19 +504,6 @@ fn run_trial(
         Err(e) => return rec(None, 0, 0, 0, 0, Some(format!("setup: {e}"))),
     };
 
-    // Phases from the fixture's template, with profile routing stripped so the
-    // whole pipeline runs on the pinned model.
-    let phases: Vec<PhaseConfig> = match super::resolve(work.path(), Some(&fixture.spec.template)) {
-        Ok((phases, _, _, _)) => phases
-            .into_iter()
-            .map(|mut ph| {
-                ph.model = None;
-                ph
-            })
-            .collect(),
-        Err(e) => return rec(None, 0, 0, 0, 0, Some(format!("template: {e}"))),
-    };
-
     let (global, project) = pin_config(base_global, base_project, model_llm, ctx.clone());
 
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -430,7 +512,7 @@ fn run_trial(
         &run_id,
         &fixture.spec.task,
         work.path(),
-        &phases,
+        phases,
         &fixture.spec.template,
         &global,
         &project,
@@ -460,7 +542,7 @@ fn run_trial(
     // Capture the trial output (phase artifacts + repo diff) BEFORE deleting the
     // run — reasoner tasks produce text artifacts, not repo changes. Save it +
     // task/rubric for later manual review.
-    let output = capture_output(work.path(), store, &run_id, &phases);
+    let output = capture_output(work.path(), store, &run_id, phases);
     let _ = eval_store::save_output(
         flows_dir,
         &trial_id,
@@ -498,17 +580,35 @@ pub fn cmd_run(
     configs: Option<&str>,
     suite: &str,
     size: &str,
+    granularity: &str,
     fixtures_dir: Option<&str>,
     trials: usize,
 ) -> Result<(), String> {
     let suite_f = Suite::parse_filter(suite)?;
     let size_f = Size::parse_filter(size)?;
+    let gran_f = Granularity::parse_filter(granularity)?;
     let trials = trials.max(1);
 
     let fixtures = load_fixtures(fixtures_dir)?;
-    let selected = filtered(&fixtures, suite_f, size_f);
+    let selected = filtered(&fixtures, suite_f, size_f, gran_f);
     if selected.is_empty() {
-        return Err("no fixtures match the suite/size filter".into());
+        return Err("no fixtures match the suite/size/granularity filter".into());
+    }
+
+    // Resolve + validate each fixture's phases once (granularity check happens
+    // here: `phase` must be a single agent phase). Invalid fixtures are dropped
+    // with a message rather than aborting the whole run.
+    let mut prepared: Vec<(&Fixture, Vec<PhaseConfig>)> = Vec::new();
+    for f in &selected {
+        match resolve_fixture_phases(&f.spec.template).and_then(|ph| {
+            validate_granularity(&f.name, f.spec.granularity, &f.spec.template, &ph).map(|_| ph)
+        }) {
+            Ok(ph) => prepared.push((f, ph)),
+            Err(e) => eprintln!("  skip fixture `{}`: {e}", f.name),
+        }
+    }
+    if prepared.is_empty() {
+        return Err("no runnable fixtures (all failed phase/granularity validation)".into());
     }
 
     // Config axis (validate names up front).
@@ -541,17 +641,17 @@ pub fn cmd_run(
     let store = Store::new(&flows_dir);
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
 
-    let total = model_cells.len() * config_ctx.len() * selected.len() * trials;
+    let total = model_cells.len() * config_ctx.len() * prepared.len() * trials;
     println!(
         "Evaluating {} model(s) × {} config(s) × {} fixture(s) × {trials} trial(s) = {total} run(s)\n",
         model_cells.len(),
         config_ctx.len(),
-        selected.len()
+        prepared.len()
     );
 
     for (label, llm) in &model_cells {
         for (cfg_name, ctx) in &config_ctx {
-            for f in &selected {
+            for (f, phases) in &prepared {
                 for i in 0..trials {
                     eprint!(
                         "  {label} | {cfg_name} | {} trial {}/{trials}… ",
@@ -559,7 +659,8 @@ pub fn cmd_run(
                         i + 1
                     );
                     let t = run_trial(
-                        &rt, f, label, llm, cfg_name, ctx, &uglobal, &uproject, &store, &flows_dir,
+                        &rt, f, phases, label, llm, cfg_name, ctx, &uglobal, &uproject, &store,
+                        &flows_dir,
                     );
                     let sig = match t.verify_pass {
                         Some(true) => "pass",
@@ -584,7 +685,10 @@ pub fn cmd_run(
         "\nStored to {}. Run `flows eval report` to compare.",
         eval_store::store_dir(&flows_dir).display()
     );
-    if selected.iter().any(|f| f.spec.suite == Suite::Reasoner) {
+    if prepared
+        .iter()
+        .any(|(f, _)| f.spec.suite == Suite::Reasoner)
+    {
         println!("Reasoner trials need grading: `flows eval review`.");
     }
     Ok(())
@@ -608,11 +712,17 @@ fn split_csv(s: Option<&str>) -> Option<Vec<String>> {
 // `eval list`
 // ---------------------------------------------------------------------------
 
-pub fn cmd_list(fixtures_dir: Option<&str>, suite: &str, size: &str) -> Result<(), String> {
+pub fn cmd_list(
+    fixtures_dir: Option<&str>,
+    suite: &str,
+    size: &str,
+    granularity: &str,
+) -> Result<(), String> {
     let suite_f = Suite::parse_filter(suite)?;
     let size_f = Size::parse_filter(size)?;
+    let gran_f = Granularity::parse_filter(granularity)?;
     let fixtures = load_fixtures(fixtures_dir)?;
-    let selected = filtered(&fixtures, suite_f, size_f);
+    let selected = filtered(&fixtures, suite_f, size_f, gran_f);
     println!("{} fixture(s):", selected.len());
     for f in &selected {
         // Show only the first line of the task, clipped, so multi-line tasks
@@ -624,11 +734,12 @@ pub fn cmd_list(fixtures_dir: Option<&str>, suite: &str, size: &str) -> Result<(
             .find(|l| !l.trim().is_empty())
             .unwrap_or("");
         println!(
-            "  {:<20} [{:<8} {:<6}] {}",
+            "  {:<20} [{:<8} {:<6} {:<5}] {}",
             f.name,
             f.spec.suite.as_str(),
             f.spec.size.as_str(),
-            trunc(summary.trim(), 80)
+            f.spec.granularity.as_str(),
+            trunc(summary.trim(), 72)
         );
     }
     Ok(())
@@ -756,15 +867,24 @@ fn stddev(v: &[f64]) -> f64 {
     (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (v.len() - 1) as f64).sqrt()
 }
 
-/// Aggregate records into groups keyed by (model, config, suite, size).
-fn aggregate(records: &[TrialRecord]) -> Vec<((String, String, String, String), GroupStat)> {
-    let mut map: HashMap<(String, String, String, String), GroupStat> = HashMap::new();
+type GroupKey = (String, String, String, String, String);
+
+/// Aggregate records into groups keyed by (model, config, suite, size,
+/// granularity). Granularity is part of the key so levels never mix.
+fn aggregate(records: &[TrialRecord]) -> Vec<(GroupKey, GroupStat)> {
+    let mut map: HashMap<GroupKey, GroupStat> = HashMap::new();
     for r in records {
+        let gran = if r.granularity.is_empty() {
+            "flow".to_string() // older records predate the field
+        } else {
+            r.granularity.clone()
+        };
         let key = (
             r.model.clone(),
             r.config.clone(),
             r.suite.clone(),
             r.size.clone(),
+            gran,
         );
         let g = map.entry(key).or_default();
         g.n += 1;
@@ -793,14 +913,21 @@ fn ktok(n: f64) -> String {
     }
 }
 
-pub fn cmd_report(model: Option<&str>, config: Option<&str>, suite: &str) -> Result<(), String> {
+pub fn cmd_report(
+    model: Option<&str>,
+    config: Option<&str>,
+    suite: &str,
+    granularity: &str,
+) -> Result<(), String> {
     let suite_f = Suite::parse_filter(suite)?;
+    let gran_f = Granularity::parse_filter(granularity)?;
     let flows_dir = super::flows_dir();
     let records: Vec<TrialRecord> = eval_store::load(&flows_dir)
         .into_iter()
         .filter(|r| model.map_or(true, |m| r.model == m))
         .filter(|r| config.map_or(true, |c| r.config == c))
         .filter(|r| suite_f.map_or(true, |s| r.suite == s.as_str()))
+        .filter(|r| gran_f.map_or(true, |g| r.granularity == g.as_str()))
         .collect();
     if records.is_empty() {
         println!("No results in the store (run `flows eval run` first).");
@@ -809,10 +936,20 @@ pub fn cmd_report(model: Option<&str>, config: Option<&str>, suite: &str) -> Res
 
     let rows = aggregate(&records);
     println!(
-        "{:<16} {:<10} {:<8} {:<6} {:>9} {:>9} {:>13} {:>8} {:>7} {:>3}",
-        "model", "config", "suite", "size", "pass", "in_tok", "peak_ctx", "cost", "rounds", "n"
+        "{:<16} {:<10} {:<8} {:<6} {:<6} {:>9} {:>9} {:>13} {:>8} {:>7} {:>3}",
+        "model",
+        "config",
+        "suite",
+        "size",
+        "gran",
+        "pass",
+        "in_tok",
+        "peak_ctx",
+        "cost",
+        "rounds",
+        "n"
     );
-    for ((m, c, su, sz), g) in &rows {
+    for ((m, c, su, sz, gr), g) in &rows {
         let pass = if g.graded == 0 {
             "ungraded".to_string()
         } else {
@@ -824,11 +961,12 @@ pub fn cmd_report(model: Option<&str>, config: Option<&str>, suite: &str) -> Res
             )
         };
         println!(
-            "{:<16} {:<10} {:<8} {:<6} {:>9} {:>9} {:>13} {:>8} {:>7.1} {:>3}",
+            "{:<16} {:<10} {:<8} {:<6} {:<6} {:>9} {:>9} {:>13} {:>8} {:>7.1} {:>3}",
             trunc(m, 16),
             trunc(c, 10),
             su,
             sz,
+            gr,
             pass,
             ktok(mean(&g.in_tok)),
             format!("{}±{}", ktok(mean(&g.peak)), ktok(stddev(&g.peak))),
@@ -865,6 +1003,7 @@ mod tests {
             fixture: "f".into(),
             suite: suite.into(),
             size: "small".into(),
+            granularity: "flow".into(),
             verify_pass: verify,
             manual_pass: manual,
             manual_score: None,
@@ -894,6 +1033,7 @@ mod tests {
             template: "blank".into(),
             suite: Suite::Coder,
             size: Size::Small,
+            granularity: Granularity::Flow,
             verify: None,
             rubric: None,
             relevant: vec![],
@@ -909,11 +1049,33 @@ mod tests {
         assert!(validate_fixture("r", &reasoner).is_err());
     }
 
+    fn agent(name: &str) -> PhaseConfig {
+        PhaseConfig::new(name)
+    }
+
+    #[test]
+    fn granularity_phase_requires_single_agent_phase() {
+        let one = vec![agent("run")];
+        let two = vec![agent("plan"), agent("implement")];
+        // phase → ok with one agent phase, err with two.
+        assert!(validate_granularity("f", Granularity::Phase, "blank", &one).is_ok());
+        assert!(validate_granularity("f", Granularity::Phase, "feature", &two).is_err());
+        // flow → any count ok.
+        assert!(validate_granularity("f", Granularity::Flow, "feature", &two).is_ok());
+        // turn → reserved, always err.
+        assert!(validate_granularity("f", Granularity::Turn, "blank", &one).is_err());
+    }
+
     #[test]
     fn unknown_suite_size_rejected() {
         assert!(Suite::parse_filter("bogus").is_err());
         assert!(Size::parse_filter("huge").is_err());
         assert!(Suite::parse_filter("all").unwrap().is_none());
+        assert!(Granularity::parse_filter("bogus").is_err());
+        assert_eq!(
+            Granularity::parse_filter("phase").unwrap(),
+            Some(Granularity::Phase)
+        );
     }
 
     #[test]

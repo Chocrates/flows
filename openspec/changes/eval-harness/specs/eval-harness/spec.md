@@ -45,6 +45,30 @@ by size.
 - **WHEN** the harness is run with a suite and/or size filter
 - **THEN** only fixtures matching the filter are evaluated.
 
+### Requirement: Evaluation granularity
+
+The system SHALL let each fixture declare an evaluation granularity — `flow` (the
+whole pipeline), `phase` (a single agent phase), or `turn` (reserved for the
+deterministic retrieval eval) — SHALL validate a `phase` fixture's template
+resolves to exactly one agent phase, and SHALL treat granularity as part of the
+report grouping so results at different granularities are never aggregated
+together.
+
+#### Scenario: Phase granularity requires a single agent phase
+
+- **WHEN** a fixture declares `granularity: phase` but its template resolves to more than one agent phase
+- **THEN** the fixture is rejected with an error rather than run.
+
+#### Scenario: Granularities are not mixed in the report
+
+- **WHEN** the store contains trials at more than one granularity
+- **THEN** the report groups by granularity so `flow` and `phase` results are never combined into one row.
+
+#### Scenario: Filtering by granularity
+
+- **WHEN** the harness is run or reported with a granularity filter
+- **THEN** only trials at that granularity are evaluated or shown.
+
 ### Requirement: Model × configuration evaluation matrix
 
 The system SHALL provide `flows eval run` that evaluates a set of models against a

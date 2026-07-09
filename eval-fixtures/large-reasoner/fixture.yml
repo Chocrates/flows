@@ -5,6 +5,7 @@
 #   flows eval run --fixtures ./eval-fixtures --size large --suite reasoner
 suite: reasoner
 size: large
+granularity: phase
 task: >
   In this `flows` workspace, agent phases can run on different models/endpoints
   (per-phase provider routing). Trace how the runner routes and caches providers:

@@ -131,6 +131,9 @@ enum EvalCmd {
         /// Fixture size filter: small | medium | large | all.
         #[arg(long, default_value = "all")]
         size: String,
+        /// Granularity filter: flow | phase | turn | all.
+        #[arg(long, default_value = "all")]
+        granularity: String,
         /// Directory of fixture folders (each with fixture.yml + repo/). Omit for built-ins.
         #[arg(long)]
         fixtures: Option<String>,
@@ -146,6 +149,8 @@ enum EvalCmd {
         suite: String,
         #[arg(long, default_value = "all")]
         size: String,
+        #[arg(long, default_value = "all")]
+        granularity: String,
     },
     /// Manually grade ungraded trials (the pass signal for reasoner tasks).
     Review {
@@ -162,6 +167,8 @@ enum EvalCmd {
         config: Option<String>,
         #[arg(long, default_value = "all")]
         suite: String,
+        #[arg(long, default_value = "all")]
+        granularity: String,
     },
 }
 
@@ -245,6 +252,7 @@ fn main() -> ExitCode {
                 configs,
                 suite,
                 size,
+                granularity,
                 fixtures,
                 trials,
             } => eval::cmd_run(
@@ -252,6 +260,7 @@ fn main() -> ExitCode {
                 configs.as_deref(),
                 &suite,
                 &size,
+                &granularity,
                 fixtures.as_deref(),
                 trials,
             ),
@@ -259,13 +268,15 @@ fn main() -> ExitCode {
                 fixtures,
                 suite,
                 size,
-            } => eval::cmd_list(fixtures.as_deref(), &suite, &size),
+                granularity,
+            } => eval::cmd_list(fixtures.as_deref(), &suite, &size, &granularity),
             EvalCmd::Review { suite, model } => eval::cmd_review(&suite, model.as_deref()),
             EvalCmd::Report {
                 model,
                 config,
                 suite,
-            } => eval::cmd_report(model.as_deref(), config.as_deref(), &suite),
+                granularity,
+            } => eval::cmd_report(model.as_deref(), config.as_deref(), &suite, &granularity),
         },
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "flows", &mut std::io::stdout());

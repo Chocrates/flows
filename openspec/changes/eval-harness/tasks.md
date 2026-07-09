@@ -28,6 +28,13 @@
 - [x] 5.2 `report`: read store, fold by trial id; success source per suite (coder→verify_pass, reasoner→manual_pass, None→ungraded count); print table grouped by (model, config, suite, size) with mean ± spread; `--model`/`--config` filters; no model calls.
 - [x] 5.3 Tests: report aggregation (mean + spread) and success-source-by-suite on synthetic records.
 
+## 7. Evaluation granularity
+
+- [x] 7.1 Add a `Granularity` enum (flow|phase|turn, default flow) + fixture `granularity` field; `turn` reserved (errors as not-yet-supported).
+- [x] 7.2 Resolve each fixture's phases once per run and validate: `phase` requires exactly one agent phase. Invalid fixtures skipped with a message.
+- [x] 7.3 Record granularity per trial; make it part of the report grouping key so levels never mix; add a `--granularity` filter to run/list/report. Tests.
+- [x] 7.4 Tag all fixtures (blank template → phase, feature template → flow); add `whole-workspace-phase` (blank/phase) for a flow-vs-phase A/B on the same task.
+
 ## 6. Docs & wrap-up
 
 - [x] 6.1 README `flows eval` section: run/list/review/report, fixture v2 format (suite/size/rubric/relevant), configs, the model axis.

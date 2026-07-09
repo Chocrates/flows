@@ -5,6 +5,7 @@
 #   flows eval run --fixtures ./eval-fixtures --size medium --suite reasoner
 suite: reasoner
 size: medium
+granularity: phase
 task: >
   In this `flows-core` crate, model selection is resolved by `resolve_profile`
   (crates/flows-core/src/models.rs), `resolve_llm` and `dialect_env_key`

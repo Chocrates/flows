@@ -25,6 +25,10 @@ pub struct TrialRecord {
     pub fixture: String,
     pub suite: String,
     pub size: String,
+    /// flow | phase | turn — the pipeline scope this trial exercised. Report
+    /// groups by it so granularities are never compared against each other.
+    #[serde(default)]
+    pub granularity: String,
     /// Shell-verifier outcome (coder suite). `None` when there is no verifier.
     pub verify_pass: Option<bool>,
     /// Human grade (reasoner suite, or an optional coder override). `None` = ungraded.
@@ -148,6 +152,7 @@ mod tests {
             fixture: "hello".into(),
             suite: "coder".into(),
             size: "small".into(),
+            granularity: "flow".into(),
             verify_pass: Some(true),
             manual_pass: manual,
             manual_score: manual.map(|_| 4),

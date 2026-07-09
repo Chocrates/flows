@@ -3,6 +3,7 @@
 # own fixtures (add a repo/ dir + fixture.yml) to benchmark real tasks.
 suite: coder
 size: medium
+granularity: phase
 task: "Create a file named greeting.txt in the repository root containing exactly the text: hello world (a single line, no trailing newline required)."
 template: blank
 verify: "test \"$(cat greeting.txt 2>/dev/null)\" = 'hello world'"

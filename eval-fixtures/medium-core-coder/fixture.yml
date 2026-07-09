@@ -5,6 +5,7 @@
 #   flows eval run --fixtures ./eval-fixtures --size medium --suite coder
 suite: coder
 size: medium
+granularity: flow
 task: >
   This crate is `flows-core`. The function `resolve_profile` in
   crates/flows-core/src/models.rs is unimplemented (`todo!()`). Implement it so the

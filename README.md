@@ -246,6 +246,7 @@ claude-opus-4-8  baseline   coder    medium  100% 3/3     12.0k       13.1k±0.4
 ```yaml
 suite: coder            # coder | reasoner
 size:  small            # small | medium | large
+granularity: phase      # flow | phase  (turn reserved)
 task:  "…"
 template: blank
 verify: "cargo test"    # required for coder: exit 0 == success
@@ -254,6 +255,21 @@ rubric: |               # required for reasoner: shown during `eval review`
   - fix actionable / idiomatic?
 timeout_secs: 600
 ```
+
+**Granularity** picks how much of the pipeline a fixture exercises — and the report
+groups by it so levels are never compared:
+
+- `flow` — the whole pipeline (a multi-phase `template` like `feature`). Realistic
+  end-to-end success, but high variance: a context feature's effect is confounded
+  by planning, loops, and test phases.
+- `phase` — a **single agent phase** (a one-agent-phase `template` like `blank`).
+  This is where context delivery lives (the agent tool loop), so it's the clean
+  A/B unit for context features — one implement phase, toggle `+search`, measure
+  the delta. A `phase` fixture whose template has more than one agent phase is
+  rejected.
+- `turn` — reserved for the deterministic retrieval eval (recall@k, no model).
+
+Filter any command with `--granularity flow|phase|all`.
 
 - **coder** fixtures are scored by the shell `verify` command (exit 0 = pass).
 - **reasoner** fixtures have no meaningful shell check — success is a **manual

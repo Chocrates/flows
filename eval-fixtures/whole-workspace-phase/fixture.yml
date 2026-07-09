@@ -1,0 +1,24 @@
+# Large coder fixture at PHASE granularity: same repo + stub as `whole-workspace`,
+# but a single-agent-phase template (blank) instead of the full pipeline. This is
+# the clean A/B unit for context features — one implement phase (one tool loop) on
+# a big repo, so a +search vs baseline delta isn't confounded by orchestration.
+#
+#   flows eval run --fixtures ./eval-fixtures --granularity phase --suite coder
+suite: coder
+size: large
+granularity: phase
+task: >
+  This repository is the `flows` Rust workspace. The function
+  `parse_context_config` in `crates/flows-core/src/config.rs` is unimplemented
+  (its body is `todo!()`). Implement it so the existing `context_config_*` tests in
+  crates/flows-core/tests/config.rs pass. Per its doc comment: it maps a
+  context-config name to a ContextConfig — `baseline`/empty = all flags off,
+  `all` = all on, or `+token` segments (`+search`, `+range`, `+slim`, `+map`,
+  `+budget`, `+rag`) combined with `+` turn on exactly those; an unknown token is
+  an error. Do not modify the tests.
+template: blank
+verify: "cargo test -p flows-core context_config"
+timeout_secs: 1800
+relevant:
+  - crates/flows-core/src/config.rs
+  - "parse_context_config"

@@ -5,6 +5,7 @@
 #   flows eval run --fixtures ./eval-fixtures --size large --suite coder
 suite: coder
 size: large
+granularity: flow
 task: >
   This repository is the `flows` Rust workspace. Three functions have been
   replaced with `todo!()` and must be reimplemented so their existing tests pass:
