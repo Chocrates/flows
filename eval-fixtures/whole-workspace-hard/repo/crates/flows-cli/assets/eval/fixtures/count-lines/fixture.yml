@@ -1,8 +1,0 @@
-# A small coder fixture: read a file, write a derived file. Toolchain-free
-# (just sh + coreutils), so it runs anywhere.
-suite: coder
-size: small
-task: "Create a file named lines.txt in the repository root whose only contents are the number of lines in notes.txt (as a decimal integer, no other text)."
-template: blank
-verify: "test \"$(cat lines.txt 2>/dev/null | tr -d '[:space:]')\" = 3"
-timeout_secs: 600
