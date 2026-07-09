@@ -1,0 +1,31 @@
+# Large reasoner fixture: the whole `flows` workspace, code unchanged. No shell
+# verifier — success is a manual grade against the rubric (`flows eval review`).
+# Stresses a model's ability to trace a real feature across a big codebase.
+#
+#   flows eval run --fixtures ./eval-fixtures --size large --suite reasoner
+suite: reasoner
+size: large
+task: >
+  In this `flows` workspace, agent phases can run on different models/endpoints
+  (per-phase provider routing). Trace how the runner routes and caches providers:
+  start at `run_pipeline` in crates/flows-runner/src/runner.rs, through the `Ctx`
+  provider cache and `provider_for` / `resolve_phase_llm`. Explain what the
+  provider cache is keyed by and why, why providers are stored as `Arc<dyn
+  Provider>`, and how a single-model run stays unaffected. Reference real types
+  and functions.
+template: blank
+rubric: |
+  - Identifies the cache key as (model + api_base + api_key) — distinct endpoints
+    /keys get distinct providers, same-config phases share one.
+  - Explains Arc<dyn Provider>: a provider clone must outlive the mutex guard /
+    survive across await points during the async LLM call.
+  - Notes per-phase resolution via resolve_phase_llm (profile/literal) feeding
+    provider_for, built by the injected provider factory.
+  - Explains the single-model path is just one cache entry (baseline unchanged).
+  - Grounded in the real code (Ctx, provider_for, resolve_phase_llm), not generic.
+timeout_secs: 1200
+relevant:
+  - crates/flows-runner/src/runner.rs
+  - "provider_for"
+  - "resolve_phase_llm"
+  - "Ctx"

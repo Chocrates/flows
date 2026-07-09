@@ -1,0 +1,78 @@
+# flows template: feature
+# Add a feature to an existing codebase.
+# The implement/review agents run the project's own build/test via bash — there's
+# no universal lint/test step. Run `flows init` to generate a project-specific
+# .flows.yml with concrete lint/test commands for your stack.
+template: feature
+
+llm:
+  model: claude-sonnet-4-6
+  # api_key: ${ANTHROPIC_API_KEY}
+
+phases:
+  - name: plan
+    type: agent
+    tools: research_ro
+    max_clarification_rounds: 3
+
+  - name: implement
+    type: agent
+    tools:
+      files: true
+      bash:
+        allowed:
+          - "make*"
+          - "cargo*"
+          - "npm*"
+          - "yarn*"
+          - "pnpm*"
+          - "go*"
+          - "python -m*"
+          - "pytest*"
+          - "uv*"
+          - "ruff*"
+          - "rm*"
+    on_failure: stop
+    max_tool_rounds: 40
+
+  # @auto resolves the command in the runner (no LLM): a `make lint`/`make test`
+  # target if present, else the language's tool (cargo/pytest/npm/go/…). If no
+  # tool can be detected the run stops (an environment problem, not a retry).
+  - name: lint
+    type: script
+    command: "@auto:lint"
+    on_failure: retry:implement
+
+  - name: test
+    type: script
+    command: "@auto:test"
+    on_failure: retry:implement
+
+  - name: review
+    type: agent
+    tools:
+      files: true
+      bash:
+        allowed:
+          - "make*"
+          - "cargo*"
+          - "npm*"
+          - "go*"
+          - "python -m*"
+          - "pytest*"
+    on_failure: stop
+    loop_back_to: implement
+    loop_condition: "content.get('verdict') not in ('approved', 'approved_with_suggestions')"
+    max_loop_iterations: 3
+
+  - name: approve
+    type: human
+    instructions: "Review the implementation. Type feedback to request changes, or press Enter to accept."
+    loop_back_to: implement
+    loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'y', 'yes', 'lgtm', 'approve', 'approved')"
+    max_loop_iterations: 5
+
+  - name: commit
+    type: script
+    command: "git add -A && git commit -m 'feat: {{ idea[:60] }}'"
+    on_failure: continue

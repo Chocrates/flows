@@ -1,0 +1,265 @@
+//! Provider trait + the Anthropic HTTP client (the only network piece).
+
+use async_trait::async_trait;
+use futures_util::StreamExt;
+use serde_json::Value;
+
+use flows_core::models::LLMConfig;
+
+use crate::anthropic;
+use crate::stream::Accumulator;
+use crate::types::{Completion, CompletionRequest, LlmError};
+
+/// Callback for streamed text/reasoning deltas.
+pub type Emit<'a> = &'a (dyn Fn(&str) + Send + Sync);
+
+#[async_trait]
+pub trait Provider: Send + Sync {
+    async fn complete(&self, req: &CompletionRequest) -> Result<Completion, LlmError>;
+
+    /// Streaming variant. Default falls back to `complete` (no token deltas), so
+    /// non-streaming providers and mocks work unchanged.
+    async fn complete_streaming(
+        &self,
+        req: &CompletionRequest,
+        _on_token: Emit<'_>,
+        _on_thinking: Emit<'_>,
+    ) -> Result<Completion, LlmError> {
+        self.complete(req).await
+    }
+}
+
+pub struct AnthropicProvider {
+    api_key: String,
+    api_base: String,
+    client: reqwest::Client,
+}
+
+impl AnthropicProvider {
+    pub fn new(api_key: impl Into<String>, api_base: Option<&str>) -> Self {
+        let base = api_base
+            .filter(|s| !s.is_empty())
+            .unwrap_or("https://api.anthropic.com")
+            .trim_end_matches('/')
+            .to_string();
+        Self {
+            api_key: api_key.into(),
+            api_base: base,
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for AnthropicProvider {
+    async fn complete(&self, req: &CompletionRequest) -> Result<Completion, LlmError> {
+        let body = anthropic::build_body(req);
+        let url = format!("{}/v1/messages", self.api_base);
+        let resp = self
+            .client
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+        if !status.is_success() {
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        let v: Value = serde_json::from_str(&text).map_err(|e| LlmError::Parse(e.to_string()))?;
+        anthropic::parse_response(&v)
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: &CompletionRequest,
+        on_token: Emit<'_>,
+        on_thinking: Emit<'_>,
+    ) -> Result<Completion, LlmError> {
+        let mut body = anthropic::build_body(req);
+        body.as_object_mut()
+            .unwrap()
+            .insert("stream".into(), Value::Bool(true));
+        let url = format!("{}/v1/messages", self.api_base);
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Api { status, body });
+        }
+
+        // Read the SSE byte stream, split into events on blank lines, feed the
+        // `data:` JSON of each into the accumulator.
+        let mut acc = Accumulator::new();
+        let mut buf = String::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| LlmError::Http(e.to_string()))?;
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(pos) = buf.find("\n\n") {
+                let event_block: String = buf.drain(..pos + 2).collect();
+                for line in event_block.lines() {
+                    if let Some(data) = line.strip_prefix("data:") {
+                        let data = data.trim();
+                        if data.is_empty() || data == "[DONE]" {
+                            continue;
+                        }
+                        if let Ok(ev) = serde_json::from_str::<Value>(data) {
+                            acc.process(&ev, on_token, on_thinking);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(acc.finish())
+    }
+}
+
+/// OpenAI-compatible Chat Completions client (OpenAI, local servers, gateways).
+pub struct OpenAiProvider {
+    api_key: String,
+    api_base: String,
+    client: reqwest::Client,
+}
+
+impl OpenAiProvider {
+    pub fn new(api_key: impl Into<String>, api_base: Option<&str>) -> Self {
+        let base = api_base
+            .filter(|s| !s.is_empty())
+            .unwrap_or("https://api.openai.com/v1")
+            .trim_end_matches('/')
+            .to_string();
+        Self {
+            api_key: api_key.into(),
+            api_base: base,
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for OpenAiProvider {
+    async fn complete(&self, req: &CompletionRequest) -> Result<Completion, LlmError> {
+        let body = crate::openai::build_body(req);
+        let url = format!("{}/chat/completions", self.api_base);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+        if !status.is_success() {
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+        let v: Value = serde_json::from_str(&text).map_err(|e| LlmError::Parse(e.to_string()))?;
+        crate::openai::parse_response(&v)
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: &CompletionRequest,
+        on_token: Emit<'_>,
+        on_thinking: Emit<'_>,
+    ) -> Result<Completion, LlmError> {
+        let mut body = crate::openai::build_body(req);
+        let obj = body.as_object_mut().unwrap();
+        obj.insert("stream".into(), Value::Bool(true));
+        // Ask for usage in the final chunk (OpenAI honors; llama.cpp/others ignore).
+        obj.insert(
+            "stream_options".into(),
+            serde_json::json!({"include_usage": true}),
+        );
+        let url = format!("{}/chat/completions", self.api_base);
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Api { status, body });
+        }
+
+        let mut acc = crate::openai::StreamAccumulator::new();
+        let mut buf = String::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| LlmError::Http(e.to_string()))?;
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(pos) = buf.find("\n\n") {
+                let block: String = buf.drain(..pos + 2).collect();
+                for line in block.lines() {
+                    if let Some(data) = line.strip_prefix("data:") {
+                        let data = data.trim();
+                        if data.is_empty() || data == "[DONE]" {
+                            continue;
+                        }
+                        if let Ok(ev) = serde_json::from_str::<Value>(data) {
+                            acc.process(&ev, on_token, on_thinking);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(acc.finish())
+    }
+}
+
+fn is_anthropic_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.contains("claude") || m.starts_with("anthropic/")
+}
+
+/// Pick a provider for the configured model: Anthropic for claude, otherwise an
+/// OpenAI-compatible endpoint (respecting `api_base` for local/gateway servers).
+pub fn make_provider(llm: &LLMConfig) -> Box<dyn Provider> {
+    let api_base = if llm.api_base.is_empty() {
+        None
+    } else {
+        Some(llm.api_base.as_str())
+    };
+    if is_anthropic_model(&llm.model) {
+        Box::new(AnthropicProvider::new(llm.api_key.clone(), api_base))
+    } else {
+        Box::new(OpenAiProvider::new(llm.api_key.clone(), api_base))
+    }
+}

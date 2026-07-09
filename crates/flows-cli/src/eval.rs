@@ -615,12 +615,20 @@ pub fn cmd_list(fixtures_dir: Option<&str>, suite: &str, size: &str) -> Result<(
     let selected = filtered(&fixtures, suite_f, size_f);
     println!("{} fixture(s):", selected.len());
     for f in &selected {
+        // Show only the first line of the task, clipped, so multi-line tasks
+        // don't wreck the listing.
+        let summary = f
+            .spec
+            .task
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
         println!(
             "  {:<20} [{:<8} {:<6}] {}",
             f.name,
             f.spec.suite.as_str(),
             f.spec.size.as_str(),
-            f.spec.task
+            trunc(summary.trim(), 80)
         );
     }
     Ok(())

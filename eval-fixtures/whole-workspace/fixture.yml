@@ -1,0 +1,37 @@
+# Large coder fixture: the whole `flows` workspace (6-crate Rust monorepo, source
+# only). The agent must navigate a real, big repo, find one unimplemented
+# function, and implement it to pass the existing tests. Stresses context
+# delivery — the model has to locate the target amid ~150 files without drowning.
+#
+# On-disk only (too big to embed). Run with:
+#   flows eval run --fixtures ./eval-fixtures --size large
+#
+# Verify runs on the host (has network + ~/.cargo cache), so cargo compiles fine.
+# First compile is cold in the trial's temp dir — hence the long timeout.
+suite: coder
+size: large
+task: >
+  This repository is the `flows` Rust workspace. The function
+  `parse_context_config` in `crates/flows-core/src/config.rs` is unimplemented
+  (its body is `todo!()`). Implement it so the existing tests pass.
+
+  Per its doc comment: it maps a context-configuration name to a `ContextConfig`
+  (feature flags only; leave `exclude` at its default). Grammar:
+    - `baseline` or an empty string  -> every feature flag off
+    - `all`                          -> every feature flag on
+    - one or more `+token` segments joined by `+` (e.g. `+search+map`) -> turn on
+      exactly those flags. Tokens: `search`, `range`, `slim`, `map`, `budget`,
+      `rag` (mapping to `search_tool`, `range_reads`, `slim_tree`, `repo_map`,
+      `budgeting`, `retrieval`).
+    - any unrecognized token -> return an `Err` naming it.
+
+  The authoritative behavior is the `context_config_*` tests in
+  `crates/flows-core/tests/config.rs`. Do not modify the tests.
+template: feature
+verify: "cargo test -p flows-core context_config"
+timeout_secs: 1800
+relevant:
+  - crates/flows-core/src/config.rs
+  - crates/flows-core/src/models.rs
+  - "parse_context_config"
+  - "ContextConfig"

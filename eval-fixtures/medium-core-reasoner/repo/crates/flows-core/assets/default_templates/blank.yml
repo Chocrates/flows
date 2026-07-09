@@ -1,0 +1,12 @@
+# flows template: blank
+# Single agent phase. Supply your own prompt via the 'prompt' field or .flows.yml.
+template: blank
+
+llm:
+  model: claude-sonnet-4-6
+  # api_key: ${ANTHROPIC_API_KEY}
+
+phases:
+  - name: run
+    type: agent
+    tools: files

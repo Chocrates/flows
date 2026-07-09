@@ -1,0 +1,10 @@
+# A minimal, toolchain-free eval fixture: the agent must create a file with
+# exact contents. Verifiable anywhere (just `sh` + coreutils). Replace with your
+# own fixtures (add a repo/ dir + fixture.yml) to benchmark real tasks.
+suite: coder
+size: medium
+task: "Create a file named greeting.txt in the repository root containing exactly the text: hello world (a single line, no trailing newline required)."
+template: blank
+verify: "test \"$(cat greeting.txt 2>/dev/null)\" = 'hello world'"
+timeout_secs: 600
+# relevant: []   # (retrieval eval, later) files/symbols a good context should surface

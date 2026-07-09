@@ -1,0 +1,30 @@
+# Large coder fixture, HARD: the whole `flows` workspace with THREE functions
+# stubbed to todo!() across three different crates. The agent must locate and
+# reimplement all three (cross-crate navigation) to make the verifier pass.
+#
+#   flows eval run --fixtures ./eval-fixtures --size large --suite coder
+suite: coder
+size: large
+task: >
+  This repository is the `flows` Rust workspace. Three functions have been
+  replaced with `todo!()` and must be reimplemented so their existing tests pass:
+    1. `parse_context_config` in crates/flows-core/src/config.rs — maps a context
+       config name to a ContextConfig (see its doc comment + the `context_config_*`
+       tests in crates/flows-core/tests/config.rs).
+    2. `eval_loop_condition` in crates/flows-runner/src/runner.rs — evaluates a
+       loop-back condition expression against a JSON value (see the
+       `loop_condition_*` tests in crates/flows-runner/tests/runner.rs).
+    3. `preflight_llm` in crates/flows-cli/src/main.rs — validates an LLMConfig has
+       a model and an endpoint/key (see the `preflight_tests` in that file).
+  Read each function's doc comment and tests to recover the intended behavior.
+  Do not modify any tests.
+template: feature
+verify: "cargo test -p flows-core context_config && cargo test -p flows-runner loop_condition && cargo test -p flows-cli preflight"
+timeout_secs: 2400
+relevant:
+  - crates/flows-core/src/config.rs
+  - crates/flows-runner/src/runner.rs
+  - crates/flows-cli/src/main.rs
+  - "parse_context_config"
+  - "eval_loop_condition"
+  - "preflight_llm"

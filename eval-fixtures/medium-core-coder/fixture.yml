@@ -1,0 +1,24 @@
+# Medium coder fixture: a single-crate slice (flows-core source only, in a trimmed
+# workspace) with one function stubbed to todo!(). Smaller + faster to compile than
+# the whole-workspace fixtures, but still real multi-file navigation.
+#
+#   flows eval run --fixtures ./eval-fixtures --size medium --suite coder
+suite: coder
+size: medium
+task: >
+  This crate is `flows-core`. The function `resolve_profile` in
+  crates/flows-core/src/models.rs is unimplemented (`todo!()`). Implement it so the
+  existing tests pass. Per its doc comment: given a selection string, a base
+  LLMConfig, and a map of named profiles, it returns the effective LLMConfig — an
+  empty selection uses the base model; a selection that names a profile merges that
+  profile over the base (profile fields win when set, otherwise inherit the base);
+  a selection that is not a profile name is treated as a literal model on the base
+  endpoint. The authoritative behavior is the `resolve_profile_*` tests in
+  crates/flows-core/tests/models.rs. Do not modify the tests.
+template: feature
+verify: "cargo test -p flows-core resolve_profile"
+timeout_secs: 1200
+relevant:
+  - crates/flows-core/src/models.rs
+  - "resolve_profile"
+  - "LLMConfig"

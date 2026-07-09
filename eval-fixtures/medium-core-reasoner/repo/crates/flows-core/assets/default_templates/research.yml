@@ -1,0 +1,33 @@
+# flows template: research
+# Research a topic and produce a written report.
+# synthesize loops back to gather when coverage gaps are detected.
+# approve loops back to report on revision feedback.
+template: research
+
+llm:
+  model: claude-sonnet-4-6
+  # api_key: ${ANTHROPIC_API_KEY}
+
+phases:
+  - name: gather
+    type: agent
+    tools: research
+    max_clarification_rounds: 2
+
+  - name: synthesize
+    type: agent
+    tools: files
+    loop_back_to: gather
+    loop_condition: "content.get('needs_more_sources') == True"
+    max_loop_iterations: 2
+
+  - name: report
+    type: agent
+    tools: files
+
+  - name: approve
+    type: human
+    instructions: "Review the report. Type feedback to revise, or press Enter to accept."
+    loop_back_to: report
+    loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'y', 'yes', 'lgtm', 'approve', 'approved')"
+    max_loop_iterations: 3

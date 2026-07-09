@@ -11,3 +11,6 @@ infra/k8s/langfuse/secrets.yaml
 
 # Storage
 .flows-cache/
+
+# Build artifacts generated when running on-disk eval fixtures
+eval-fixtures/**/repo/target/

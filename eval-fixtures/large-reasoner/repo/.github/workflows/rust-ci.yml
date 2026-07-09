@@ -1,0 +1,38 @@
+name: rust-ci
+
+on:
+  push:
+    paths: ["crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/rust-ci.yml"]
+  pull_request:
+    paths: ["crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/rust-ci.yml"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all
+        # bwrap sandbox tests self-skip when unprivileged user namespaces are
+        # unavailable; the PTY test uses the runner's own PTY.

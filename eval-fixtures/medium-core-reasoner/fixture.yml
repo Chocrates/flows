@@ -1,0 +1,30 @@
+# Medium reasoner fixture: a single-crate slice (flows-core), code unchanged. No
+# shell verifier — success is a manual grade against the rubric (`flows eval
+# review`). Tests a model's ability to READ and EXPLAIN real code, not edit it.
+#
+#   flows eval run --fixtures ./eval-fixtures --size medium --suite reasoner
+suite: reasoner
+size: medium
+task: >
+  In this `flows-core` crate, model selection is resolved by `resolve_profile`
+  (crates/flows-core/src/models.rs), `resolve_llm` and `dialect_env_key`
+  (crates/flows-core/src/config.rs). Explain precisely how an API key is resolved
+  for a selected model: the full precedence order, when the dialect-default
+  environment variable is used, and why `resolve_profile` deliberately does NOT
+  fill the key itself. Reference the actual functions.
+template: blank
+rubric: |
+  - States the precedence: explicit profile `api_key` (env-expanded) → dialect
+    default env var (ANTHROPIC_API_KEY for claude/anthropic, else OPENAI_API_KEY)
+    → empty.
+  - Explains that resolve_profile stays key-agnostic (pure resolution) and the key
+    fallback is applied later in resolve_llm, so the right dialect key is chosen
+    from the RESOLVED model, not the base.
+  - Notes a profile key does NOT fall back to the base llm key.
+  - Grounded in the real function names, not generic hand-waving.
+timeout_secs: 900
+relevant:
+  - crates/flows-core/src/models.rs
+  - crates/flows-core/src/config.rs
+  - "resolve_llm"
+  - "dialect_env_key"
