@@ -34,6 +34,21 @@ fn missing_key_get_is_falsy() {
 }
 
 #[test]
+fn fallback_prompt_includes_task_and_repo_tree() {
+    // A phase with no matching template prompt (e.g. the `blank` template's `run`
+    // phase) falls back to the generic prompt — which must still inject the task
+    // and the repository file tree so a bare agent sees the repo.
+    let repo = tempfile::tempdir().unwrap();
+    let phase = flows_core::models::PhaseConfig::new("run");
+    let raw = load_prompt(&phase, "blank", repo.path(), None);
+    let ctx = json!({ "idea": "count the lines", "repo_tree": "notes.txt\nsrc/lib.rs" });
+    let out = render_prompt(&raw, &ctx).expect("fallback prompt must render");
+    assert!(out.contains("count the lines"), "task injected");
+    assert!(out.contains("notes.txt"), "repo tree injected");
+    assert!(out.contains("**run** phase"), "phase name filled");
+}
+
+#[test]
 fn builtin_feature_prompts_render() {
     // The actual shipped prompts must render (not fall back) with a realistic ctx.
     let repo = tempfile::tempdir().unwrap();

@@ -198,7 +198,7 @@ flows init --global   # scaffold ~/.flows/config.yml + sync templates + prompts 
 | `flows runs` | List recent runs with status + cost |
 | `flows delete <id> [--force]` | Delete one run by id (`--force` stops + deletes a running one) |
 | `flows clean [--all]` | Delete finished runs from `~/.flows/runs` (`--all` also removes running ones) |
-| `flows eval run \| list \| review \| report` | Benchmark models on task fixtures — matrix of model × context-config × suite × size, stored + compared |
+| `flows eval run \| list \| review \| report \| clean` | Benchmark models on task fixtures — matrix of model × context-config × suite × size, stored + compared |
 | `flows usage <id>` | Per-phase token usage + cost for a run |
 | `flows doctor` | Check config, model routing, sandbox, templates |
 | `flows config show \| set <key> <value>` | View / edit config (`model`, `api-base`, `api-key`, `max-cost`) |
@@ -224,7 +224,13 @@ flows eval run --fixtures ./my-fx                               # your own fixtu
 flows eval list                     # show discovered fixtures (filter --suite/--size)
 flows eval review                   # grade ungraded trials (reasoner pass signal)
 flows eval report                   # comparison table (filter --model/--config/--suite)
+flows eval clean                    # delete stored results (no filters = wipe all)
 ```
+
+`flows eval clean` removes trials from the store — filter with `--model`,
+`--fixture`, `--suite`, `--granularity` (no filters wipes everything). It prompts
+for confirmation unless `--yes`. Handy for a clean batch after a fix that changes
+model behavior (old and new trials would otherwise average together in `report`).
 
 - **`--models`** — CSV of model-profile names (from your `models:` map) or literal
   model strings. Each model is forced across the whole pipeline. Omit → your
@@ -267,19 +273,63 @@ groups by it so levels are never compared:
   A/B unit for context features — one implement phase, toggle `+search`, measure
   the delta. A `phase` fixture whose template has more than one agent phase is
   rejected.
-- `turn` — reserved for the deterministic retrieval eval (recall@k, no model).
+- `turn` — a **single model turn**: one prompt → one completion, no tool loop, no
+  repo. The cheapest, lowest-variance probe. Coder turns auto-grade by `expect`
+  (substrings the completion must contain); reasoner turns are graded manually.
 
-Filter any command with `--granularity flow|phase|all`.
+Filter any command with `--granularity flow|phase|turn|all`.
+
+A `turn` fixture is just a prompt + expectations (no `repo/`, no `verify`):
+
+```yaml
+suite: coder
+granularity: turn
+system: "You are a terse coding assistant. Output only code."   # optional
+task: "Write a Rust fn `is_prime(n: u64) -> bool`."
+expect: ["fn is_prime", "u64"]     # completion must contain all of these
+max_tokens: 512                    # optional (default 2048)
+```
 
 - **coder** fixtures are scored by the shell `verify` command (exit 0 = pass).
 - **reasoner** fixtures have no meaningful shell check — success is a **manual
-  grade** against the `rubric`, entered via `flows eval review` (it shows the task,
-  rubric, and the run's output). Ungraded reasoner trials show as `ungraded` in the
-  report rather than pass/fail.
+  grade** entered via `flows eval review`. Ungraded reasoner trials show as
+  `ungraded` in the report rather than pass/fail.
 
-Results persist under `~/.flows/eval/` (an append-only `results.jsonl` plus saved
-per-trial output). `flows eval report` reads that store — no model calls — so
-comparison is offline and accumulates across runs. This is the yardstick the
+`flows eval review` opens a **full-screen TUI**: the trial's **transcript** (the
+context the model saw + its response) scrolls in the top pane while you enter the
+ratings in the bottom pane — so the output stays visible the whole time. Scroll
+with ↑/↓, PgUp/PgDn, `g`/`G`, or the mouse wheel; press `1`–`5` to rate the current
+dimension (auto-advances), `Tab`/←/→ to move between dimensions, `n` for a note,
+`Enter` to save and go to the next trial, `q` to quit. (In a non-terminal — piped
+or CI — it falls back to line prompts.) Every trial is rated **1–5 on five
+dimensions** (no skipping):
+
+| dimension | question |
+|---|---|
+| **Correctness** | is the output actually right? (pass/fail derives from this, ≥3 = pass) |
+| **Efficiency** | did it get there without wasted rounds/tokens? |
+| **Tool use** | right tools, valid args, recovers from errors? (`n/a` for `turn`) |
+| **Grounding** | used the real repo/context vs hallucinating? (moves when context features work) |
+| **Instruction following** | obeyed task constraints + output format? |
+
+`flows eval report` shows per-dimension means as a `C/E/T/G/I` column.
+
+Results persist under `~/.flows/eval/` (an append-only `results.jsonl` plus a
+`trials/<id>/` dir per trial). `flows eval report` reads that store — no model
+calls — so comparison is offline and accumulates across runs. Each trial dir holds:
+
+- `output.md` — the response (turn) or the produced artifacts + repo diff (phase/flow),
+- `transcript.txt` — the exact context the model saw **and** its response. For a
+  **turn**, the system + prompt + completion. For **phase/flow**, the assembled
+  prompt every round (system, tools, the new input + tool results, and each
+  response) — so you can see how context grows and which tools the model picked.
+  `flows eval review` prints it,
+- `run-log.jsonl` — for phase/flow, the run's per-round token/cost/latency trace.
+
+The phase/flow transcript is written by the agent loop when `FLOWS_TRANSCRIPT` is
+set (the eval harness sets it automatically); normal `flows run` invocations are
+unaffected. You can set `FLOWS_TRANSCRIPT=1` yourself to capture any run's prompts
+to `~/.flows/runs/<id>/transcript.txt`. This is the yardstick the
 upcoming context-delivery features (search, repo map, retrieval) will be measured
 against, so you can decide what actually helps *your* model on *your* code.
 

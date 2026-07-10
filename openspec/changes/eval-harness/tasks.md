@@ -34,6 +34,15 @@
 - [x] 7.2 Resolve each fixture's phases once per run and validate: `phase` requires exactly one agent phase. Invalid fixtures skipped with a message.
 - [x] 7.3 Record granularity per trial; make it part of the report grouping key so levels never mix; add a `--granularity` filter to run/list/report. Tests.
 - [x] 7.4 Tag all fixtures (blank template → phase, feature template → flow); add `whole-workspace-phase` (blank/phase) for a flow-vs-phase A/B on the same task.
+- [x] 7.5 Implement `turn` granularity: single `provider.complete` (no tool loop, no repo); fixture `system`/`expect`/`max_tokens` fields; coder turn auto-grades by `expect` substrings, reasoner turn graded manually; embedded `is-prime` turn fixture. Tests + live-verified against a local model.
+- [x] 7.6 Save a reviewable transcript per trial: turn → full input context (system + prompt) + response (`transcript.txt`); phase/flow → preserve the run's `llm.jsonl` trace (`run-log.jsonl`) before deleting the run. `eval review` shows the transcript.
+- [x] 7.7 Capture the assembled prompt in the agent loop: gated by `FLOWS_TRANSCRIPT` (set by eval), the agent writes a per-round transcript (system, tools, new input messages, response) to `<run_dir>/transcript.txt`; eval copies it into the trial dir. Live-verified on a phase run against a local model.
+- [x] 7.8 `eval review` shows the transcript and collects a 5-dimension rating (correctness, efficiency, tool-use, grounding, instruction-following; 1-5 each, no skipping; tool-use n/a for turn). Pass derived from correctness ≥ 3. Ratings stored per trial; `report` shows per-dimension means (`C/E/T/G/I`). Live-verified.
+- [x] 7.9 Full-screen review TUI (ratatui): scrollable transcript pane above a live ratings pane so the output stays visible while rating; keyboard + mouse-wheel scroll, 1-5 to rate, Tab/←→ move dims, n note, Enter save+next, q quit. Falls back to line prompts when not a terminal.
+
+## 8. Store maintenance
+
+- [x] 8.1 `eval clean` — delete stored results, filterable by `--model`/`--fixture`/`--suite`/`--granularity` (no filters = wipe the whole store); confirmation prompt unless `--yes`. Rewrites `results.jsonl` and removes the trial dirs. Store test for `remove_trials`.
 
 ## 6. Docs & wrap-up
 

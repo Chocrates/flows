@@ -87,6 +87,17 @@ fn list_files_dirs_first_then_files() {
 }
 
 #[test]
+fn list_files_empty_path_lists_root() {
+    let d = tempdir().unwrap();
+    write_file(d.path(), "a.txt", "").unwrap();
+    // Empty / whitespace path == repo root (like `ls` with no argument).
+    assert_eq!(list_files(d.path(), "").unwrap(), "a.txt");
+    assert_eq!(list_files(d.path(), "   ").unwrap(), "a.txt");
+    // `safe_path` itself still rejects an empty path (read/write need a real one).
+    assert!(safe_path(d.path(), "").is_err());
+}
+
+#[test]
 fn list_files_on_a_file_returns_its_rel_path() {
     let d = tempdir().unwrap();
     write_file(d.path(), "x.txt", "").unwrap();

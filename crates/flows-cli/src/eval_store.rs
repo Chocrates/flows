@@ -14,6 +14,33 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Per-dimension manual ratings (each 1–5). `tool_use` is `None` for `turn`
+/// trials (no tools). Recorded by `eval review`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Ratings {
+    pub correctness: u8,
+    pub efficiency: u8,
+    pub tool_use: Option<u8>,
+    pub grounding: u8,
+    pub instruction: u8,
+}
+
+impl Ratings {
+    /// Mean of the rated dimensions (skips `n/a` tool_use).
+    pub fn mean(&self) -> f64 {
+        let mut vals = vec![
+            self.correctness as f64,
+            self.efficiency as f64,
+            self.grounding as f64,
+            self.instruction as f64,
+        ];
+        if let Some(t) = self.tool_use {
+            vals.push(t as f64);
+        }
+        vals.iter().sum::<f64>() / vals.len() as f64
+    }
+}
+
 /// One trial's recorded outcome. Serialized as a JSONL line.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrialRecord {
@@ -34,6 +61,9 @@ pub struct TrialRecord {
     /// Human grade (reasoner suite, or an optional coder override). `None` = ungraded.
     pub manual_pass: Option<bool>,
     pub manual_score: Option<u8>,
+    /// Per-dimension manual ratings, when graded.
+    #[serde(default)]
+    pub ratings: Option<Ratings>,
     pub note: Option<String>,
     pub in_tok: u64,
     pub out_tok: u64,
@@ -97,6 +127,31 @@ pub fn read_output(flows_dir: &Path, trial_id: &str) -> String {
     std::fs::read_to_string(trial_dir(flows_dir, trial_id).join("output.md")).unwrap_or_default()
 }
 
+/// Save a trial's transcript — the exact input context the model received plus
+/// its response. For `turn` this is the full request + completion; for phase/flow
+/// the assembled prompt is not captured by the runner (only the run's metadata
+/// trace is), so this is written only when the content is available.
+pub fn save_transcript(flows_dir: &Path, trial_id: &str, text: &str) -> Result<(), String> {
+    let dir = trial_dir(flows_dir, trial_id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("transcript.txt"), text).map_err(|e| e.to_string())
+}
+
+/// Read a trial's transcript (empty string if none).
+pub fn read_transcript(flows_dir: &Path, trial_id: &str) -> String {
+    std::fs::read_to_string(trial_dir(flows_dir, trial_id).join("transcript.txt"))
+        .unwrap_or_default()
+}
+
+/// Copy a run's metadata log (`llm.jsonl`: per-round tokens/cost/latency) into the
+/// trial dir before the run is deleted, so the execution trace survives.
+pub fn save_run_log(flows_dir: &Path, trial_id: &str, src: &Path) {
+    let dir = trial_dir(flows_dir, trial_id);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::copy(src, dir.join("run-log.jsonl"));
+    }
+}
+
 /// Read the saved task/rubric for a trial.
 pub fn read_meta(flows_dir: &Path, trial_id: &str) -> Option<TrialMeta> {
     let text = std::fs::read_to_string(trial_dir(flows_dir, trial_id).join("meta.json")).ok()?;
@@ -131,6 +186,45 @@ pub fn load(flows_dir: &Path) -> Vec<TrialRecord> {
     out
 }
 
+/// Delete the entire eval store (`~/.flows/eval`).
+pub fn wipe(flows_dir: &Path) -> Result<(), String> {
+    let d = store_dir(flows_dir);
+    if d.exists() {
+        std::fs::remove_dir_all(&d).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Remove specific trials: rewrite `results.jsonl` without any line whose trial id
+/// is in `ids`, and delete each `trials/<id>/` dir. Unparseable lines are kept.
+pub fn remove_trials(
+    flows_dir: &Path,
+    ids: &std::collections::HashSet<String>,
+) -> Result<usize, String> {
+    let path = results_path(flows_dir);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let mut out = String::new();
+        for line in text.lines() {
+            let l = line.trim();
+            if l.is_empty() {
+                continue;
+            }
+            let drop = serde_json::from_str::<TrialRecord>(l)
+                .map(|r| ids.contains(&r.trial))
+                .unwrap_or(false);
+            if !drop {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        std::fs::write(&path, out).map_err(|e| e.to_string())?;
+    }
+    for id in ids {
+        let _ = std::fs::remove_dir_all(trial_dir(flows_dir, id));
+    }
+    Ok(ids.len())
+}
+
 /// Current unix epoch seconds.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -156,6 +250,7 @@ mod tests {
             verify_pass: Some(true),
             manual_pass: manual,
             manual_score: manual.map(|_| 4),
+            ratings: None,
             note: None,
             in_tok: 100,
             out_tok: 20,
@@ -187,6 +282,31 @@ mod tests {
         assert_eq!(all.len(), 1); // folded by id
         assert_eq!(all[0].manual_pass, Some(true));
         assert_eq!(all[0].manual_score, Some(4));
+    }
+
+    #[test]
+    fn remove_trials_drops_lines_and_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        append(dir.path(), &rec("a", None)).unwrap();
+        append(dir.path(), &rec("b", None)).unwrap();
+        save_output(
+            dir.path(),
+            "a",
+            "out",
+            &TrialMeta {
+                task: "t".into(),
+                rubric: None,
+            },
+        )
+        .unwrap();
+        let mut ids = std::collections::HashSet::new();
+        ids.insert("a".to_string());
+        let n = remove_trials(dir.path(), &ids).unwrap();
+        assert_eq!(n, 1);
+        let all = load(dir.path());
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].trial, "b");
+        assert!(!trial_dir(dir.path(), "a").exists());
     }
 
     #[test]

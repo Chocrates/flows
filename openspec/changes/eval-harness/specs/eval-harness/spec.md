@@ -48,16 +48,26 @@ by size.
 ### Requirement: Evaluation granularity
 
 The system SHALL let each fixture declare an evaluation granularity — `flow` (the
-whole pipeline), `phase` (a single agent phase), or `turn` (reserved for the
-deterministic retrieval eval) — SHALL validate a `phase` fixture's template
-resolves to exactly one agent phase, and SHALL treat granularity as part of the
-report grouping so results at different granularities are never aggregated
+whole pipeline), `phase` (a single agent phase), or `turn` (a single model turn:
+one prompt → one completion, no tool loop) — SHALL validate a `phase` fixture's
+template resolves to exactly one agent phase, and SHALL treat granularity as part
+of the report grouping so results at different granularities are never aggregated
 together.
 
 #### Scenario: Phase granularity requires a single agent phase
 
 - **WHEN** a fixture declares `granularity: phase` but its template resolves to more than one agent phase
 - **THEN** the fixture is rejected with an error rather than run.
+
+#### Scenario: Turn runs one completion and auto-grades a coder turn
+
+- **WHEN** a `granularity: turn` coder fixture is run
+- **THEN** the harness sends a single completion request (no tool loop, no repo) and marks success by whether the completion contains all of the fixture's `expect` substrings.
+
+#### Scenario: Turn coder requires expectations
+
+- **WHEN** a `granularity: turn` coder fixture defines no `expect` substrings
+- **THEN** it is rejected (a turn has no repo to shell-verify).
 
 #### Scenario: Granularities are not mixed in the report
 
@@ -124,6 +134,16 @@ records, with readers taking the most recent record per trial.
 - **WHEN** a trial finishes
 - **THEN** a record with its model, configuration, fixture, suite, size, verifier outcome, and efficiency metrics is appended to the store and its output is saved.
 
+#### Scenario: Turn trial saves a reviewable transcript
+
+- **WHEN** a `granularity: turn` trial finishes
+- **THEN** the trial's saved output includes the exact input context (system + prompt) and the model's response, so the input and response can be reviewed offline.
+
+#### Scenario: Phase/flow trial captures the assembled prompt
+
+- **WHEN** a `granularity: phase` or `flow` trial runs
+- **THEN** the agent loop's assembled prompt for each round (system, tools, input messages, and response) is saved to the trial so the context the model actually received can be reviewed offline.
+
 #### Scenario: Later grade overlays the trial
 
 - **WHEN** a manual grade is recorded for an existing trial
@@ -132,13 +152,21 @@ records, with readers taking the most recent record per trial.
 ### Requirement: Manual validation
 
 The system SHALL provide `flows eval review` that presents each ungraded trial's
-task, rubric, and saved output and records a human pass/fail decision with an
-optional score and note into the store.
+task, rubric, and saved transcript (input context + response) and records a manual
+rating across five dimensions — correctness, efficiency, tool use, grounding, and
+instruction-following — each on a 1–5 scale, deriving the trial's pass/fail from
+the correctness rating. Every dimension SHALL be required (no skipping); tool use
+SHALL be recorded as not-applicable for a `turn` trial (which uses no tools).
 
-#### Scenario: Grading an ungraded trial
+#### Scenario: Rating an ungraded trial
 
 - **WHEN** `eval review` is run and an ungraded trial exists
-- **THEN** it shows the trial's task, rubric, and saved output and records the entered pass/fail (and optional score/note) for that trial.
+- **THEN** it shows the trial's task, rubric, and transcript and requires a 1–5 rating for each applicable dimension, recording the ratings and a pass/fail derived from correctness.
+
+#### Scenario: Tool-use not applicable for a turn
+
+- **WHEN** a `granularity: turn` trial is reviewed
+- **THEN** the tool-use dimension is recorded as not-applicable and the remaining dimensions are still required.
 
 ### Requirement: Comparison report
 

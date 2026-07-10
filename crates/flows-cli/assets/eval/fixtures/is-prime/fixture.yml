@@ -1,0 +1,13 @@
+# A single-turn coder fixture: one prompt → one completion, auto-graded by the
+# `expect` substrings (no repo, no tool loop). The cheapest, lowest-variance probe
+# of whether a model can one-shot a small coding task.
+suite: coder
+size: small
+granularity: turn
+system: "You are a terse coding assistant. Output only code, no prose."
+task: "Write a Rust function `fn is_prime(n: u64) -> bool` that returns whether n is prime."
+expect:
+  - "fn is_prime"
+  - "u64"
+max_tokens: 512
+timeout_secs: 120

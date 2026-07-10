@@ -132,17 +132,25 @@ pub fn load_prompt(
         return text;
     }
 
-    // 8. Fallback
-    format!(
-        "You are an expert assistant running the **{}** phase of a workflow.\n\n\
-Given the context and prior artifacts, produce a structured YAML artifact \
-OR ask clarifying questions if needed.\n\n\
-Respond with JSON in one of two shapes:\n\
-```json\n{{\"type\": \"questions\", \"questions\": [\"...\"]}}\n```\n\
-or\n```json\n{{\"type\": \"artifact\", \"content\": {{...}}}}\n```",
-        phase.name
-    )
+    // 8. Fallback. Rendered through `render_prompt`, so the `{{ idea }}` /
+    // `{{ repo_tree }}` placeholders are filled from the agent context — a bare
+    // phase (e.g. the `blank` template) still gets the task and the repository
+    // file tree, not just a generic instruction.
+    FALLBACK_PROMPT.replace("__PHASE__", &phase.name)
 }
+
+/// Generic single-phase prompt used when no template/phase prompt is found. Uses
+/// Jinja placeholders (`{{ ... }}`) filled by [`render_prompt`]; single braces in
+/// the JSON examples are literal to Jinja.
+const FALLBACK_PROMPT: &str =
+    "You are an expert assistant running the **__PHASE__** phase of a workflow.\n\n\
+# Task\n{{ idea }}\n\n\
+# Repository files\n{{ repo_tree }}\n\n\
+Use the available tools to inspect and modify the repository as needed to complete the task.\n\n\
+When done, produce a structured YAML artifact OR ask clarifying questions if needed. \
+Respond with JSON in one of two shapes:\n\
+```json\n{\"type\": \"questions\", \"questions\": [\"...\"]}\n```\n\
+or\n```json\n{\"type\": \"artifact\", \"content\": {...}}\n```";
 
 /// Render a prompt template with the given context. MiniJinja + the pycompat
 /// callback, so the Python-Jinja idioms the shipped prompts use — `.get('k')`,

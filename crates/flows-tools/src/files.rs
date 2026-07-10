@@ -156,6 +156,9 @@ pub fn make_dir(repo_root: &Path, path: &str) -> ToolResult<String> {
 }
 
 pub fn list_files(repo_root: &Path, path: &str) -> ToolResult<String> {
+    // An empty path means the repo root (like `ls` with no argument). Models
+    // frequently send `""` / `"."`; treat both as the root instead of erroring.
+    let path = if path.trim().is_empty() { "." } else { path };
     let target = safe_path(repo_root, path)?;
     if !target.exists() {
         return Err(ToolError::new(format!("Path not found: {path}")));

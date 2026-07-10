@@ -11,7 +11,7 @@
 //! - `eval review` grades ungraded trials (the pass signal for reasoner tasks).
 //! - `eval report` prints a grouped comparison table from the store.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -25,9 +25,10 @@ use flows_core::models::{
     ContextConfig, GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig,
 };
 use flows_core::state::Store;
+use flows_llm::{CompletionRequest, Message};
 use flows_runner::runner::{run_pipeline, RunnerCallbacks};
 
-use crate::eval_store::{self, TrialMeta, TrialRecord};
+use crate::eval_store::{self, Ratings, TrialMeta, TrialRecord};
 
 static STARTER_FIXTURES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/eval/fixtures");
 
@@ -99,8 +100,9 @@ pub enum Granularity {
     /// A single agent phase (one tool loop): where context delivery actually
     /// lives; the clean A/B unit for context features.
     Phase,
-    /// A single deterministic turn (no agent loop): the retrieval-quality eval.
-    /// Reserved — implemented by the deterministic retrieval eval, not yet here.
+    /// A single model turn (one prompt → one completion, no tool loop): the
+    /// cheapest, lowest-variance probe. Coder turns auto-grade via `expect`
+    /// substrings; reasoner turns are graded manually.
     Turn,
 }
 impl Granularity {
@@ -135,9 +137,19 @@ struct FixtureSpec {
     size: Size,
     #[serde(default)]
     granularity: Granularity,
-    /// Shell command whose exit 0 == success. Required for coder fixtures.
+    /// Shell command whose exit 0 == success. Required for flow/phase coder fixtures.
     #[serde(default)]
     verify: Option<String>,
+    /// Substrings the completion must contain (turn coder auto-grade). Required
+    /// for `granularity: turn` coder fixtures (there is no repo to shell-verify).
+    #[serde(default)]
+    expect: Vec<String>,
+    /// Optional system prompt for a `turn` fixture.
+    #[serde(default)]
+    system: Option<String>,
+    /// Max completion tokens for a `turn` fixture (default 2048).
+    #[serde(default)]
+    max_tokens: Option<u32>,
     /// Human-grading criteria shown in `review`. Required for reasoner fixtures.
     #[serde(default)]
     rubric: Option<String>,
@@ -162,15 +174,26 @@ struct Fixture {
     repo_files: Vec<(String, Vec<u8>)>,
 }
 
-/// Reject fixtures whose suite lacks its required success signal.
+/// Reject fixtures whose suite/granularity lacks its required success signal.
+/// Reasoner → `rubric` (manual). Coder `turn` → `expect` (substring auto-grade,
+/// no repo to shell-verify). Coder `flow`/`phase` → `verify` (shell exit 0).
 fn validate_fixture(name: &str, spec: &FixtureSpec) -> Result<(), String> {
-    match spec.suite {
-        Suite::Coder if spec.verify.as_deref().unwrap_or("").trim().is_empty() => Err(format!(
-            "fixture `{name}`: coder suite requires a `verify` command"
-        )),
-        Suite::Reasoner if spec.rubric.as_deref().unwrap_or("").trim().is_empty() => Err(format!(
+    let missing = |s: Option<&String>| s.map(|x| x.trim().is_empty()).unwrap_or(true);
+    match (spec.suite, spec.granularity) {
+        (Suite::Reasoner, _) if missing(spec.rubric.as_ref()) => Err(format!(
             "fixture `{name}`: reasoner suite requires a `rubric`"
         )),
+        (Suite::Coder, Granularity::Turn) if spec.expect.iter().all(|e| e.trim().is_empty()) => {
+            Err(format!(
+                "fixture `{name}`: coder `turn` requires `expect` (substrings the completion must contain)"
+            ))
+        }
+        (Suite::Coder, Granularity::Flow | Granularity::Phase) if missing(spec.verify.as_ref()) => {
+            Err(format!(
+                "fixture `{name}`: coder {} requires a `verify` command",
+                spec.granularity.as_str()
+            ))
+        }
         _ => Ok(()),
     }
 }
@@ -207,10 +230,8 @@ fn validate_granularity(
     phases: &[PhaseConfig],
 ) -> Result<(), String> {
     match gran {
-        Granularity::Turn => Err(format!(
-            "fixture `{name}`: granularity `turn` not yet supported \
-(deterministic retrieval eval — future)"
-        )),
+        // `turn` runs no pipeline — validated by validate_fixture (needs expect/rubric).
+        Granularity::Turn => Ok(()),
         Granularity::Phase if agent_phase_count(phases) != 1 => Err(format!(
             "fixture `{name}`: granularity `phase` requires exactly one agent phase, \
 but template `{template}` has {}",
@@ -490,6 +511,7 @@ fn run_trial(
         verify_pass,
         manual_pass: None,
         manual_score: None,
+        ratings: None,
         note,
         in_tok,
         out_tok,
@@ -553,8 +575,17 @@ fn run_trial(
         },
     );
 
-    // Metrics from the run's llm.jsonl.
-    let log = flows_core::llm_log::log_path(&store.run_dir(&run_id));
+    // Preserve the run's artifacts before deleting it. `run-log.jsonl` = per-round
+    // tokens/cost/latency trace; `transcript.txt` = the assembled prompt each round
+    // (written by the agent loop under FLOWS_TRANSCRIPT, set by cmd_run).
+    let run_dir = store.run_dir(&run_id);
+    let log = flows_core::llm_log::log_path(&run_dir);
+    eval_store::save_run_log(flows_dir, &trial_id, &log);
+    let run_transcript =
+        std::fs::read_to_string(run_dir.join("transcript.txt")).unwrap_or_default();
+    if !run_transcript.is_empty() {
+        let _ = eval_store::save_transcript(flows_dir, &trial_id, &run_transcript);
+    }
     let usage = flows_core::usage::parse_usage(&log, &run_id, "");
     let _ = store.delete_run(&run_id); // don't pollute the user's run history
 
@@ -568,6 +599,99 @@ fn run_trial(
     );
     out.cost = usage.total_cost();
     out
+}
+
+/// A turn coder passes when the completion contains every `expect` substring.
+fn expect_match(content: &str, expect: &[String]) -> bool {
+    !expect.is_empty() && expect.iter().all(|e| content.contains(e.as_str()))
+}
+
+/// Run one `turn` trial: a single prompt → single completion, no tool loop, no
+/// repo. Coder → auto-graded by `expect`; reasoner → graded manually later.
+fn run_turn_trial(
+    rt: &tokio::runtime::Runtime,
+    fixture: &Fixture,
+    model_label: &str,
+    model_llm: &LLMConfig,
+    config_name: &str,
+    flows_dir: &Path,
+) -> TrialRecord {
+    let trial_id = uuid::Uuid::new_v4().to_string();
+    let started = Instant::now();
+
+    let provider = flows_runner::default_provider_factory(model_llm);
+    let req = CompletionRequest {
+        model: model_llm.model.clone(),
+        system: fixture.spec.system.clone().unwrap_or_default(),
+        messages: vec![Message::user(fixture.spec.task.clone())],
+        tools: vec![],
+        max_tokens: fixture.spec.max_tokens.unwrap_or(2048),
+        thinking_budget: if model_llm.thinking == Some(true) {
+            model_llm.thinking_budget_tokens
+        } else {
+            None
+        },
+    };
+
+    let timed = rt.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(fixture.spec.timeout_secs),
+            provider.complete(&req),
+        )
+        .await
+    });
+    let (content, in_tok, out_tok, note) = match timed {
+        Ok(Ok(c)) => (c.content, c.usage.input_tokens, c.usage.output_tokens, None),
+        Ok(Err(e)) => (String::new(), 0, 0, Some(format!("llm: {e}"))),
+        Err(_) => (String::new(), 0, 0, Some("timeout".into())),
+    };
+
+    // Coder turn: auto-grade by `expect`. Reasoner turn: manual (None now).
+    let verify_pass = match fixture.spec.suite {
+        Suite::Coder => Some(expect_match(&content, &fixture.spec.expect)),
+        Suite::Reasoner => None,
+    };
+
+    let _ = eval_store::save_output(
+        flows_dir,
+        &trial_id,
+        &content,
+        &TrialMeta {
+            task: fixture.spec.task.clone(),
+            rubric: fixture.spec.rubric.clone(),
+        },
+    );
+    // Full transcript: the exact input context the model received + its response.
+    let transcript = format!(
+        "=== SYSTEM ===\n{}\n\n=== USER ===\n{}\n\n=== RESPONSE ({}, {in_tok} in / {out_tok} out tok) ===\n{}\n",
+        if req.system.is_empty() { "(none)" } else { &req.system },
+        fixture.spec.task,
+        model_llm.model,
+        if content.is_empty() { "(no response)" } else { &content },
+    );
+    let _ = eval_store::save_transcript(flows_dir, &trial_id, &transcript);
+
+    TrialRecord {
+        trial: trial_id,
+        ts: eval_store::now_secs(),
+        model: model_label.to_string(),
+        config: config_name.to_string(),
+        fixture: fixture.name.clone(),
+        suite: fixture.spec.suite.as_str().to_string(),
+        size: fixture.spec.size.as_str().to_string(),
+        granularity: Granularity::Turn.as_str().to_string(),
+        verify_pass,
+        manual_pass: None,
+        manual_score: None,
+        ratings: None,
+        note,
+        in_tok,
+        out_tok,
+        peak_ctx: in_tok, // single turn: peak input = the one request
+        cost: 0.0,
+        rounds: 1,
+        secs: started.elapsed().as_secs_f64(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -595,15 +719,19 @@ pub fn cmd_run(
         return Err("no fixtures match the suite/size/granularity filter".into());
     }
 
-    // Resolve + validate each fixture's phases once (granularity check happens
-    // here: `phase` must be a single agent phase). Invalid fixtures are dropped
-    // with a message rather than aborting the whole run.
-    let mut prepared: Vec<(&Fixture, Vec<PhaseConfig>)> = Vec::new();
+    // Prepare each fixture. `turn` runs no pipeline (None phases). Others resolve
+    // + validate their phases once (granularity check: `phase` = one agent phase).
+    // Invalid fixtures are dropped with a message rather than aborting the run.
+    let mut prepared: Vec<(&Fixture, Option<Vec<PhaseConfig>>)> = Vec::new();
     for f in &selected {
+        if f.spec.granularity == Granularity::Turn {
+            prepared.push((f, None));
+            continue;
+        }
         match resolve_fixture_phases(&f.spec.template).and_then(|ph| {
             validate_granularity(&f.name, f.spec.granularity, &f.spec.template, &ph).map(|_| ph)
         }) {
-            Ok(ph) => prepared.push((f, ph)),
+            Ok(ph) => prepared.push((f, Some(ph))),
             Err(e) => eprintln!("  skip fixture `{}`: {e}", f.name),
         }
     }
@@ -641,6 +769,10 @@ pub fn cmd_run(
     let store = Store::new(&flows_dir);
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
 
+    // Capture the assembled prompt each round (phase/flow) for review. Scoped to
+    // eval — the agent loop only writes a transcript when this is set.
+    std::env::set_var("FLOWS_TRANSCRIPT", "1");
+
     let total = model_cells.len() * config_ctx.len() * prepared.len() * trials;
     println!(
         "Evaluating {} model(s) × {} config(s) × {} fixture(s) × {trials} trial(s) = {total} run(s)\n",
@@ -658,10 +790,13 @@ pub fn cmd_run(
                         f.name,
                         i + 1
                     );
-                    let t = run_trial(
-                        &rt, f, phases, label, llm, cfg_name, ctx, &uglobal, &uproject, &store,
-                        &flows_dir,
-                    );
+                    let t = match phases {
+                        Some(ph) => run_trial(
+                            &rt, f, ph, label, llm, cfg_name, ctx, &uglobal, &uproject, &store,
+                            &flows_dir,
+                        ),
+                        None => run_turn_trial(&rt, f, label, llm, cfg_name, &flows_dir),
+                    };
                     let sig = match t.verify_pass {
                         Some(true) => "pass",
                         Some(false) => "FAIL",
@@ -764,56 +899,121 @@ pub fn cmd_review(suite: &str, model: Option<&str>) -> Result<(), String> {
         println!("No ungraded trials.");
         return Ok(());
     }
+
+    // Interactive terminal → full-screen review TUI (transcript stays visible
+    // while rating). Otherwise fall back to the line-based prompt flow below.
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        let items: Vec<crate::eval_tui::ReviewItem> = pending
+            .into_iter()
+            .map(|r| {
+                let transcript = eval_store::read_transcript(&flows_dir, &r.trial);
+                let output = eval_store::read_output(&flows_dir, &r.trial);
+                let meta = eval_store::read_meta(&flows_dir, &r.trial);
+                let content = if !transcript.is_empty() {
+                    transcript
+                } else if !output.is_empty() {
+                    output
+                } else {
+                    "(no output)".to_string()
+                };
+                let is_turn = r.granularity == Granularity::Turn.as_str();
+                let (task, body) = match meta {
+                    Some(m) => {
+                        let mut b = String::new();
+                        if let Some(rub) = &m.rubric {
+                            b.push_str(&format!("--- rubric ---\n{rub}\n\n"));
+                        }
+                        b.push_str(&content);
+                        (m.task, b)
+                    }
+                    None => (String::new(), content),
+                };
+                crate::eval_tui::ReviewItem {
+                    record: r,
+                    transcript: body,
+                    task,
+                    is_turn,
+                }
+            })
+            .collect();
+        let n = crate::eval_tui::run_review(&flows_dir, items).map_err(|e| e.to_string())?;
+        println!("graded {n} trial(s).");
+        return Ok(());
+    }
+
     println!(
-        "{} ungraded trial(s). Grade each: [p]ass / [f]ail / [s]kip.\n",
+        "{} ungraded trial(s). Grade each dimension 1-5.\n",
         pending.len()
     );
 
     for mut r in pending {
         let meta = eval_store::read_meta(&flows_dir, &r.trial);
         let output = eval_store::read_output(&flows_dir, &r.trial);
-        println!("──────────────────────────────────────────────");
-        println!("fixture: {}  [{} {}]", r.fixture, r.suite, r.size);
-        println!("model:   {}   config: {}", r.model, r.config);
+        let transcript = eval_store::read_transcript(&flows_dir, &r.trial);
+
+        // Build the whole display (header + task/rubric + the full transcript) and
+        // show it in a scrollable pager so long phase/flow prompts are reviewable.
+        // Turn trials carry a full transcript (input + response); phase/flow whose
+        // prompt was captured also do — otherwise fall back to the produced output.
+        let mut body = String::new();
+        body.push_str(&format!(
+            "fixture: {}  [{} {} {}]\nmodel:   {}   config: {}\n",
+            r.fixture, r.suite, r.size, r.granularity, r.model, r.config
+        ));
         if let Some(m) = &meta {
-            println!("\ntask: {}", m.task);
+            body.push_str(&format!("\ntask: {}\n", m.task));
             if let Some(rubric) = &m.rubric {
-                println!("\nrubric:\n{rubric}");
+                body.push_str(&format!("\nrubric:\n{rubric}\n"));
             }
         }
-        println!(
-            "\n--- output ---\n{}",
-            if output.is_empty() {
-                "(no output)"
-            } else {
-                &output
-            }
-        );
-
-        let verdict = prompt("\ngrade [p]ass/[f]ail/[s]kip> ");
-        let pass = match verdict.trim().chars().next() {
-            Some('p') | Some('P') => true,
-            Some('f') | Some('F') => false,
-            _ => {
-                println!("skipped.\n");
-                continue;
-            }
+        let content = if !transcript.is_empty() {
+            &transcript
+        } else if !output.is_empty() {
+            &output
+        } else {
+            "(no output)"
         };
-        let score = prompt("score 0-5 (enter to skip)> ")
-            .trim()
-            .parse::<u8>()
-            .ok()
-            .map(|n| n.min(5));
-        let note = prompt("note (enter to skip)> ").trim().to_string();
+        body.push_str(&format!(
+            "\n--- transcript (input + response) ---\n{content}\n"
+        ));
+        show_scrollable(&body);
 
+        // Rate every dimension 1-5 (no skipping). tool_use is n/a for a turn
+        // trial (no tools). Pass is derived from correctness (>= 3).
+        let is_turn = r.granularity == Granularity::Turn.as_str();
+        println!("\nrate each 1-5 (5 = best):");
+        let ratings = Ratings {
+            correctness: prompt_rating("correctness (output actually right?)"),
+            efficiency: prompt_rating("efficiency (no wasted rounds/tokens?)"),
+            tool_use: if is_turn {
+                None
+            } else {
+                Some(prompt_rating(
+                    "tool use (right tools, valid args, recovers?)",
+                ))
+            },
+            grounding: prompt_rating("grounding (used real context, no hallucination?)"),
+            instruction: prompt_rating("instruction following (constraints + format?)"),
+        };
+        let note = prompt("note (optional, enter to skip)> ")
+            .trim()
+            .to_string();
+
+        let pass = ratings.correctness >= 3;
         r.manual_pass = Some(pass);
-        r.manual_score = score;
+        r.manual_score = Some(ratings.mean().round() as u8);
+        r.ratings = Some(ratings);
         if !note.is_empty() {
             r.note = Some(note);
         }
         r.ts = eval_store::now_secs();
         eval_store::append(&flows_dir, &r)?;
-        println!("recorded: {}\n", if pass { "pass" } else { "fail" });
+        println!(
+            "recorded: {} (mean {:.1})\n",
+            if pass { "pass" } else { "fail" },
+            ratings.mean()
+        );
     }
     Ok(())
 }
@@ -825,6 +1025,47 @@ fn prompt(msg: &str) -> String {
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
     line
+}
+
+/// Show text in a scrollable pager (`$PAGER`, else `less -RFX`) so long
+/// transcripts can be paged. Falls back to a plain print when stdout is not a
+/// terminal (piped/CI) or no pager is available. The pager reads keys from the
+/// tty, so the rating prompts on stdin still work after it exits.
+fn show_scrollable(content: &str) {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdout().is_terminal() {
+        println!("{content}");
+        return;
+    }
+    // `-R` raw colors, `-F` skip the pager when it all fits one screen. (No `-X`:
+    // it suppresses the terminal init less needs, which breaks arrow/wheel scroll.)
+    let pager = std::env::var("PAGER").unwrap_or_else(|_| "less -R -F".to_string());
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&pager)
+        .stdin(std::process::Stdio::piped())
+        .spawn();
+    match child {
+        Ok(mut c) => {
+            if let Some(mut stdin) = c.stdin.take() {
+                let _ = stdin.write_all(content.as_bytes());
+                // stdin drops here → EOF to the pager.
+            }
+            let _ = c.wait();
+        }
+        Err(_) => println!("{content}"),
+    }
+}
+
+/// Prompt for a 1-5 rating, re-asking until a valid number is entered (no skip).
+fn prompt_rating(label: &str) -> u8 {
+    loop {
+        let raw = prompt(&format!("  {label} [1-5]> "));
+        match raw.trim().parse::<u8>() {
+            Ok(n) if (1..=5).contains(&n) => return n,
+            _ => println!("  enter a number 1-5."),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -850,6 +1091,33 @@ struct GroupStat {
     cost: Vec<f64>,
     rounds: Vec<f64>,
     secs: Vec<f64>,
+    // Per-dimension manual ratings (empty until trials are reviewed).
+    correctness: Vec<f64>,
+    efficiency: Vec<f64>,
+    tool_use: Vec<f64>,
+    grounding: Vec<f64>,
+    instruction: Vec<f64>,
+}
+
+impl GroupStat {
+    /// Compact `C/E/T/G/I` rating means (`-` for an unrated dimension).
+    fn ratings_cell(&self) -> String {
+        let d = |v: &[f64]| {
+            if v.is_empty() {
+                "-".to_string()
+            } else {
+                format!("{:.1}", mean(v))
+            }
+        };
+        format!(
+            "{}/{}/{}/{}/{}",
+            d(&self.correctness),
+            d(&self.efficiency),
+            d(&self.tool_use),
+            d(&self.grounding),
+            d(&self.instruction),
+        )
+    }
 }
 
 fn mean(v: &[f64]) -> f64 {
@@ -899,6 +1167,15 @@ fn aggregate(records: &[TrialRecord]) -> Vec<(GroupKey, GroupStat)> {
         g.cost.push(r.cost);
         g.rounds.push(r.rounds as f64);
         g.secs.push(r.secs);
+        if let Some(rt) = &r.ratings {
+            g.correctness.push(rt.correctness as f64);
+            g.efficiency.push(rt.efficiency as f64);
+            g.grounding.push(rt.grounding as f64);
+            g.instruction.push(rt.instruction as f64);
+            if let Some(t) = rt.tool_use {
+                g.tool_use.push(t as f64);
+            }
+        }
     }
     let mut rows: Vec<_> = map.into_iter().collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0));
@@ -936,7 +1213,7 @@ pub fn cmd_report(
 
     let rows = aggregate(&records);
     println!(
-        "{:<16} {:<10} {:<8} {:<6} {:<6} {:>9} {:>9} {:>13} {:>8} {:>7} {:>3}",
+        "{:<16} {:<10} {:<8} {:<6} {:<6} {:>9} {:>9} {:>13} {:>8} {:>7} {:>3}  {:<13}",
         "model",
         "config",
         "suite",
@@ -947,7 +1224,8 @@ pub fn cmd_report(
         "peak_ctx",
         "cost",
         "rounds",
-        "n"
+        "n",
+        "ratings C/E/T/G/I"
     );
     for ((m, c, su, sz, gr), g) in &rows {
         let pass = if g.graded == 0 {
@@ -961,7 +1239,7 @@ pub fn cmd_report(
             )
         };
         println!(
-            "{:<16} {:<10} {:<8} {:<6} {:<6} {:>9} {:>9} {:>13} {:>8} {:>7.1} {:>3}",
+            "{:<16} {:<10} {:<8} {:<6} {:<6} {:>9} {:>9} {:>13} {:>8} {:>7.1} {:>3}  {:<13}",
             trunc(m, 16),
             trunc(c, 10),
             su,
@@ -972,8 +1250,68 @@ pub fn cmd_report(
             format!("{}±{}", ktok(mean(&g.peak)), ktok(stddev(&g.peak))),
             flows_core::pricing::format_cost(mean(&g.cost)),
             mean(&g.rounds),
-            g.n
+            g.n,
+            g.ratings_cell(),
         );
+    }
+    println!("\n(ratings: Correctness / Efficiency / Tool-use / Grounding / Instruction, 1-5 means; `-` = unrated)");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `eval clean`
+// ---------------------------------------------------------------------------
+
+pub fn cmd_clean(
+    model: Option<&str>,
+    fixture: Option<&str>,
+    suite: &str,
+    granularity: &str,
+    yes: bool,
+) -> Result<(), String> {
+    let suite_f = Suite::parse_filter(suite)?;
+    let gran_f = Granularity::parse_filter(granularity)?;
+    let flows_dir = super::flows_dir();
+
+    let records = eval_store::load(&flows_dir);
+    if records.is_empty() {
+        println!("Eval store is empty.");
+        return Ok(());
+    }
+
+    let no_filter = model.is_none() && fixture.is_none() && suite_f.is_none() && gran_f.is_none();
+    let matching: Vec<&TrialRecord> = records
+        .iter()
+        .filter(|r| model.map_or(true, |m| r.model == m))
+        .filter(|r| fixture.map_or(true, |fx| r.fixture == fx))
+        .filter(|r| suite_f.map_or(true, |s| r.suite == s.as_str()))
+        .filter(|r| gran_f.map_or(true, |g| r.granularity == g.as_str()))
+        .collect();
+    if matching.is_empty() {
+        println!("No trials match the filter.");
+        return Ok(());
+    }
+
+    if !yes {
+        let what = if no_filter {
+            format!("ALL {} trial(s) + saved outputs", matching.len())
+        } else {
+            format!("{} matching trial(s)", matching.len())
+        };
+        let ans = prompt(&format!("Delete {what} from the eval store? [y/N] "));
+        if !ans.trim().eq_ignore_ascii_case("y") {
+            println!("aborted.");
+            return Ok(());
+        }
+    }
+
+    if no_filter {
+        eval_store::wipe(&flows_dir)?;
+        println!("Wiped the eval store.");
+    } else {
+        let ids: HashSet<String> = matching.iter().map(|r| r.trial.clone()).collect();
+        let n = eval_store::remove_trials(&flows_dir, &ids)?;
+        println!("Removed {n} trial(s).");
     }
     Ok(())
 }
@@ -1007,6 +1345,7 @@ mod tests {
             verify_pass: verify,
             manual_pass: manual,
             manual_score: None,
+            ratings: None,
             note: None,
             in_tok: 100,
             out_tok: 10,
@@ -1035,6 +1374,9 @@ mod tests {
             size: Size::Small,
             granularity: Granularity::Flow,
             verify: None,
+            expect: vec![],
+            system: None,
+            max_tokens: None,
             rubric: None,
             relevant: vec![],
             timeout_secs: 1,
@@ -1047,6 +1389,36 @@ mod tests {
             ..coder
         };
         assert!(validate_fixture("r", &reasoner).is_err());
+    }
+
+    #[test]
+    fn turn_coder_needs_expect_and_scores_by_substring() {
+        // coder turn with no expect → invalid.
+        let mut t = FixtureSpec {
+            task: "write is_prime".into(),
+            template: "blank".into(),
+            suite: Suite::Coder,
+            size: Size::Small,
+            granularity: Granularity::Turn,
+            verify: None,
+            expect: vec![],
+            system: None,
+            max_tokens: None,
+            rubric: None,
+            relevant: vec![],
+            timeout_secs: 1,
+        };
+        assert!(validate_fixture("t", &t).is_err());
+        // with expect → valid (no verify needed for a turn).
+        t.expect = vec!["fn is_prime".into()];
+        assert!(validate_fixture("t", &t).is_ok());
+        // substring scoring: all must be present.
+        assert!(expect_match(
+            "pub fn is_prime(n: u64) -> bool { true }",
+            &t.expect
+        ));
+        assert!(!expect_match("nope", &t.expect));
+        assert!(!expect_match("anything", &[])); // empty expect never passes
     }
 
     fn agent(name: &str) -> PhaseConfig {
@@ -1062,8 +1434,8 @@ mod tests {
         assert!(validate_granularity("f", Granularity::Phase, "feature", &two).is_err());
         // flow → any count ok.
         assert!(validate_granularity("f", Granularity::Flow, "feature", &two).is_ok());
-        // turn → reserved, always err.
-        assert!(validate_granularity("f", Granularity::Turn, "blank", &one).is_err());
+        // turn → runs no pipeline, so the phase-count check does not apply.
+        assert!(validate_granularity("f", Granularity::Turn, "blank", &one).is_ok());
     }
 
     #[test]

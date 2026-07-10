@@ -24,6 +24,7 @@ use flows_runner::runner::{default_provider_factory, run_pipeline, RunnerCallbac
 
 mod eval;
 mod eval_store;
+mod eval_tui;
 
 #[derive(Parser)]
 #[command(
@@ -170,6 +171,20 @@ enum EvalCmd {
         #[arg(long, default_value = "all")]
         granularity: String,
     },
+    /// Delete stored results (no filters = wipe the whole store).
+    Clean {
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        fixture: Option<String>,
+        #[arg(long, default_value = "all")]
+        suite: String,
+        #[arg(long, default_value = "all")]
+        granularity: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -277,6 +292,19 @@ fn main() -> ExitCode {
                 suite,
                 granularity,
             } => eval::cmd_report(model.as_deref(), config.as_deref(), &suite, &granularity),
+            EvalCmd::Clean {
+                model,
+                fixture,
+                suite,
+                granularity,
+                yes,
+            } => eval::cmd_clean(
+                model.as_deref(),
+                fixture.as_deref(),
+                &suite,
+                &granularity,
+                yes,
+            ),
         },
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "flows", &mut std::io::stdout());

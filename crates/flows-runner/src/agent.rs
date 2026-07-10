@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 use flows_core::models::{Artifact, LLMConfig, PhaseConfig, ToolsConfig};
 use flows_core::pricing::calculate_cost;
 use flows_core::thinking::{model_supports_thinking, resolve_thinking};
-use flows_llm::types::{CompletionRequest, Message, ToolDef};
+use flows_llm::types::{Completion, CompletionRequest, Message, Role, ToolDef};
 use flows_llm::Provider;
 use flows_tools::{bash, files, plugin};
 
@@ -210,8 +210,8 @@ pub fn build_tool_defs(tools: &ToolsConfig) -> Vec<ToolDef> {
         });
         defs.push(ToolDef {
             name: "list_files".into(),
-            description: "List files/directories at a path in the repository.".into(),
-            parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            description: "List files/directories at a path in the repository. Omit `path` (or pass \"\" / \".\") to list the repository root.".into(),
+            parameters: json!({"type": "object", "properties": {"path": {"type": "string", "description": "Repo-relative directory; empty or omitted = root."}}}),
         });
         // Write tools are withheld in read-only phases (plan / spec / design).
         if !tools.read_only {
@@ -429,6 +429,63 @@ pub fn parse_response(content: &str) -> Option<Value> {
 // Main loop
 // ---------------------------------------------------------------------------
 
+/// Append one round of the human-readable prompt transcript to
+/// `<dir>/transcript.txt`. The system prompt is written once (round 0); each round
+/// logs the newly-appended input messages and the model's response, so the file
+/// shows exactly the prompt the model saw. Best-effort; errors ignored.
+fn append_transcript_round(
+    dir: &Path,
+    phase: &str,
+    round: u32,
+    system: &str,
+    new_messages: &[Message],
+    completion: &Completion,
+) {
+    use std::io::Write;
+    let mut s = String::new();
+    if round == 0 {
+        s.push_str(&format!("\n========== PHASE: {phase} ==========\n"));
+        s.push_str(&format!("--- SYSTEM ---\n{system}\n"));
+    }
+    s.push_str(&format!(
+        "\n----- ROUND {round} REQUEST ({} in tok) -----\n",
+        completion.usage.input_tokens
+    ));
+    for m in new_messages {
+        let role = match m.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+        if let Some(c) = &m.content {
+            if !c.trim().is_empty() {
+                s.push_str(&format!("[{role}] {c}\n"));
+            }
+        }
+        for tc in &m.tool_calls {
+            s.push_str(&format!("[{role} → call] {}({})\n", tc.name, tc.arguments));
+        }
+    }
+    s.push_str(&format!(
+        "----- ROUND {round} RESPONSE ({} out tok) -----\n{}\n",
+        completion.usage.output_tokens, completion.content
+    ));
+    for tc in &completion.tool_calls {
+        s.push_str(&format!(
+            "[response → call] {}({})\n",
+            tc.name, tc.arguments
+        ));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("transcript.txt"))
+    {
+        let _ = f.write_all(s.as_bytes());
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_phase(
     phase: &PhaseConfig,
@@ -490,6 +547,18 @@ pub async fn run_agent_phase(
     let mut last_sig: Option<Vec<(String, String)>> = None;
     let mut repeated_errors = 0u32;
 
+    // Optional full-prompt transcript (what the model actually saw each round),
+    // gated by `FLOWS_TRANSCRIPT` so normal runs aren't bloated. The eval harness
+    // sets it to capture the assembled context for review. `transcript_logged`
+    // tracks how many messages are already written, so each round logs only the
+    // newly-appended input (system + tools are written once at round 0).
+    let transcript_dir: Option<std::path::PathBuf> = if std::env::var("FLOWS_TRANSCRIPT").is_ok() {
+        logger.and_then(|l| l.dir()).map(|d| d.to_path_buf())
+    } else {
+        None
+    };
+    let mut transcript_logged = 0usize;
+
     for round_num in 0..total_rounds {
         // Mid-phase cancellation: bail out of the tool loop promptly rather than
         // waiting for the whole phase to finish.
@@ -549,6 +618,17 @@ pub async fn run_agent_phase(
                 completion.usage.output_tokens,
                 latency_ms,
             );
+        }
+        if let Some(dir) = &transcript_dir {
+            append_transcript_round(
+                dir,
+                &phase.name,
+                round_num,
+                &system_prompt,
+                &messages[transcript_logged..],
+                &completion,
+            );
+            transcript_logged = messages.len();
         }
 
         // Surface the request's input tokens as the live context-window size.

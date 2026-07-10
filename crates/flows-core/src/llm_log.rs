@@ -26,6 +26,11 @@ impl LlmLogger {
         }
     }
 
+    /// The run directory this logger writes into (parent of `llm.jsonl`).
+    pub fn dir(&self) -> Option<&Path> {
+        self.path.parent()
+    }
+
     fn write(&self, mut event: Map<String, Value>) {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
