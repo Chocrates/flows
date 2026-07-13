@@ -39,6 +39,7 @@
 - [x] 7.7 Capture the assembled prompt in the agent loop: gated by `FLOWS_TRANSCRIPT` (set by eval), the agent writes a per-round transcript (system, tools, new input messages, response) to `<run_dir>/transcript.txt`; eval copies it into the trial dir. Live-verified on a phase run against a local model.
 - [x] 7.8 `eval review` shows the transcript and collects a 5-dimension rating (correctness, efficiency, tool-use, grounding, instruction-following; 1-5 each, no skipping; tool-use n/a for turn). Pass derived from correctness ≥ 3. Ratings stored per trial; `report` shows per-dimension means (`C/E/T/G/I`). Live-verified.
 - [x] 7.9 Full-screen review TUI (ratatui): scrollable transcript pane above a live ratings pane so the output stays visible while rating; keyboard + mouse-wheel scroll, 1-5 to rate, Tab/←→ move dims, n note, Enter save+next, q quit. Falls back to line prompts when not a terminal.
+- [x] 7.10 Phase/flow fixtures use the REAL default prompts (not the bare fallback): add single-phase `implement` (→ `feature/implement.md`) and `plan` (→ read-only `feature/plan.md`) templates; retag coder-phase fixtures to `implement`, reasoner-phase to `plan`; flow fixtures already use `feature`. Turn stays eval-specific. Live-verified the real prompts render.
 
 ## 8. Store maintenance
 

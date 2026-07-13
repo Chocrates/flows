@@ -5,7 +5,7 @@ suite: reasoner
 size: small
 granularity: phase
 task: "The function sum_to(n) in calc.sh is meant to return 1+2+...+n but returns the wrong total. Explain the root cause of the bug and describe the one-line fix. Be specific about which line and why."
-template: blank
+template: plan
 rubric: |
   - Identifies the off-by-one: the loop uses `while [ $i -lt $n ]` so it stops at n-1 and never adds n.
   - Proposes the correct fix (`-le` instead of `-lt`, or start/stop bounds adjusted).

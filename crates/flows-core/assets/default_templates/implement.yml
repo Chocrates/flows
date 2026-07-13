@@ -1,0 +1,15 @@
+# Single implement phase, using the REAL default implement prompt
+# (feature/implement.md) and the same tools the feature pipeline's implement
+# phase uses. This is the template phase-granularity coder evals run on, so the
+# eval exercises the actual pipeline prompt — not a stub.
+template: implement
+
+phases:
+  - name: implement
+    type: agent
+    prompt: feature/implement.md
+    tools:
+      files: true
+      bash:
+        allowed:
+          - "make*"

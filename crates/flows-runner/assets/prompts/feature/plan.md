@@ -23,8 +23,16 @@ implements the plan. In this phase you must **NOT**:
 - run tests, linters, builds, or any other command;
 - make any change to the repository.
 
-You **may** read existing files and research (read-only) to inform the plan.
+You **may** read existing files (read-only) to inform the plan.
 Your *only* output is the plan artifact below.
+
+## Tools available (read-only)
+
+- `read_file(path)` — read a file to understand existing code before planning.
+- `list_files(path)` — list a directory's contents (omit `path` for the repo root).
+
+Use these to ground the plan in the actual code. Write tools are intentionally
+withheld this phase — plan only.
 
 1. **Clarify ambiguities first.** If the idea is under-specified (language unclear, scope too broad, conflicting constraints), ask up to 3 focused questions. Do not ask about things you can infer from the repo structure.
 

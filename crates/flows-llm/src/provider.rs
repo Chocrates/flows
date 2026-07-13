@@ -7,6 +7,7 @@ use serde_json::Value;
 use flows_core::models::LLMConfig;
 
 use crate::anthropic;
+use crate::retry::{send_with_retry, RetryConfig};
 use crate::stream::Accumulator;
 use crate::types::{Completion, CompletionRequest, LlmError};
 
@@ -33,6 +34,7 @@ pub struct AnthropicProvider {
     api_key: String,
     api_base: String,
     client: reqwest::Client,
+    retry: RetryConfig,
 }
 
 impl AnthropicProvider {
@@ -46,6 +48,7 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             api_base: base,
             client: reqwest::Client::new(),
+            retry: RetryConfig::from_env(),
         }
     }
 }
@@ -55,16 +58,15 @@ impl Provider for AnthropicProvider {
     async fn complete(&self, req: &CompletionRequest) -> Result<Completion, LlmError> {
         let body = anthropic::build_body(req);
         let url = format!("{}/v1/messages", self.api_base);
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+        let resp = send_with_retry(&self.retry, || {
+            self.client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+        })
+        .await?;
 
         let status = resp.status();
         let text = resp
@@ -93,16 +95,15 @@ impl Provider for AnthropicProvider {
             .insert("stream".into(), Value::Bool(true));
         let url = format!("{}/v1/messages", self.api_base);
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+        let resp = send_with_retry(&self.retry, || {
+            self.client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+        })
+        .await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -142,6 +143,7 @@ pub struct OpenAiProvider {
     api_key: String,
     api_base: String,
     client: reqwest::Client,
+    retry: RetryConfig,
 }
 
 impl OpenAiProvider {
@@ -155,6 +157,7 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             api_base: base,
             client: reqwest::Client::new(),
+            retry: RetryConfig::from_env(),
         }
     }
 }
@@ -164,15 +167,14 @@ impl Provider for OpenAiProvider {
     async fn complete(&self, req: &CompletionRequest) -> Result<Completion, LlmError> {
         let body = crate::openai::build_body(req);
         let url = format!("{}/chat/completions", self.api_base);
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+        let resp = send_with_retry(&self.retry, || {
+            self.client
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .header("content-type", "application/json")
+                .json(&body)
+        })
+        .await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -204,15 +206,14 @@ impl Provider for OpenAiProvider {
         );
         let url = format!("{}/chat/completions", self.api_base);
 
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+        let resp = send_with_retry(&self.retry, || {
+            self.client
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .header("content-type", "application/json")
+                .json(&body)
+        })
+        .await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();

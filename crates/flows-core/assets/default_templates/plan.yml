@@ -1,0 +1,12 @@
+# Single planning/analysis phase, using the REAL default plan prompt
+# (feature/plan.md) and the same read-only tools the feature pipeline's plan
+# phase uses. This is the template phase-granularity reasoner evals run on, so a
+# reasoning task exercises the actual pipeline prompt — not a stub.
+template: plan
+
+phases:
+  - name: plan
+    type: agent
+    prompt: feature/plan.md
+    tools: research_ro
+    max_clarification_rounds: 3

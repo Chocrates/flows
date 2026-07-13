@@ -87,12 +87,22 @@ fn list_files_dirs_first_then_files() {
 }
 
 #[test]
-fn list_files_empty_path_lists_root() {
+fn list_files_root_spellings() {
     let d = tempdir().unwrap();
     write_file(d.path(), "a.txt", "").unwrap();
-    // Empty / whitespace path == repo root (like `ls` with no argument).
-    assert_eq!(list_files(d.path(), "").unwrap(), "a.txt");
-    assert_eq!(list_files(d.path(), "   ").unwrap(), "a.txt");
+    std::fs::create_dir(d.path().join("sub")).unwrap();
+    write_file(d.path(), "sub/b.txt", "").unwrap();
+    // Every common "root" spelling lists the repo root.
+    for root in ["", "   ", ".", "/"] {
+        assert_eq!(
+            list_files(d.path(), root).unwrap(),
+            "/sub\na.txt",
+            "root={root:?}"
+        );
+    }
+    // A leading slash on a subdir reads as repo-relative, not an escape.
+    assert_eq!(list_files(d.path(), "/sub").unwrap(), "sub/b.txt");
+    assert_eq!(list_files(d.path(), "sub").unwrap(), "sub/b.txt");
     // `safe_path` itself still rejects an empty path (read/write need a real one).
     assert!(safe_path(d.path(), "").is_err());
 }

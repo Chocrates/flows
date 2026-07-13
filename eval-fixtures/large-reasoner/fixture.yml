@@ -14,7 +14,7 @@ task: >
   provider cache is keyed by and why, why providers are stored as `Arc<dyn
   Provider>`, and how a single-model run stays unaffected. Reference real types
   and functions.
-template: blank
+template: plan
 rubric: |
   - Identifies the cache key as (model + api_base + api_key) — distinct endpoints
     /keys get distinct providers, same-config phases share one.

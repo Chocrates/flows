@@ -16,7 +16,7 @@ task: >
   `all` = all on, or `+token` segments (`+search`, `+range`, `+slim`, `+map`,
   `+budget`, `+rag`) combined with `+` turn on exactly those; an unknown token is
   an error. Do not modify the tests.
-template: blank
+template: implement
 verify: "cargo test -p flows-core context_config"
 timeout_secs: 1800
 relevant:

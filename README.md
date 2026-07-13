@@ -276,6 +276,13 @@ groups by it so levels are never compared:
 - `turn` — a **single model turn**: one prompt → one completion, no tool loop, no
   repo. The cheapest, lowest-variance probe. Coder turns auto-grade by `expect`
   (substrings the completion must contain); reasoner turns are graded manually.
+  Turn fixtures carry their own eval-specific prompt (`system` + `task`).
+
+Phase and flow fixtures run the **real default prompts** so the eval measures the
+actual pipeline: coder phase fixtures use the `implement` template (the real
+`feature/implement.md` prompt + tools), reasoner phase fixtures use the `plan`
+template (the real read-only `feature/plan.md` prompt), and flow fixtures use the
+full `feature` pipeline. Only `turn` uses a bespoke prompt.
 
 Filter any command with `--granularity flow|phase|turn|all`.
 
