@@ -20,9 +20,11 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_retries: 4,
-            // The upstream (model-swap proxy) waits ~5s on a failed backend before
-            // it's ready, so the first retry waits at least 6s (6/12/24/30s).
+            // Model-swap proxies can take a while to load a large model, so retry
+            // generously. Backoff: 6/12/24/30/30/… s (capped) → ~4 min total.
+            max_retries: 10,
+            // The upstream waits ~5s on a failed backend before it's ready, so the
+            // first retry waits at least 6s.
             base_delay_ms: 6_000,
             max_delay_ms: 30_000,
         }

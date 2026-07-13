@@ -445,12 +445,16 @@ fn append_transcript_round(
     let mut s = String::new();
     if round == 0 {
         s.push_str(&format!("\n========== PHASE: {phase} ==========\n"));
-        s.push_str(&format!("--- SYSTEM ---\n{system}\n"));
     }
     s.push_str(&format!(
         "\n----- ROUND {round} REQUEST ({} in tok) -----\n",
         completion.usage.input_tokens
     ));
+    if round == 0 {
+        // The system prompt is part of the request — sent on every round (the
+        // `in tok` count includes it each time). Shown once here; it persists.
+        s.push_str(&format!("[system]\n{system}\n\n"));
+    }
     for m in new_messages {
         let role = match m.role {
             Role::System => "system",
