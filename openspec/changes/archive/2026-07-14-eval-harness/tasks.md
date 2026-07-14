@@ -44,11 +44,12 @@
 ## 9. Reasoner alignment & context-preload
 
 - [x] 9.1 Model tool-capability flag: `supports_tools: false` on a profile → runner sends no tool schemas; the model inlines file writes in `content.files`, which the runner writes to disk. Reasoner phases just emit their plan artifact (threaded via `prior_artifacts`, matching the original design).
-- [ ] 9.2 (deferred) Context delivery: eval runs the REAL flow prompts unmodified — a read-incapable model's ungrounded output is the intended negative baseline. `relevant:` stays a label. A naive context feature will be added later and A/B'd against this baseline (no eval-side injection).
+- [x] 9.2 Negative baseline established: eval runs the REAL flow prompts unmodified (no eval-side context injection); `relevant:` stays a label. A read-incapable model's ungrounded output is the intended baseline for the future context-delivery feature (that A/B belongs to the `context-delivery-for-small-models` change).
 
 ## 8. Store maintenance
 
 - [x] 8.1 `eval clean` — delete stored results, filterable by `--model`/`--fixture`/`--suite`/`--granularity` (no filters = wipe the whole store); confirmation prompt unless `--yes`. Rewrites `results.jsonl` and removes the trial dirs. Store test for `remove_trials`.
+- [x] 8.2 Model↔suite pairing: a `suites: [coder|reasoner]` tag on a model profile restricts it to those fixtures (auto-pairs `--models coder,reasoner`); `model:suite` overrides per run; untagged runs all. Carried through profile resolution; report/run honor it.
 
 ## 6. Docs & wrap-up
 

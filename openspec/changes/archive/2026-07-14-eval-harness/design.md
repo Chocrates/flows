@@ -58,8 +58,57 @@ not auto-measured from repo tokens. Cheap, intentional, and lets a deliberately
 tiny fixture stress a large window. `--size` filters; the report breaks out by tier.
 
 **D6 — Terminal-table report only.** `flows eval report` reads the store and prints
-a table grouped by `(model, config, suite, size)` with mean ± spread over trials.
-No HTML/CSV. The JSONL store stays a clean export point if richer viz is wanted.
+a table grouped by `(model, config, suite, size, granularity)` with mean ± spread
+over trials. No HTML/CSV. The JSONL store stays a clean export point if richer viz
+is wanted.
+
+## Decisions added during implementation
+
+**D7 — Three evaluation granularities.** Fixtures declare `granularity: flow |
+phase | turn`, answering different questions and never compared against each other
+(part of the report grouping key). `flow` = whole pipeline (realistic, high
+variance); `phase` = one agent tool loop (the clean A/B unit for context
+features); `turn` = one prompt → one completion, no tool loop (cheapest,
+lowest-variance). A `phase` fixture must resolve to exactly one agent phase.
+
+**D8 — Turn = single completion, `expect`-graded.** A `turn` trial sends one
+`provider.complete` (no repo, no tools). Coder turns auto-grade by `expect`
+substrings; reasoner turns are graded manually. This is the model-probe layer; the
+deterministic retrieval eval remains future work.
+
+**D9 — Per-trial transcripts.** Every trial saves the context the model saw plus
+its response. Turn writes a full request+response `transcript.txt`; phase/flow
+capture the agent loop's assembled prompt per round via `FLOWS_TRANSCRIPT` (the
+agent writes it to the run dir; eval copies it out before deleting the run). The
+runner's `llm.jsonl` (metadata only) is preserved as `run-log.jsonl`.
+
+**D10 — Five-dimension manual rating in a review TUI.** `eval review` opens a
+full-screen (ratatui) split view — scrollable transcript above, ratings below —
+and requires a 1–5 rating on Correctness, Efficiency, Tool-use, Grounding, and
+Instruction-following (no skipping; tool-use is n/a for turns). Pass derives from
+Correctness ≥ 3. Falls back to line prompts when not a terminal. The report shows
+per-dimension means (`C/E/T/G/I`). (Supersedes the earlier single-score idea.)
+
+**D11 — `eval clean` for store maintenance.** Delete stored results, filterable by
+model/fixture/suite/granularity (no filters = wipe); confirm unless `--yes`.
+Needed so a fix that changes model behavior doesn't average old and new trials
+together in `report`.
+
+**D12 — Model↔suite pairing via a profile tag.** A model runs only its suites'
+fixtures when restricted. `suites: [coder]` on a model profile auto-pairs
+(`--models coder,reasoner` → each on its own tasks); `--models coder:reasoner`
+overrides for one run; untagged = all suites. Keeps the matrix from running every
+model on every fixture without retyping.
+
+**D13 — Phase/flow run the REAL default prompts; no eval-side context injection.**
+Phase coder fixtures use an `implement` template (the real `feature/implement.md`
+prompt + tools), reasoner phase fixtures a `plan` template (real read-only
+`feature/plan.md`); flow uses `feature`. Only `turn` uses a bespoke prompt. Eval
+does **not** preload/inject context — a read-incapable model's ungrounded output
+is the intended **negative baseline** for a future context-delivery feature to be
+A/B'd against. `relevant:` stays a label. A model that can't function-call is
+handled by the runner's `supports_tools: false` path (see the model-io-resilience
+change), not by the harness.
 
 ## Risks / Trade-offs
 

@@ -1,5 +1,8 @@
-## ADDED Requirements
+# eval-harness Specification
 
+## Purpose
+TBD - created by archiving change eval-harness. Update Purpose after archive.
+## Requirements
 ### Requirement: Context feature-flag configuration
 
 The system SHALL provide a `context` configuration block with independent boolean
@@ -103,6 +106,40 @@ the others.
 - **WHEN** a selected model fails preflight (e.g. no endpoint/key)
 - **THEN** that model is reported as skipped and the remaining models are still evaluated.
 
+### Requirement: Pairing models to suites
+
+The system SHALL let a model be restricted to a set of fixture suites so it only
+evaluates those fixtures. A model profile MAY declare its suites (a `suites` tag);
+a per-run `model:suite` selector SHALL override the tag; a model with neither runs
+all suites.
+
+#### Scenario: Profile suite tag auto-pairs
+
+- **WHEN** models are run whose profiles declare suites (e.g. a coder tagged `coder`, a reasoner tagged `reasoner`)
+- **THEN** each model evaluates only its tagged suites' fixtures, not the full cross-product.
+
+#### Scenario: Per-run selector overrides the tag
+
+- **WHEN** a model is selected as `model:suite`
+- **THEN** that model is restricted to that suite for the run regardless of its profile tag.
+
+### Requirement: Store maintenance
+
+The system SHALL provide `flows eval clean` to delete stored results — all of them
+when unfiltered, or the subset matching a model / fixture / suite / granularity
+filter — removing both the trial records and their saved outputs, and SHALL
+confirm before deleting unless told to skip confirmation.
+
+#### Scenario: Filtered deletion
+
+- **WHEN** `eval clean` is run with a filter
+- **THEN** only trials matching the filter are removed from the store (records and saved outputs) and the rest are kept.
+
+#### Scenario: Unfiltered wipe
+
+- **WHEN** `eval clean` is run with no filter and confirmation
+- **THEN** the entire results store is deleted.
+
 ### Requirement: Suite-driven success signal
 
 The system SHALL determine each trial's success from its suite: a `coder` trial's
@@ -185,3 +222,4 @@ configuration.
 
 - **WHEN** a cell has more than one trial
 - **THEN** the report aggregates them with a mean and a spread so model non-determinism is visible.
+
