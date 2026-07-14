@@ -120,7 +120,9 @@ enum Command {
 enum EvalCmd {
     /// Run the eval matrix and store a record per trial.
     Run {
-        /// Models to evaluate (CSV of profile names or literal models). Omit → configured default.
+        /// Models to evaluate (CSV of profile names or literal models). Append
+        /// `:coder` or `:reasoner` to a model to restrict it to that suite
+        /// (e.g. `coder:coder,reasoner:reasoner`). Omit → configured default.
         #[arg(long)]
         models: Option<String>,
         /// Context configs (CSV, e.g. `baseline,+search,+search+map`). Omit → baseline.

@@ -234,6 +234,10 @@ pub struct PhaseConfig {
     pub max_clarification_rounds: u32,
     #[serde(default)]
     pub max_tool_rounds: Option<u32>,
+    /// Max completion tokens per model call. Raise for reasoning models (they emit
+    /// long hidden reasoning). None → the agent default.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -261,6 +265,7 @@ impl PhaseConfig {
             instructions: None,
             max_clarification_rounds: 3,
             max_tool_rounds: None,
+            max_tokens: None,
             model: None,
             thinking: None,
             loop_back_to: None,
@@ -288,6 +293,17 @@ pub struct LLMConfig {
     pub thinking: Option<bool>,
     #[serde(default)]
     pub thinking_budget_tokens: Option<u32>,
+    /// Eval-only: the fixture suites this model is intended for (`coder` /
+    /// `reasoner`). When set on a profile, `flows eval` restricts that model to
+    /// those suites. Empty = no restriction. Ignored outside eval.
+    #[serde(default)]
+    pub suites: Vec<String>,
+    /// Whether the model supports tool/function calling. `Some(false)` marks a
+    /// model that can't call tools (e.g. many reasoning models): the runner then
+    /// sends no tool schemas and instead expects the model to emit any files
+    /// inline in its artifact, which the runner writes. `None` = assume it can.
+    #[serde(default)]
+    pub supports_tools: Option<bool>,
 }
 
 impl Default for LLMConfig {
@@ -298,6 +314,8 @@ impl Default for LLMConfig {
             api_key: String::new(),
             thinking: None,
             thinking_budget_tokens: None,
+            suites: Vec::new(),
+            supports_tools: None,
         }
     }
 }
@@ -336,6 +354,8 @@ pub fn resolve_profile(
             api_key: p.api_key.clone(),
             thinking: p.thinking.or(base.thinking),
             thinking_budget_tokens: p.thinking_budget_tokens.or(base.thinking_budget_tokens),
+            suites: p.suites.clone(),
+            supports_tools: p.supports_tools.or(base.supports_tools),
         },
         None => LLMConfig {
             model: sel.to_string(),

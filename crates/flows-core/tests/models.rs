@@ -13,6 +13,8 @@ fn base() -> LLMConfig {
         api_key: "base-key".into(),
         thinking: Some(false),
         thinking_budget_tokens: None,
+        suites: Vec::new(),
+        supports_tools: None,
     }
 }
 
@@ -27,6 +29,8 @@ fn resolve_profile_matches_named_profile() {
             api_key: "prof-key".into(),
             thinking: Some(true),
             thinking_budget_tokens: Some(1024),
+            suites: Vec::new(),
+            supports_tools: None,
         },
     );
     let eff = resolve_profile("coder", &base(), &profiles);

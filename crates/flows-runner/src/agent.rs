@@ -150,6 +150,10 @@ impl StreamFilter {
 /// Per-phase cap on tool-call/work rounds (default; overridable via
 /// `phase.max_tool_rounds`).
 const MAX_TOOL_ROUNDS: u32 = 20;
+/// Default per-call completion-token cap. Generous so reasoning models (which
+/// emit long hidden reasoning before the answer) aren't truncated; a phase can
+/// raise it further via `phase.max_tokens`. It's a cap — short answers cost less.
+const DEFAULT_MAX_TOKENS: u32 = 16384;
 /// Abort after this many identical failing tool-call rounds in a row.
 const MAX_REPEATED_TOOL_ERRORS: u32 = 3;
 
@@ -535,7 +539,25 @@ pub async fn run_agent_phase(
         system_prompt.push_str(&docs);
     }
 
-    let tool_defs = build_tool_defs(&phase.tools);
+    // Models that can't function-call (e.g. many reasoning models) get NO tool
+    // schemas; instead the agent tells them to inline any file writes in the
+    // artifact's `content.files` map, which the runner writes to disk afterward.
+    let tools_enabled = llm.supports_tools != Some(false);
+    let tool_defs = if tools_enabled {
+        build_tool_defs(&phase.tools)
+    } else {
+        Vec::new()
+    };
+    if !tools_enabled {
+        system_prompt.push_str(
+            "\n\n# No tools available\n\n\
+You cannot call tools. Do not attempt tool/function calls — respond only with the \
+JSON artifact. To create or modify files, include them in the artifact under \
+`content.files` as a map of repository-relative path → the file's full new \
+contents. Example:\n\
+```json\n{\"type\": \"artifact\", \"content\": {\"files\": {\"src/x.rs\": \"...full contents...\"}, \"summary\": \"...\"}}\n```",
+        );
+    }
     // `llm` is already the phase's resolved config (profile/literal resolved by
     // the runner), so its model is the one to send — no per-phase re-derivation.
     let model = llm.model.clone();
@@ -585,7 +607,7 @@ pub async fn run_agent_phase(
             system: system_prompt.clone(),
             messages: messages.clone(),
             tools: tool_defs.clone(),
-            max_tokens: 4096,
+            max_tokens: phase.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             thinking_budget,
         };
         // Stream content tokens live, but suppress questions-envelope JSON via a
@@ -752,6 +774,28 @@ pub async fn run_agent_phase(
                 let content = parsed
                     .and_then(|mut p| p.as_object_mut().and_then(|o| o.remove("content")))
                     .unwrap_or(json!({}));
+                // No-tools models can't call write_file, so they inline files in
+                // `content.files` (path → contents); write them here.
+                if !tools_enabled {
+                    if let Some(files) = content.get("files").and_then(Value::as_object) {
+                        for (path, body) in files {
+                            if let Some(text) = body.as_str() {
+                                match files::write_file(repo_root, path, text) {
+                                    Ok(_) => callbacks.on_tool_result(
+                                        "write_file",
+                                        &format!("wrote {path}"),
+                                        false,
+                                    ),
+                                    Err(e) => callbacks.on_tool_result(
+                                        "write_file",
+                                        &format!("{path}: {e}"),
+                                        true,
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
                 return AgentResult {
                     artifact: Artifact {
                         phase: phase.name.clone(),

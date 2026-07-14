@@ -153,7 +153,9 @@ struct FixtureSpec {
     /// Human-grading criteria shown in `review`. Required for reasoner fixtures.
     #[serde(default)]
     rubric: Option<String>,
-    /// Labeled relevant files/symbols (for a future deterministic retrieval eval).
+    /// Labeled relevant files/symbols — the context a good run should surface.
+    /// A label for now (used by the future context-delivery + retrieval evals);
+    /// the eval does NOT inject them, so trials run the real flow unmodified.
     #[serde(default)]
     #[allow(dead_code)]
     relevant: Vec<String>,
@@ -625,7 +627,7 @@ fn run_turn_trial(
         system: fixture.spec.system.clone().unwrap_or_default(),
         messages: vec![Message::user(fixture.spec.task.clone())],
         tools: vec![],
-        max_tokens: fixture.spec.max_tokens.unwrap_or(2048),
+        max_tokens: fixture.spec.max_tokens.unwrap_or(16384),
         thinking_budget: if model_llm.thinking == Some(true) {
             model_llm.thinking_budget_tokens
         } else {
@@ -752,13 +754,37 @@ pub fn cmd_run(
     let base = merge_llm(&uglobal, &uproject);
     let profiles = merge_profiles(&uglobal, &uproject);
 
+    // Each model token is `model` or `model:suite`. A model is restricted to a
+    // set of suites (so it only runs those fixtures), resolved as: an explicit
+    // `:suite` on the CLI wins; otherwise the model profile's `suites:` tag; else
+    // no restriction. So `models: { coder: { suites: [coder] } }` auto-pairs, and
+    // `--models coder:reasoner` overrides for one run.
     let model_tokens: Vec<String> = split_csv(models).unwrap_or_else(|| vec![base.model.clone()]);
-    let mut model_cells: Vec<(String, LLMConfig)> = Vec::new();
+    let mut model_cells: Vec<(String, LLMConfig, Option<Vec<Suite>>)> = Vec::new();
     for token in &model_tokens {
-        let eff = resolve_llm(token, &base, &profiles);
+        let (mtok, cli_suite) = match token.split_once(':') {
+            Some((m, s)) => {
+                let su = Suite::parse_filter(s.trim())?
+                    .ok_or_else(|| format!("model `{token}`: suite must be coder or reasoner"))?;
+                (m.trim().to_string(), Some(su))
+            }
+            None => (token.trim().to_string(), None),
+        };
+        let eff = resolve_llm(&mtok, &base, &profiles);
+        // CLI `:suite` overrides the profile tag; else use the profile's `suites`.
+        let allowed: Option<Vec<Suite>> = if let Some(su) = cli_suite {
+            Some(vec![su])
+        } else {
+            let tagged: Vec<Suite> = eff
+                .suites
+                .iter()
+                .filter_map(|s| Suite::parse_filter(s).ok().flatten())
+                .collect();
+            (!tagged.is_empty()).then_some(tagged)
+        };
         match super::preflight_llm(&eff) {
-            Ok(()) => model_cells.push((token.clone(), eff)),
-            Err(e) => eprintln!("  skip model `{token}`: {e}"),
+            Ok(()) => model_cells.push((mtok, eff, allowed)),
+            Err(e) => eprintln!("  skip model `{mtok}`: {e}"),
         }
     }
     if model_cells.is_empty() {
@@ -773,17 +799,33 @@ pub fn cmd_run(
     // eval — the agent loop only writes a transcript when this is set.
     std::env::set_var("FLOWS_TRANSCRIPT", "1");
 
-    let total = model_cells.len() * config_ctx.len() * prepared.len() * trials;
+    // Total accounts for per-model suite restrictions.
+    let total: usize = model_cells
+        .iter()
+        .map(|(_, _, allowed)| {
+            prepared
+                .iter()
+                .filter(|(f, _)| allowed.as_ref().map_or(true, |v| v.contains(&f.spec.suite)))
+                .count()
+        })
+        .sum::<usize>()
+        * config_ctx.len()
+        * trials;
     println!(
-        "Evaluating {} model(s) × {} config(s) × {} fixture(s) × {trials} trial(s) = {total} run(s)\n",
+        "Evaluating {} model(s) × {} config(s) × {trials} trial(s) = {total} run(s)\n",
         model_cells.len(),
         config_ctx.len(),
-        prepared.len()
     );
 
-    for (label, llm) in &model_cells {
+    for (label, llm, allowed) in &model_cells {
         for (cfg_name, ctx) in &config_ctx {
             for (f, phases) in &prepared {
+                // A model restricted to suites skips fixtures outside them.
+                if let Some(v) = allowed {
+                    if !v.contains(&f.spec.suite) {
+                        continue;
+                    }
+                }
                 for i in 0..trials {
                     eprint!(
                         "  {label} | {cfg_name} | {} trial {}/{trials}… ",

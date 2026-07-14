@@ -10,3 +10,5 @@ phases:
     prompt: feature/plan.md
     tools: research_ro
     max_clarification_rounds: 3
+    # Reasoning models emit long hidden reasoning before the answer — give room.
+    max_tokens: 32000

@@ -161,6 +161,8 @@ fn parse_profiles(raw: &Value) -> HashMap<String, LLMConfig> {
                     api_key: get_str(v, "api_key").unwrap_or_default(),
                     thinking: get_bool(v, "thinking"),
                     thinking_budget_tokens: get_u32(v, "thinking_budget_tokens"),
+                    suites: get_str_list(v, "suites").unwrap_or_default(),
+                    supports_tools: get_bool(v, "supports_tools"),
                 },
             );
         }
@@ -219,6 +221,8 @@ pub fn load_global_config(path: Option<&Path>) -> Result<GlobalConfig> {
         api_key: get_str(&llm_raw, "api_key").unwrap_or(env_key),
         thinking: get_bool(&llm_raw, "thinking"),
         thinking_budget_tokens: get_u32(&llm_raw, "thinking_budget_tokens"),
+        suites: get_str_list(&llm_raw, "suites").unwrap_or_default(),
+        supports_tools: get_bool(&llm_raw, "supports_tools"),
     };
 
     let notif_raw = raw.get("notifications").cloned().unwrap_or(Value::Null);
@@ -308,6 +312,7 @@ fn parse_phase(p: &Value) -> Result<PhaseConfig> {
         instructions: get_str(p, "instructions"),
         max_clarification_rounds: get_u32(p, "max_clarification_rounds").unwrap_or(3),
         max_tool_rounds: get_u32(p, "max_tool_rounds"),
+        max_tokens: get_u32(p, "max_tokens"),
         model: get_str(p, "model"),
         thinking: get_bool(p, "thinking"),
         loop_back_to: get_str(p, "loop_back_to"),
@@ -336,6 +341,8 @@ pub fn load_project_config(repo_path: &Path) -> Result<Option<ProjectConfig>> {
         api_key: get_str(&llm_raw, "api_key").unwrap_or(env_key),
         thinking: get_bool(&llm_raw, "thinking"),
         thinking_budget_tokens: get_u32(&llm_raw, "thinking_budget_tokens"),
+        suites: get_str_list(&llm_raw, "suites").unwrap_or_default(),
+        supports_tools: get_bool(&llm_raw, "supports_tools"),
     };
 
     let phases = match raw.get("phases") {
@@ -386,6 +393,12 @@ pub fn merge_llm(global: &GlobalConfig, project: &ProjectConfig) -> LLMConfig {
         api_key: or_str(&p.api_key, &g.api_key),
         thinking: p.thinking.or(g.thinking),
         thinking_budget_tokens: p.thinking_budget_tokens.or(g.thinking_budget_tokens),
+        suites: if p.suites.is_empty() {
+            g.suites.clone()
+        } else {
+            p.suites.clone()
+        },
+        supports_tools: p.supports_tools.or(g.supports_tools),
     }
 }
 
@@ -503,6 +516,8 @@ pub fn apply_user_project_override(base: &GlobalConfig, override_val: &Value) ->
         thinking: get_bool(&llm_raw, "thinking").or(base.llm.thinking),
         thinking_budget_tokens: get_u32(&llm_raw, "thinking_budget_tokens")
             .or(base.llm.thinking_budget_tokens),
+        suites: get_str_list(&llm_raw, "suites").unwrap_or_else(|| base.llm.suites.clone()),
+        supports_tools: get_bool(&llm_raw, "supports_tools").or(base.llm.supports_tools),
     };
 
     let notifications = if override_val.get("notifications").is_some() {

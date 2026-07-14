@@ -10,4 +10,7 @@ rubric: |
   - Identifies the off-by-one: the loop uses `while [ $i -lt $n ]` so it stops at n-1 and never adds n.
   - Proposes the correct fix (`-le` instead of `-lt`, or start/stop bounds adjusted).
   - Explanation is specific to the actual code, not generic.
+# Preloaded into the prompt so a read-incapable reasoner sees the code up front.
+relevant:
+  - calc.sh
 timeout_secs: 600

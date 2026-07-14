@@ -41,6 +41,11 @@
 - [x] 7.9 Full-screen review TUI (ratatui): scrollable transcript pane above a live ratings pane so the output stays visible while rating; keyboard + mouse-wheel scroll, 1-5 to rate, Tab/←→ move dims, n note, Enter save+next, q quit. Falls back to line prompts when not a terminal.
 - [x] 7.10 Phase/flow fixtures use the REAL default prompts (not the bare fallback): add single-phase `implement` (→ `feature/implement.md`) and `plan` (→ read-only `feature/plan.md`) templates; retag coder-phase fixtures to `implement`, reasoner-phase to `plan`; flow fixtures already use `feature`. Turn stays eval-specific. Live-verified the real prompts render.
 
+## 9. Reasoner alignment & context-preload
+
+- [x] 9.1 Model tool-capability flag: `supports_tools: false` on a profile → runner sends no tool schemas; the model inlines file writes in `content.files`, which the runner writes to disk. Reasoner phases just emit their plan artifact (threaded via `prior_artifacts`, matching the original design).
+- [ ] 9.2 (deferred) Context delivery: eval runs the REAL flow prompts unmodified — a read-incapable model's ungrounded output is the intended negative baseline. `relevant:` stays a label. A naive context feature will be added later and A/B'd against this baseline (no eval-side injection).
+
 ## 8. Store maintenance
 
 - [x] 8.1 `eval clean` — delete stored results, filterable by `--model`/`--fixture`/`--suite`/`--granularity` (no filters = wipe the whole store); confirmation prompt unless `--yes`. Rewrites `results.jsonl` and removes the trial dirs. Store test for `remove_trials`.

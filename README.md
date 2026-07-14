@@ -179,6 +179,25 @@ phases:
   shows the model each phase resolves to; `flows doctor` lists every profile and
   flags an unusable one before you run.
 
+**Models that can't call tools.** Some models (many reasoning models) don't do
+function calling. Mark such a profile `supports_tools: false`:
+
+```yaml
+models:
+  reasoner:
+    model: deepseek-r1
+    supports_tools: false      # no function calling
+```
+
+flows then sends **no tool schemas** to that model and instead instructs it to
+emit any file writes inline in its artifact — `content.files` as a map of
+repo-relative path → full contents — which flows writes to disk after the
+response. A planning/analysis phase just emits its plan (no files). *Caveat:* a
+no-tools model can't read the repo, so it only sees the task + repo tree in the
+prompt; tasks that require reading existing file contents need those inlined into
+the prompt (a planned context-preload feature). Prefer a tool-capable model where
+the task depends on reading code.
+
 Generate a project config tailored to your stack:
 ```bash
 flows init            # writes .flows.yml (detects Python / Rust / Node / Go)
@@ -235,6 +254,17 @@ model behavior (old and new trials would otherwise average together in `report`)
 - **`--models`** — CSV of model-profile names (from your `models:` map) or literal
   model strings. Each model is forced across the whole pipeline. Omit → your
   configured default. Models failing preflight are skipped, not fatal.
+- **Pairing models to suites** — a model runs only its suites' fixtures when
+  restricted. Tag the profile once in config so it auto-pairs:
+  ```yaml
+  models:
+    coder:    { model: coder,    api_base: …, suites: [coder] }
+    reasoner: { model: reasoner, api_base: …, suites: [reasoner] }
+  ```
+  Then `flows eval run --models coder,reasoner` runs coder on coder fixtures and
+  reasoner on reasoner fixtures — not the full cross-product. Override for one run
+  by appending `:coder` / `:reasoner` to a model (`--models coder:reasoner`); an
+  untagged model with no override runs all suites.
 - **`--configs`** — CSV of context configurations: `baseline` (all off), `all`, or
   combined feature tokens `+search`, `+range`, `+slim`, `+map`, `+budget`, `+rag`
   (e.g. `+search+map`). These select the upcoming context-delivery features; until
@@ -252,15 +282,22 @@ claude-opus-4-8  baseline   coder    medium  100% 3/3     12.0k       13.1k±0.4
 ```yaml
 suite: coder            # coder | reasoner
 size:  small            # small | medium | large
-granularity: phase      # flow | phase  (turn reserved)
+granularity: phase      # flow | phase | turn
 task:  "…"
 template: blank
 verify: "cargo test"    # required for coder: exit 0 == success
 rubric: |               # required for reasoner: shown during `eval review`
   - correct root cause?
   - fix actionable / idiomatic?
+relevant:               # labels the files/symbols a good run should surface
+  - src/calc.sh
 timeout_secs: 600
 ```
+
+**`relevant:`** labels the files/symbols a good run should surface — the target
+for the (upcoming) context-delivery + retrieval evals. It is **not** injected: eval
+trials run the real flow prompts unmodified, so a read-incapable model's failure
+to ground is a genuine **negative baseline** to measure a context feature against.
 
 **Granularity** picks how much of the pipeline a fixture exercises — and the report
 groups by it so levels are never compared:
