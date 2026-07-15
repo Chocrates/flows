@@ -159,6 +159,14 @@ struct FixtureSpec {
     #[serde(default)]
     #[allow(dead_code)]
     relevant: Vec<String>,
+    /// Context feature configs this fixture runs under, each parsed by
+    /// `parse_context_config` (e.g. `[baseline, all]`, or `search+range+slim`).
+    /// This is the fixture's own config axis: an on/off matrix declared in the
+    /// fixture so, e.g., a reasoner fixture always runs both with and without the
+    /// context features. When empty, the fixture uses the run's `--configs` axis
+    /// (default `baseline`).
+    #[serde(default)]
+    configs: Vec<String>,
     #[serde(default = "default_timeout")]
     timeout_secs: u64,
 }
@@ -466,6 +474,24 @@ fn capture_output(work: &Path, store: &Store, run_id: &str, phases: &[PhaseConfi
     s
 }
 
+/// Build the oracle payload: each of the fixture's `relevant` entries that is an
+/// existing file in the materialized repo, read and fenced with its path. Symbol
+/// labels (entries that aren't files) are skipped. Empty when nothing resolves.
+fn oracle_blob(fixture: &Fixture, work: &Path) -> String {
+    fixture
+        .spec
+        .relevant
+        .iter()
+        .filter_map(|rel| {
+            let p = work.join(rel);
+            std::fs::read_to_string(&p)
+                .ok()
+                .map(|c| format!("### {rel}\n```\n{}\n```", c.trim_end()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Pin a run to one model + one context config, ignoring profile routing (every
 /// phase runs on `model`). Returns synthetic (global, project) configs.
 fn pin_config(
@@ -480,7 +506,23 @@ fn pin_config(
     let mut p = base_project.clone();
     p.llm = model.clone();
     p.models = HashMap::new();
-    p.context = ctx;
+    // Start from the user's context config (so retrieval_model / max_chunks from
+    // `~/.flows/config.yml` survive) and overlay only the token-selected flags.
+    // Seed from global (where users set retrieval_model); a project `context`
+    // block overrides the retrieval settings when present.
+    let mut merged = base_global.context.clone();
+    if !base_project.context.retrieval_model.is_empty() {
+        merged.retrieval_model = base_project.context.retrieval_model.clone();
+        merged.retrieval_max_chunks = base_project.context.retrieval_max_chunks;
+    }
+    merged.search_tool = ctx.search_tool;
+    merged.range_reads = ctx.range_reads;
+    merged.slim_tree = ctx.slim_tree;
+    merged.repo_map = ctx.repo_map;
+    merged.budgeting = ctx.budgeting;
+    merged.retrieval = ctx.retrieval;
+    merged.oracle = ctx.oracle;
+    p.context = merged;
     (g, p)
 }
 
@@ -530,6 +572,14 @@ fn run_trial(
 
     let (global, project) = pin_config(base_global, base_project, model_llm, ctx.clone());
 
+    // Oracle push (stopgap): make the fixture's labeled `relevant` files available
+    // to the runner via an env var, so a no-tool model gets the code up front. The
+    // runner reads it only when `context.oracle` is set. Cleared after the run.
+    // Trials run sequentially, so the process-global env var is safe here.
+    if ctx.oracle {
+        std::env::set_var("FLOWS_ORACLE_CONTEXT", oracle_blob(fixture, work.path()));
+    }
+
     let run_id = uuid::Uuid::new_v4().to_string();
     let cb = EvalCallbacks;
     let fut = run_pipeline(
@@ -554,6 +604,9 @@ fn run_trial(
         Ok(Err(e)) => Some(format!("run: {e}")),
         Err(_) => Some("timeout".into()),
     };
+    if ctx.oracle {
+        std::env::remove_var("FLOWS_ORACLE_CONTEXT");
+    }
 
     // Verify (coder pass signal). None when the fixture defines no verifier.
     let verify_pass = fixture
@@ -741,11 +794,25 @@ pub fn cmd_run(
         return Err("no runnable fixtures (all failed phase/granularity validation)".into());
     }
 
-    // Config axis (validate names up front).
-    let config_names: Vec<String> = split_csv(configs).unwrap_or_else(|| vec!["baseline".into()]);
-    let mut config_ctx: Vec<(String, ContextConfig)> = Vec::new();
-    for name in &config_names {
-        config_ctx.push((name.clone(), parse_context_config(name)?));
+    // Config axis. `--configs` is the run default; a fixture that declares its
+    // own `configs:` overrides it (its own on/off matrix). Resolve one axis per
+    // prepared fixture, validating every config token up front.
+    let default_config_names: Vec<String> =
+        split_csv(configs).unwrap_or_else(|| vec!["baseline".into()]);
+    let mut fixture_axes: Vec<Vec<(String, ContextConfig)>> = Vec::with_capacity(prepared.len());
+    for (f, _) in &prepared {
+        let names = if f.spec.configs.is_empty() {
+            &default_config_names
+        } else {
+            &f.spec.configs
+        };
+        let mut axis = Vec::with_capacity(names.len());
+        for name in names {
+            let ctx =
+                parse_context_config(name).map_err(|e| format!("fixture `{}`: {e}", f.name))?;
+            axis.push((name.clone(), ctx));
+        }
+        fixture_axes.push(axis);
     }
 
     // Model axis, resolved against the user's real config.
@@ -754,22 +821,17 @@ pub fn cmd_run(
     let base = merge_llm(&uglobal, &uproject);
     let profiles = merge_profiles(&uglobal, &uproject);
 
-    // Each model token is `model` or `model:suite`. A model is restricted to a
-    // set of suites (so it only runs those fixtures), resolved as: an explicit
-    // `:suite` on the CLI wins; otherwise the model profile's `suites:` tag; else
-    // no restriction. So `models: { coder: { suites: [coder] } }` auto-pairs, and
-    // `--models coder:reasoner` overrides for one run.
+    // Each model token is `model`, `model:suite`, or a bare suite keyword. Suite
+    // restriction (which fixtures a model runs) resolves as: explicit CLI `:suite`
+    // wins; else the profile's `suites:` tag; else no restriction. So
+    // `models: { qwen3-coder: { suites: [coder] } }` auto-pairs, and
+    // `--models qwen3-coder:reasoner` overrides for one run. A bare `coder`/
+    // `reasoner` token that is NOT a profile name expands to every configured
+    // profile tagged with that suite (`--models coder` = all coder models).
     let model_tokens: Vec<String> = split_csv(models).unwrap_or_else(|| vec![base.model.clone()]);
     let mut model_cells: Vec<(String, LLMConfig, Option<Vec<Suite>>)> = Vec::new();
-    for token in &model_tokens {
-        let (mtok, cli_suite) = match token.split_once(':') {
-            Some((m, s)) => {
-                let su = Suite::parse_filter(s.trim())?
-                    .ok_or_else(|| format!("model `{token}`: suite must be coder or reasoner"))?;
-                (m.trim().to_string(), Some(su))
-            }
-            None => (token.trim().to_string(), None),
-        };
+    type Cells = Vec<(String, LLMConfig, Option<Vec<Suite>>)>;
+    let push_cell = |mtok: String, cli_suite: Option<Suite>, cells: &mut Cells| {
         let eff = resolve_llm(&mtok, &base, &profiles);
         // CLI `:suite` overrides the profile tag; else use the profile's `suites`.
         let allowed: Option<Vec<Suite>> = if let Some(su) = cli_suite {
@@ -783,9 +845,46 @@ pub fn cmd_run(
             (!tagged.is_empty()).then_some(tagged)
         };
         match super::preflight_llm(&eff) {
-            Ok(()) => model_cells.push((mtok, eff, allowed)),
+            Ok(()) => cells.push((mtok, eff, allowed)),
             Err(e) => eprintln!("  skip model `{mtok}`: {e}"),
         }
+    };
+    for token in &model_tokens {
+        // `model:suite` — explicit model restricted to a suite.
+        if let Some((m, s)) = token.split_once(':') {
+            let su = Suite::parse_filter(s.trim())?
+                .ok_or_else(|| format!("model `{token}`: suite must be coder or reasoner"))?;
+            push_cell(m.trim().to_string(), Some(su), &mut model_cells);
+            continue;
+        }
+        let tok = token.trim();
+        // A bare suite keyword that is NOT also a profile name expands to every
+        // profile tagged with that suite.
+        if !profiles.contains_key(tok) {
+            if let Ok(Some(su)) = Suite::parse_filter(tok) {
+                let mut names: Vec<String> = profiles
+                    .iter()
+                    .filter(|(_, cfg)| {
+                        cfg.suites
+                            .iter()
+                            .any(|s| Suite::parse_filter(s).ok().flatten() == Some(su))
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                if names.is_empty() {
+                    return Err(format!(
+                        "--models `{tok}`: no configured model is tagged suites: [{tok}]"
+                    ));
+                }
+                names.sort();
+                for name in names {
+                    push_cell(name, None, &mut model_cells);
+                }
+                continue;
+            }
+        }
+        // Plain profile name or literal model id.
+        push_cell(tok.to_string(), None, &mut model_cells);
     }
     if model_cells.is_empty() {
         return Err("no runnable models (all failed preflight)".into());
@@ -799,33 +898,59 @@ pub fn cmd_run(
     // eval — the agent loop only writes a transcript when this is set.
     std::env::set_var("FLOWS_TRANSCRIPT", "1");
 
-    // Total accounts for per-model suite restrictions.
+    // Total accounts for per-model suite restrictions and per-fixture config axes.
     let total: usize = model_cells
         .iter()
         .map(|(_, _, allowed)| {
             prepared
                 .iter()
-                .filter(|(f, _)| allowed.as_ref().map_or(true, |v| v.contains(&f.spec.suite)))
-                .count()
+                .zip(&fixture_axes)
+                .filter(|((f, _), _)| allowed.as_ref().map_or(true, |v| v.contains(&f.spec.suite)))
+                .map(|(_, axis)| axis.len())
+                .sum::<usize>()
         })
         .sum::<usize>()
-        * config_ctx.len()
         * trials;
+    // Guard the common mismatch: fixtures survive their suite filter but every
+    // model is suite-restricted away from them (e.g. `--suite reasoner` with a
+    // coder-tagged default model), yielding a silent 0-run pass.
+    if total == 0 {
+        use std::collections::BTreeSet;
+        let want: BTreeSet<&str> = prepared
+            .iter()
+            .map(|(f, _)| f.spec.suite.as_str())
+            .collect();
+        let have: BTreeSet<&str> = model_cells
+            .iter()
+            .flat_map(|(_, _, allowed)| match allowed {
+                Some(v) => v.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                None => vec!["<any>"],
+            })
+            .collect();
+        let join = |s: &BTreeSet<&str>| s.iter().copied().collect::<Vec<_>>().join(", ");
+        let suite = want.iter().next().copied().unwrap_or("reasoner");
+        return Err(format!(
+            "0 runs: the selected fixtures need suite(s) [{}] but the model(s) cover [{}]. \
+             Name a model tagged for that suite, e.g. `--models <model>` or `--models <model>:{suite}`.",
+            join(&want),
+            join(&have),
+        ));
+    }
     println!(
-        "Evaluating {} model(s) × {} config(s) × {trials} trial(s) = {total} run(s)\n",
+        "Evaluating {} model(s) × {} fixture(s) (per-fixture config axis) × {trials} trial(s) = {total} run(s)\n",
         model_cells.len(),
-        config_ctx.len(),
+        prepared.len(),
     );
 
     for (label, llm, allowed) in &model_cells {
-        for (cfg_name, ctx) in &config_ctx {
-            for (f, phases) in &prepared {
-                // A model restricted to suites skips fixtures outside them.
-                if let Some(v) = allowed {
-                    if !v.contains(&f.spec.suite) {
-                        continue;
-                    }
+        for ((f, phases), axis) in prepared.iter().zip(&fixture_axes) {
+            // A model restricted to suites skips fixtures outside them.
+            if let Some(v) = allowed {
+                if !v.contains(&f.spec.suite) {
+                    continue;
                 }
+            }
+            for (cfg_name, ctx) in axis {
                 for i in 0..trials {
                     eprint!(
                         "  {label} | {cfg_name} | {} trial {}/{trials}… ",
@@ -1374,6 +1499,27 @@ fn trunc(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn oracle_blob_reads_relevant_files_skips_symbols_and_missing() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "fn a() {}\n").unwrap();
+        let spec: FixtureSpec = serde_yaml_ng::from_str(
+            "task: t\nsuite: reasoner\ngranularity: phase\nrubric: r\n\
+             relevant:\n  - a.rs\n  - some_symbol_name\n  - missing.rs\n",
+        )
+        .unwrap();
+        let fx = Fixture {
+            name: "f".into(),
+            spec,
+            repo_files: vec![],
+        };
+        let blob = oracle_blob(&fx, d.path());
+        assert!(blob.contains("### a.rs") && blob.contains("fn a() {}"));
+        // Symbol label + missing file contribute nothing.
+        assert!(!blob.contains("some_symbol_name"));
+        assert!(!blob.contains("missing.rs"));
+    }
+
     fn mkrec(suite: &str, verify: Option<bool>, manual: Option<bool>, peak: u64) -> TrialRecord {
         TrialRecord {
             trial: uuid::Uuid::new_v4().to_string(),
@@ -1421,6 +1567,7 @@ mod tests {
             max_tokens: None,
             rubric: None,
             relevant: vec![],
+            configs: vec![],
             timeout_secs: 1,
         };
         assert!(validate_fixture("c", &coder).is_err());
@@ -1448,6 +1595,7 @@ mod tests {
             max_tokens: None,
             rubric: None,
             relevant: vec![],
+            configs: vec![],
             timeout_secs: 1,
         };
         assert!(validate_fixture("t", &t).is_err());
@@ -1478,6 +1626,26 @@ mod tests {
         assert!(validate_granularity("f", Granularity::Flow, "feature", &two).is_ok());
         // turn → runs no pipeline, so the phase-count check does not apply.
         assert!(validate_granularity("f", Granularity::Turn, "blank", &one).is_ok());
+    }
+
+    #[test]
+    fn fixture_declares_its_own_config_axis() {
+        // A fixture can carry a `configs:` on/off matrix; absent → empty (run
+        // default). Each token must parse via `parse_context_config`.
+        let yml = "task: t\nsuite: reasoner\ngranularity: phase\nrubric: r\n\
+                   configs:\n  - baseline\n  - all\n";
+        let spec: FixtureSpec = serde_yaml_ng::from_str(yml).unwrap();
+        assert_eq!(
+            spec.configs,
+            vec!["baseline".to_string(), "all".to_string()]
+        );
+        for name in &spec.configs {
+            assert!(parse_context_config(name).is_ok());
+        }
+        // Omitted → empty, so the fixture falls back to the run's `--configs`.
+        let spec: FixtureSpec =
+            serde_yaml_ng::from_str("task: t\nsuite: coder\nverify: 'true'\n").unwrap();
+        assert!(spec.configs.is_empty());
     }
 
     #[test]

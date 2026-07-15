@@ -125,6 +125,9 @@ struct Ctx<'a> {
     store: &'a Store,
     flows_dir: Option<&'a Path>,
     logger: flows_core::LlmLogger,
+    /// Context-delivery feature flags (search/range/slim-tree/…), from project
+    /// config. Threaded into each agent phase.
+    context: flows_core::models::ContextConfig,
 }
 
 impl Ctx<'_> {
@@ -238,6 +241,7 @@ async fn execute_phase(
                 provider.as_ref(),
                 &pcb,
                 ctx.flows_dir,
+                &ctx.context,
                 ctx.global_cfg.max_cost_usd,
                 prior_cost,
                 Some(&ctx.logger),
@@ -424,6 +428,7 @@ pub async fn run_pipeline(
         store,
         flows_dir,
         logger,
+        context: project_cfg.context.clone(),
     };
 
     if is_dag(phases) {

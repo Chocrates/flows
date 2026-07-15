@@ -162,3 +162,86 @@ pub fn render_prompt(template: &str, context: &Value) -> Result<String, String> 
     env.render_str(template, minijinja::Value::from_serialize(context))
         .map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The shipped tool-bearing templates gate their tool section on
+    /// `tools_enabled`, so a no-tool model is never shown (or told to call) tools.
+    #[test]
+    fn tool_section_gated_by_tools_enabled() {
+        let tmpl = BUILTIN
+            .get_file("feature/plan.md")
+            .unwrap()
+            .contents_utf8()
+            .unwrap();
+        let on = render_prompt(tmpl, &json!({"idea": "x", "tools_enabled": true})).unwrap();
+        let off = render_prompt(tmpl, &json!({"idea": "x", "tools_enabled": false})).unwrap();
+        assert!(
+            on.contains("## Tools available"),
+            "tools on → section shown"
+        );
+        assert!(
+            !off.contains("## Tools available"),
+            "tools off → section omitted"
+        );
+        // The non-tool body still renders either way.
+        assert!(off.contains("Clarify ambiguities first"));
+    }
+
+    /// The explain template asks for a prose answer artifact (not a build plan),
+    /// so a reasoner rubric has an output shape to grade, and it gates its tool
+    /// section like the others.
+    #[test]
+    fn explain_template_asks_for_answer_and_gates_tools() {
+        let tmpl = BUILTIN
+            .get_file("feature/explain.md")
+            .unwrap()
+            .contents_utf8()
+            .unwrap();
+        let on = render_prompt(
+            tmpl,
+            &json!({"idea": "how does X work?", "tools_enabled": true}),
+        )
+        .unwrap();
+        let off = render_prompt(
+            tmpl,
+            &json!({"idea": "how does X work?", "tools_enabled": false}),
+        )
+        .unwrap();
+        // Answer-shaped, not plan-shaped.
+        assert!(
+            on.contains("\"answer\""),
+            "explain artifact needs an answer field"
+        );
+        assert!(
+            !on.contains("files_to_modify"),
+            "explain must not be a plan"
+        );
+        assert!(on.contains("EXPLAIN, do not plan"));
+        // Tool section gated.
+        assert!(on.contains("## Tools available"));
+        assert!(!off.contains("## Tools available"));
+    }
+
+    /// Pushed context (oracle / retrieval) is injected when present and absent
+    /// otherwise — so baseline prompts are unchanged.
+    #[test]
+    fn pushed_context_injected_when_present() {
+        let tmpl = BUILTIN
+            .get_file("feature/explain.md")
+            .unwrap()
+            .contents_utf8()
+            .unwrap();
+        let with = render_prompt(
+            tmpl,
+            &json!({"idea": "q", "pushed_context": "# Reference code\n\nfn foo() {}"}),
+        )
+        .unwrap();
+        let without = render_prompt(tmpl, &json!({"idea": "q"})).unwrap();
+        assert!(with.contains("# Reference code") && with.contains("fn foo() {}"));
+        assert!(!without.contains("# Reference code"));
+    }
+}

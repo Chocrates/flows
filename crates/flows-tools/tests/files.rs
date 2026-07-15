@@ -1,7 +1,37 @@
 //! Ports of the behavior in `tests/test_tools_files.py`.
 
-use flows_tools::files::{list_files, read_file, read_file_limited, safe_path, write_file};
+use flows_tools::files::{
+    list_files, read_file, read_file_limited, read_file_range, safe_path, write_file,
+};
 use tempfile::tempdir;
+
+#[test]
+fn range_read_returns_labeled_window() {
+    let d = tempdir().unwrap();
+    write_file(d.path(), "f.txt", "l1\nl2\nl3\nl4\nl5").unwrap();
+    let out = read_file_range(d.path(), "f.txt", 2, 3).unwrap();
+    assert!(out.starts_with("[lines 2-3 of 5]\n"), "got: {out}");
+    assert!(out.contains("l2\nl3"));
+    assert!(out.contains("2 more lines below")); // l4, l5 remain
+}
+
+#[test]
+fn range_read_clamps_end_and_omits_more_marker() {
+    let d = tempdir().unwrap();
+    write_file(d.path(), "f.txt", "a\nb\nc").unwrap();
+    let out = read_file_range(d.path(), "f.txt", 2, 99).unwrap();
+    assert!(out.starts_with("[lines 2-3 of 3]\n"), "got: {out}");
+    assert!(!out.contains("more lines")); // window reaches EOF
+}
+
+#[test]
+fn range_read_rejects_invalid_ranges() {
+    let d = tempdir().unwrap();
+    write_file(d.path(), "f.txt", "a\nb\nc").unwrap();
+    assert!(read_file_range(d.path(), "f.txt", 0, 2).is_err()); // start < 1
+    assert!(read_file_range(d.path(), "f.txt", 3, 1).is_err()); // inverted
+    assert!(read_file_range(d.path(), "f.txt", 9, 9).is_err()); // past EOF
+}
 
 #[test]
 fn write_then_read() {

@@ -122,6 +122,45 @@ pub fn read_file_limited(repo_root: &Path, path: &str, max_bytes: usize) -> Tool
     Ok(text)
 }
 
+/// Read only lines `start_line..=end_line` (both 1-indexed, inclusive) of a
+/// file. Labels the returned range and how many lines exist, and flags when
+/// there are more lines after the window — so a model reading a slice knows
+/// where it sits without pulling the whole file. Errors on empty/inverted
+/// ranges or a start past end-of-file. Content is still byte-capped via
+/// [`read_file_limited`].
+pub fn read_file_range(
+    repo_root: &Path,
+    path: &str,
+    start_line: usize,
+    end_line: usize,
+) -> ToolResult<String> {
+    if start_line == 0 {
+        return Err(ToolError::new(
+            "start_line must be >= 1 (lines are 1-indexed)",
+        ));
+    }
+    if end_line < start_line {
+        return Err(ToolError::new(format!(
+            "end_line ({end_line}) must be >= start_line ({start_line})"
+        )));
+    }
+    let full = read_file_limited(repo_root, path, DEFAULT_MAX_BYTES)?;
+    let lines: Vec<&str> = full.lines().collect();
+    let total = lines.len();
+    if start_line > total {
+        return Err(ToolError::new(format!(
+            "start_line {start_line} is past end of file ({total} lines)"
+        )));
+    }
+    let end = end_line.min(total);
+    let selected = lines[start_line - 1..end].join("\n");
+    let mut text = format!("[lines {start_line}-{end} of {total}]\n{selected}");
+    if end < total {
+        text.push_str(&format!("\n... [{} more lines below]", total - end));
+    }
+    Ok(text)
+}
+
 pub fn write_file(repo_root: &Path, path: &str, content: &str) -> ToolResult<String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;

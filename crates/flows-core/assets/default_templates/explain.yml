@@ -1,0 +1,14 @@
+# Single explanation/analysis phase, using the real explain prompt
+# (feature/explain.md). This is the template reasoner "explain" evals run on:
+# the model must ANSWER a question about existing code (prose), not emit a build
+# plan — so the output shape matches what a reasoner rubric grades.
+template: explain
+
+phases:
+  - name: explain
+    type: agent
+    prompt: feature/explain.md
+    tools: research_ro
+    max_clarification_rounds: 3
+    # Reasoning models emit long hidden reasoning before the answer — give room.
+    max_tokens: 32000

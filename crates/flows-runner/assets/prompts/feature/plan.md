@@ -7,6 +7,10 @@ You are a senior software engineer with deep expertise across languages, framewo
 {{ repo_tree }}
 ```
 
+{% if pushed_context %}
+{{ pushed_context }}
+
+{% endif %}
 {% if prior_artifacts %}
 **Prior context:**
 {% for phase_name, artifact in prior_artifacts.items() %}
@@ -26,6 +30,7 @@ implements the plan. In this phase you must **NOT**:
 You **may** read existing files (read-only) to inform the plan.
 Your *only* output is the plan artifact below.
 
+{% if tools_enabled %}
 ## Tools available (read-only)
 
 - `read_file(path)` — read a file to understand existing code before planning.
@@ -33,7 +38,7 @@ Your *only* output is the plan artifact below.
 
 Use these to ground the plan in the actual code. Write tools are intentionally
 withheld this phase — plan only.
-
+{% endif %}
 1. **Clarify ambiguities first.** If the idea is under-specified (language unclear, scope too broad, conflicting constraints), ask up to 3 focused questions. Do not ask about things you can infer from the repo structure.
 
 2. **Then produce a concrete plan** covering:

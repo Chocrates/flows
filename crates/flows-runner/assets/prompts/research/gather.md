@@ -27,11 +27,12 @@ Prefer (in order):
 
 Avoid: SEO content farms, paywalled content you can't read, outdated material (>3 years unless foundational).
 
+{% if tools_enabled %}
 ## Tools
 
 - `web_search(query, n)` — returns {title, url, snippet}; use for discovery
 - `http_get(url)` — fetches full page content; use for key sources
-
+{% endif %}
 ## When done (3–8 sources minimum)
 
 ```json

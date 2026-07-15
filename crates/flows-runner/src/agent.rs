@@ -9,12 +9,12 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use flows_core::models::{Artifact, LLMConfig, PhaseConfig, ToolsConfig};
+use flows_core::models::{Artifact, ContextConfig, LLMConfig, PhaseConfig, ToolsConfig};
 use flows_core::pricing::calculate_cost;
 use flows_core::thinking::{model_supports_thinking, resolve_thinking};
 use flows_llm::types::{Completion, CompletionRequest, Message, Role, ToolDef};
 use flows_llm::Provider;
-use flows_tools::{bash, files, plugin};
+use flows_tools::{bash, code_search, files, plugin};
 
 /// Prefixes identifying a `questions` envelope — these are internal plumbing and
 /// are suppressed from the live token stream (artifacts/prose still stream).
@@ -204,19 +204,49 @@ fn error_artifact(phase: &str, idea: &str, msg: impl Into<String>) -> Artifact {
 // Tool definitions + dispatch
 // ---------------------------------------------------------------------------
 
-pub fn build_tool_defs(tools: &ToolsConfig) -> Vec<ToolDef> {
+pub fn build_tool_defs(tools: &ToolsConfig, ctx: &ContextConfig) -> Vec<ToolDef> {
     let mut defs = Vec::new();
     if tools.files {
+        // With range reads on, read_file accepts an optional 1-indexed line
+        // window so a model can pull just the relevant slice of a large file.
+        let read_file_params = if ctx.range_reads {
+            json!({"type": "object", "properties": {
+                "path": {"type": "string"},
+                "start_line": {"type": "integer", "description": "Optional 1-indexed first line to read."},
+                "end_line": {"type": "integer", "description": "Optional 1-indexed last line (inclusive). Requires start_line."}
+            }, "required": ["path"]})
+        } else {
+            json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]})
+        };
+        let read_file_desc = if ctx.range_reads {
+            "Read a file from the project repository. Pass start_line/end_line to read only a line range instead of the whole file."
+        } else {
+            "Read a file from the project repository."
+        };
         defs.push(ToolDef {
             name: "read_file".into(),
-            description: "Read a file from the project repository.".into(),
-            parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+            description: read_file_desc.into(),
+            parameters: read_file_params,
         });
         defs.push(ToolDef {
             name: "list_files".into(),
             description: "List files/directories at a path in the repository. Omit `path` (or pass \"\" / \".\") to list the repository root.".into(),
             parameters: json!({"type": "object", "properties": {"path": {"type": "string", "description": "Repo-relative directory; empty or omitted = root."}}}),
         });
+        // Repo-scoped regex search — find code by pattern without reading whole
+        // files. Available whenever `files` is on (a read, so it survives
+        // read-only phases); gated on the search_tool context flag.
+        if ctx.search_tool {
+            defs.push(ToolDef {
+                name: "search_code".into(),
+                description: "Search the repository for a regex pattern, returning `path:line: match` results. Use this to locate code without reading whole files.".into(),
+                parameters: json!({"type": "object", "properties": {
+                    "pattern": {"type": "string", "description": "Regular expression to search for."},
+                    "scope": {"type": "string", "description": "Optional repo-relative directory to limit the search; empty = whole repo."},
+                    "cap": {"type": "integer", "description": "Optional max matches to return (default 100)."}
+                }, "required": ["pattern"]}),
+            });
+        }
         // Write tools are withheld in read-only phases (plan / spec / design).
         if !tools.read_only {
             defs.push(ToolDef {
@@ -267,6 +297,7 @@ async fn dispatch_tool(
     name: &str,
     args: &Value,
     tools: &ToolsConfig,
+    ctx: &ContextConfig,
     repo_root: &Path,
     flows_dir: Option<&Path>,
 ) -> String {
@@ -281,8 +312,34 @@ async fn dispatch_tool(
     match name {
         "read_file" => match str_arg(args, "path") {
             None => "Error: read_file requires a non-empty 'path' string argument".into(),
-            Some(p) => files::read_file(repo_root, p).unwrap_or_else(err),
+            Some(p) => {
+                // A line window is honored only when range reads are enabled and
+                // the model actually passed one; otherwise read the whole file.
+                let start = args.get("start_line").and_then(Value::as_u64);
+                let end = args.get("end_line").and_then(Value::as_u64);
+                if ctx.range_reads && (start.is_some() || end.is_some()) {
+                    let start = start.unwrap_or(1) as usize;
+                    // Default to a bounded window when only start_line is given.
+                    let end = end.map(|e| e as usize).unwrap_or(start + 199);
+                    files::read_file_range(repo_root, p, start, end).unwrap_or_else(err)
+                } else {
+                    files::read_file(repo_root, p).unwrap_or_else(err)
+                }
+            }
         },
+        "search_code" => {
+            if !ctx.search_tool {
+                return "Error: search_code tool not enabled for this phase".into();
+            }
+            match str_arg(args, "pattern") {
+                None => "Error: search_code requires a non-empty 'pattern' string argument".into(),
+                Some(pattern) => {
+                    let scope = args.get("scope").and_then(Value::as_str).unwrap_or("");
+                    let cap = args.get("cap").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    code_search::search_code(repo_root, pattern, scope, cap).unwrap_or_else(err)
+                }
+            }
+        }
         "write_file" => {
             let Some(p) = str_arg(args, "path") else {
                 return "Error: write_file requires a non-empty 'path' string argument".into();
@@ -368,6 +425,15 @@ fn summarize_tool_call(name: &str, args: &Value) -> String {
         "list_files" => format!(
             "list_files {:?}",
             args.get("path").and_then(Value::as_str).unwrap_or(".")
+        ),
+        "search_code" => format!(
+            "search_code {:?}{}",
+            args.get("pattern").and_then(Value::as_str).unwrap_or(""),
+            args.get("scope")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" in {s:?}"))
+                .unwrap_or_default()
         ),
         "bash" => {
             let c = args.get("command").and_then(Value::as_str).unwrap_or("");
@@ -494,6 +560,65 @@ fn append_transcript_round(
     }
 }
 
+/// Assemble the "pushed" context block injected into the prompt: an up-front code
+/// payload for models that don't (or can't) pull via tools. Sources:
+/// - **oracle** (eval stopgap): the eval sets `FLOWS_ORACLE_CONTEXT` from a
+///   fixture's labeled `relevant` files; injected verbatim under a clear header.
+/// - **retrieval** (Tier 3): embed the repo + idea at the run's LLM endpoint and
+///   inject the top-`retrieval_max_chunks` most similar chunks.
+///
+/// Returns "" when neither is enabled/available. Retrieval failures degrade to an
+/// empty retrieval section (logged to stderr) rather than aborting the phase.
+async fn build_pushed_context(
+    context: &ContextConfig,
+    repo_root: &Path,
+    idea: &str,
+    llm: &LLMConfig,
+) -> String {
+    let mut out = String::new();
+
+    if context.oracle {
+        if let Ok(blob) = std::env::var("FLOWS_ORACLE_CONTEXT") {
+            if !blob.trim().is_empty() {
+                out.push_str(
+                    "# Reference code (provided up front)\n\n\
+                     The following files are the code relevant to this task, given \
+                     directly so you can answer without reading them:\n\n",
+                );
+                out.push_str(blob.trim());
+                out.push_str("\n\n");
+            }
+        }
+    }
+
+    if context.retrieval && !context.retrieval_model.is_empty() {
+        match crate::retrieval::retrieve(
+            repo_root,
+            idea,
+            &llm.api_key,
+            &llm.api_base,
+            &context.retrieval_model,
+            context.retrieval_max_chunks,
+        )
+        .await
+        {
+            Ok(chunks) if !chunks.trim().is_empty() => {
+                out.push_str(
+                    "# Retrieved code (most relevant to the task)\n\n\
+                     These repository excerpts were selected as most relevant — \
+                     use them to ground your answer:\n\n",
+                );
+                out.push_str(chunks.trim());
+                out.push_str("\n\n");
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("  retrieval skipped: {e}"),
+        }
+    }
+
+    out.trim().to_string()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_agent_phase(
     phase: &PhaseConfig,
@@ -505,6 +630,7 @@ pub async fn run_agent_phase(
     provider: &dyn Provider,
     callbacks: &dyn AgentCallbacks,
     flows_dir: Option<&Path>,
+    context: &ContextConfig,
     max_cost_usd: f64,
     prior_cost_usd: f64,
     logger: Option<&flows_core::LlmLogger>,
@@ -515,13 +641,29 @@ pub async fn run_agent_phase(
     let prompt_template = crate::prompts::load_prompt(phase, template_name, repo_root, flows_dir);
 
     // context for prompt rendering
+    // Models that can't function-call (e.g. many reasoning models) get NO tool
+    // schemas and no tool guidance — the prompt templates gate their tool
+    // sections on `tools_enabled` so a no-tool model is never told to call tools.
+    let tools_enabled = llm.supports_tools != Some(false);
+
     let mut ctx = Map::new();
     ctx.insert("idea".into(), json!(idea));
-    ctx.insert(
-        "repo_tree".into(),
-        json!(crate::repo_context::build_repo_tree(repo_root, 500)),
-    );
+    ctx.insert("tools_enabled".into(), json!(tools_enabled));
+    // Slim tree (depth-bounded, tightly capped, points at tools) for small
+    // models when enabled; otherwise the full baseline tree.
+    let repo_tree = if context.slim_tree {
+        crate::repo_context::build_slim_tree(repo_root, 200, 2)
+    } else {
+        crate::repo_context::build_repo_tree(repo_root, 500)
+    };
+    ctx.insert("repo_tree".into(), json!(repo_tree));
     ctx.insert("phase_name".into(), json!(phase.name));
+    // Pushed context: code delivered up front (not pulled via tools), so a model
+    // that can't call tools still gets grounding. Two sources feed one variable:
+    // the eval oracle (labeled reference files) and semantic retrieval (top-k
+    // embedded chunks). Concatenated when both are on.
+    let pushed_context = build_pushed_context(context, repo_root, idea, llm).await;
+    ctx.insert("pushed_context".into(), json!(pushed_context));
     ctx.insert(
         "prior_artifacts".into(),
         Value::Object(prior_artifacts.clone()),
@@ -539,12 +681,10 @@ pub async fn run_agent_phase(
         system_prompt.push_str(&docs);
     }
 
-    // Models that can't function-call (e.g. many reasoning models) get NO tool
-    // schemas; instead the agent tells them to inline any file writes in the
-    // artifact's `content.files` map, which the runner writes to disk afterward.
-    let tools_enabled = llm.supports_tools != Some(false);
+    // No-tool models get no schemas; instead the agent tells them to inline any
+    // file writes in the artifact's `content.files` map (written to disk after).
     let tool_defs = if tools_enabled {
-        build_tool_defs(&phase.tools)
+        build_tool_defs(&phase.tools, context)
     } else {
         Vec::new()
     };
@@ -556,6 +696,26 @@ JSON artifact. To create or modify files, include them in the artifact under \
 `content.files` as a map of repository-relative path → the file's full new \
 contents. Example:\n\
 ```json\n{\"type\": \"artifact\", \"content\": {\"files\": {\"src/x.rs\": \"...full contents...\"}, \"summary\": \"...\"}}\n```",
+        );
+    } else if context.search_tool || context.range_reads {
+        // Flag-aware guidance so the model uses the context tools it actually
+        // has. Kept in Rust (not the markdown templates) so it stays in sync
+        // with the tool schemas gated just above.
+        system_prompt.push_str("\n\n# Finding code efficiently\n\n");
+        if context.search_tool {
+            system_prompt.push_str(
+                "- `search_code(pattern, scope?, cap?)` — regex-search the repo for `path:line: match`. \
+Use it to locate definitions/usages instead of reading files to hunt for them.\n",
+            );
+        }
+        if context.range_reads {
+            system_prompt.push_str(
+                "- `read_file(path, start_line?, end_line?)` — pass a line range to read just the \
+relevant slice of a large file instead of the whole thing.\n",
+            );
+        }
+        system_prompt.push_str(
+            "Prefer searching + range reads over reading whole files; keep your context small.",
         );
     }
     // `llm` is already the phase's resolved config (profile/literal resolved by
@@ -698,7 +858,8 @@ contents. Example:\n\
                 let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
                 callbacks.on_tool_call(&tc.name, &summarize_tool_call(&tc.name, &args));
                 let result =
-                    dispatch_tool(&tc.name, &args, &phase.tools, repo_root, flows_dir).await;
+                    dispatch_tool(&tc.name, &args, &phase.tools, context, repo_root, flows_dir)
+                        .await;
                 let (summary, is_error) = summarize_tool_result(&result);
                 callbacks.on_tool_result(&tc.name, &summary, is_error);
                 if !is_error {

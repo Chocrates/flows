@@ -1,5 +1,38 @@
-use flows_runner::repo_context::build_repo_tree;
+use flows_runner::repo_context::{build_repo_tree, build_slim_tree};
 use tempfile::tempdir;
+
+#[test]
+fn slim_tree_bounds_depth_with_neutral_note() {
+    let d = tempdir().unwrap();
+    let r = d.path();
+    std::fs::write(r.join("top.rs"), "").unwrap();
+    std::fs::create_dir_all(r.join("a/b/c")).unwrap();
+    std::fs::write(r.join("a/shallow.rs"), "").unwrap(); // depth 1
+    std::fs::write(r.join("a/b/c/deep.rs"), "").unwrap(); // depth 3, beyond max
+    std::fs::create_dir_all(r.join("node_modules")).unwrap();
+    std::fs::write(r.join("node_modules/x.js"), "").unwrap();
+
+    let tree = build_slim_tree(r, 200, 2);
+    assert!(tree.contains("top.rs"));
+    assert!(tree.contains("shallow.rs"));
+    assert!(!tree.contains("deep.rs"), "depth-4 entry leaked past bound");
+    assert!(!tree.contains("node_modules"), "vendor dir leaked");
+    assert!(tree.contains("depth ≤2"), "no depth-clip note");
+    // Tool names live in the prompt's tools section, never in the tree — so a
+    // no-tool model's tree carries no tool references.
+    assert!(!tree.contains("search_code") && !tree.contains("list_files"));
+}
+
+#[test]
+fn slim_tree_caps_with_neutral_note() {
+    let d = tempdir().unwrap();
+    for i in 0..20 {
+        std::fs::write(d.path().join(format!("f{i}.txt")), "").unwrap();
+    }
+    let tree = build_slim_tree(d.path(), 5, 2);
+    assert!(tree.contains("capped"));
+    assert!(!tree.contains("list_files") && !tree.contains("search_code"));
+}
 
 #[test]
 fn tree_lists_files_respects_gitignore_and_deny() {

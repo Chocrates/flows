@@ -251,6 +251,7 @@ pub fn load_global_config(path: Option<&Path>) -> Result<GlobalConfig> {
             .get("max_cost_usd")
             .and_then(Value::as_f64)
             .unwrap_or(0.0),
+        context: parse_context_block(&raw),
     })
 }
 
@@ -350,17 +351,7 @@ pub fn load_project_config(repo_path: &Path) -> Result<Option<ProjectConfig>> {
         _ => Vec::new(),
     };
 
-    let ctx_raw = raw.get("context").cloned().unwrap_or(Value::Null);
-    let context = ContextConfig {
-        exclude: get_str_list(&ctx_raw, "exclude")
-            .unwrap_or_else(|| ContextConfig::default().exclude),
-        search_tool: get_bool(&ctx_raw, "search_tool").unwrap_or(false),
-        range_reads: get_bool(&ctx_raw, "range_reads").unwrap_or(false),
-        slim_tree: get_bool(&ctx_raw, "slim_tree").unwrap_or(false),
-        repo_map: get_bool(&ctx_raw, "repo_map").unwrap_or(false),
-        budgeting: get_bool(&ctx_raw, "budgeting").unwrap_or(false),
-        retrieval: get_bool(&ctx_raw, "retrieval").unwrap_or(false),
-    };
+    let context = parse_context_block(&raw);
 
     Ok(Some(ProjectConfig {
         llm,
@@ -437,6 +428,27 @@ pub fn resolve_llm(
 /// (all on), or one-or-more `+token` segments combined — `+search`, `+range`,
 /// `+slim`, `+map`, `+budget`, `+rag`. Any unrecognized token is an error. Used
 /// by the eval harness to A/B context configurations by name.
+/// Parse a config's `context:` block into a [`ContextConfig`]. Shared by the
+/// global and project loaders. `raw` is the whole config mapping.
+pub fn parse_context_block(raw: &Value) -> ContextConfig {
+    let ctx_raw = raw.get("context").cloned().unwrap_or(Value::Null);
+    let d = ContextConfig::default();
+    ContextConfig {
+        exclude: get_str_list(&ctx_raw, "exclude").unwrap_or(d.exclude),
+        search_tool: get_bool(&ctx_raw, "search_tool").unwrap_or(false),
+        range_reads: get_bool(&ctx_raw, "range_reads").unwrap_or(false),
+        slim_tree: get_bool(&ctx_raw, "slim_tree").unwrap_or(false),
+        repo_map: get_bool(&ctx_raw, "repo_map").unwrap_or(false),
+        budgeting: get_bool(&ctx_raw, "budgeting").unwrap_or(false),
+        retrieval: get_bool(&ctx_raw, "retrieval").unwrap_or(false),
+        oracle: get_bool(&ctx_raw, "oracle").unwrap_or(false),
+        retrieval_model: get_str(&ctx_raw, "retrieval_model").unwrap_or_default(),
+        retrieval_max_chunks: get_u32(&ctx_raw, "retrieval_max_chunks")
+            .map(|n| n as usize)
+            .unwrap_or(d.retrieval_max_chunks),
+    }
+}
+
 pub fn parse_context_config(name: &str) -> std::result::Result<ContextConfig, String> {
     let name = name.trim();
     let mut cfg = ContextConfig {
@@ -464,6 +476,9 @@ pub fn parse_context_config(name: &str) -> std::result::Result<ContextConfig, St
             "map" => cfg.repo_map = true,
             "budget" => cfg.budgeting = true,
             "rag" => cfg.retrieval = true,
+            // Eval-only oracle push. Deliberately excluded from `all` (which is
+            // real features only) — it's an upper-bound reference, not a feature.
+            "oracle" => cfg.oracle = true,
             other => return Err(format!("unknown context config token: `{other}`")),
         }
     }
@@ -570,5 +585,39 @@ pub fn apply_user_project_override(base: &GlobalConfig, override_val: &Value) ->
         notifications,
         tools: GlobalToolsConfig { web_search },
         max_cost_usd: max_cost,
+        context: base.context.clone(),
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn oracle_token_separate_from_all() {
+        // `oracle` sets only the oracle flag.
+        let c = parse_context_config("oracle").unwrap();
+        assert!(c.oracle && !c.retrieval && !c.search_tool);
+        // `all` enables real features but NOT the eval oracle.
+        let all = parse_context_config("all").unwrap();
+        assert!(all.retrieval && all.search_tool && !all.oracle);
+        // `rag` maps to retrieval; combinable.
+        let c = parse_context_config("rag+oracle").unwrap();
+        assert!(c.retrieval && c.oracle);
+    }
+
+    #[test]
+    fn context_block_parses_retrieval_settings() {
+        let raw: Value = serde_yaml_ng::from_str(
+            "context:\n  retrieval: true\n  retrieval_model: bge-m3\n  retrieval_max_chunks: 4\n",
+        )
+        .unwrap();
+        let c = parse_context_block(&raw);
+        assert!(c.retrieval);
+        assert_eq!(c.retrieval_model, "bge-m3");
+        assert_eq!(c.retrieval_max_chunks, 4);
+        // Default when omitted.
+        let empty: Value = serde_yaml_ng::from_str("{}").unwrap();
+        assert_eq!(parse_context_block(&empty).retrieval_max_chunks, 8);
     }
 }

@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 wait-timeout = "0.2"
 regex = "1"
+ignore = "0.4"
 shlex = "1"
 serde_yaml_ng = { workspace = true }
 minijinja = "2"

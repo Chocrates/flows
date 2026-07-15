@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod prompts;
 pub mod repo_context;
+pub mod retrieval;
 pub mod runner;
 pub mod script;
 

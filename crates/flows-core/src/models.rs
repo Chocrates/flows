@@ -384,6 +384,23 @@ pub struct ContextConfig {
     pub budgeting: bool,
     #[serde(default)]
     pub retrieval: bool,
+    /// Oracle push (eval-only stopgap): inject a labeled set of file contents up
+    /// front. The eval harness sets `FLOWS_ORACLE_CONTEXT` from a fixture's
+    /// `relevant` files; the runner injects it so a no-tool model has the code
+    /// without needing to pull it. Outside eval there is no source, so it no-ops.
+    #[serde(default)]
+    pub oracle: bool,
+    /// Embedding model name for `retrieval`, queried at the run's LLM endpoint
+    /// (`/v1/embeddings`). Empty disables retrieval even when the flag is on.
+    #[serde(default)]
+    pub retrieval_model: String,
+    /// Max retrieved chunks injected when `retrieval` is on.
+    #[serde(default = "default_max_chunks")]
+    pub retrieval_max_chunks: usize,
+}
+
+fn default_max_chunks() -> usize {
+    8
 }
 
 impl Default for ContextConfig {
@@ -396,6 +413,9 @@ impl Default for ContextConfig {
             repo_map: false,
             budgeting: false,
             retrieval: false,
+            oracle: false,
+            retrieval_model: String::new(),
+            retrieval_max_chunks: default_max_chunks(),
         }
     }
 }
@@ -477,6 +497,10 @@ pub struct GlobalConfig {
     pub tools: GlobalToolsConfig,
     #[serde(default)]
     pub max_cost_usd: f64,
+    /// Context-delivery settings (e.g. `retrieval_model`). Project `context`
+    /// overrides these where present.
+    #[serde(default)]
+    pub context: ContextConfig,
 }
 
 // ---------------------------------------------------------------------------

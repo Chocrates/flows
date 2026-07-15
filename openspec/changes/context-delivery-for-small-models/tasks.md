@@ -1,12 +1,12 @@
 ## 1. Tier 1 — search & precise reads
 
-- [ ] 1.1 Add the `ignore` + `regex`/`grep` crates to `flows-tools`; add `flows-tools/src/search.rs` with a repo-scoped `search_code(repo_root, pattern, scope, cap)` using the file-tools path guard.
-- [ ] 1.2 Return bounded `path:line: match` results with a truncation indicator; explicit "no matches" (not an error); refuse a scope resolving outside the repo root. Unit tests for match, no-match, escape, and cap.
-- [ ] 1.3 Register a `search_code` tool in `agent.rs` `build_tool_defs` + `dispatch_tool` (available whenever `files` is on; unaffected by `read_only`).
-- [ ] 1.4 Extend `files::read_file` with optional `start_line`/`end_line` and a default byte/line cap (build on `read_file_limited`); label the returned range and whether more exists; error on empty/inverted ranges. Unit tests for range, cap, invalid range.
-- [ ] 1.5 Add `start_line`/`end_line` to the `read_file` tool schema + dispatch in `agent.rs`.
-- [ ] 1.6 Rewrite `repo_context::build_repo_tree` to be gitignore-aware (`ignore`), depth-bounded, and size-capped; summarize past the cap and point at `search_code`/`list_files` instead of a truncated flat list. Update its tests.
-- [ ] 1.7 Update affected prompt templates to mention `search_code` and range reads; gate/verify (`cargo fmt`, `clippy -D warnings`, `cargo test`).
+- [x] 1.1 Add the `ignore` + `regex`/`grep` crates to `flows-tools`; add `flows-tools/src/search.rs` with a repo-scoped `search_code(repo_root, pattern, scope, cap)` using the file-tools path guard. _(landed as `flows-tools/src/code_search.rs` — `search.rs` was already taken by web search.)_
+- [x] 1.2 Return bounded `path:line: match` results with a truncation indicator; explicit "no matches" (not an error); refuse a scope resolving outside the repo root. Unit tests for match, no-match, escape, and cap.
+- [x] 1.3 Register a `search_code` tool in `agent.rs` `build_tool_defs` + `dispatch_tool` (available whenever `files` is on; unaffected by `read_only`; gated on `context.search_tool`).
+- [x] 1.4 Extend `files::read_file` with optional `start_line`/`end_line` and a default byte/line cap (build on `read_file_limited`); label the returned range and whether more exists; error on empty/inverted ranges. Unit tests for range, cap, invalid range. _(added `read_file_range`.)_
+- [x] 1.5 Add `start_line`/`end_line` to the `read_file` tool schema + dispatch in `agent.rs`.
+- [x] 1.6 Rewrite `repo_context::build_repo_tree` to be gitignore-aware (`ignore`), depth-bounded, and size-capped; summarize past the cap and point at `search_code`/`list_files` instead of a truncated flat list. Update its tests. _(added `build_slim_tree` alongside the baseline tree so the flag can toggle cleanly.)_
+- [x] 1.7 Update affected prompt templates to mention `search_code` and range reads; gate/verify (`cargo fmt`, `clippy -D warnings`, `cargo test`). _(guidance injected flag-aware from `agent.rs` instead of static markdown, so it stays in sync with tool availability.)_
 
 ## 2. Tier 2 — repo map, budgeting, scoping
 
@@ -29,9 +29,9 @@
 
 ## 4. Gating (do first — every feature lands behind a flag)
 
-- [ ] 4.1 Add a `context` config block to `flows-core` with independent flags `search_tool`, `range_reads`, `slim_tree`, `repo_map`, `budgeting`, and `retrieval.enabled` — all defaulting to the pre-change baseline (off). Tests: all-off round-trips baseline.
-- [ ] 4.2 Add a per-run override (a `run --context k=v,…` flag or run-level config) that sets `context.*` for one run without touching global/project config. Test the override is scoped to the run.
-- [ ] 4.3 Gate each feature from Tiers 1–3 on its flag at the assembly/tool-registration site (search_code tool, range args, tree vs slim tree, repo_map injection, loop budgeting, retrieval). Test: enabling exactly one flag activates only that feature.
+- [x] 4.1 Add a `context` config block to `flows-core` with independent flags `search_tool`, `range_reads`, `slim_tree`, `repo_map`, `budgeting`, and `retrieval.enabled` — all defaulting to the pre-change baseline (off). Tests: all-off round-trips baseline.
+- [x] 4.2 Add a per-run override (a `run --context k=v,…` flag or run-level config) that sets `context.*` for one run without touching global/project config. Test the override is scoped to the run.
+- [~] 4.3 Gate each feature from Tiers 1–3 on its flag at the assembly/tool-registration site (search_code tool, range args, tree vs slim tree, repo_map injection, loop budgeting, retrieval). Test: enabling exactly one flag activates only that feature. _(Tier 1 done: `search_tool`/`range_reads`/`slim_tree` gated + tested; `repo_map`/`budgeting`/`retrieval` pending their tiers.)_
 
 ## 5. Evaluation harness
 

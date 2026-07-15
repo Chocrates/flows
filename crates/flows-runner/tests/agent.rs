@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::Map;
 
+use flows_core::models::ContextConfig;
 use flows_core::models::{BashConfig, LLMConfig, PhaseConfig, ToolsConfig};
 use flows_llm::types::{Completion, CompletionRequest, LlmError, ToolCall, Usage};
 use flows_llm::Provider;
@@ -97,6 +98,7 @@ async fn returns_artifact_from_json_response() {
         &provider,
         &NoopCallbacks,
         None,
+        &ContextConfig::default(),
         0.0,
         0.0,
         None,
@@ -124,6 +126,7 @@ async fn dispatches_write_file_then_returns_artifact() {
         &provider,
         &NoopCallbacks,
         None,
+        &ContextConfig::default(),
         0.0,
         0.0,
         None,
@@ -155,6 +158,7 @@ async fn reads_file_via_tool() {
         &provider,
         &NoopCallbacks,
         None,
+        &ContextConfig::default(),
         0.0,
         0.0,
         None,
@@ -192,6 +196,7 @@ async fn asks_questions_then_proceeds() {
         &provider,
         &AnswerCb("blue"),
         None,
+        &ContextConfig::default(),
         0.0,
         0.0,
         None,
@@ -223,6 +228,7 @@ async fn max_rounds_exceeded_returns_error() {
         &provider,
         &NoopCallbacks,
         None,
+        &ContextConfig::default(),
         0.0,
         0.0,
         None,
@@ -253,6 +259,7 @@ async fn degenerate_tool_loop_aborts() {
         &provider,
         &NoopCallbacks,
         None,
+        &ContextConfig::default(),
         0.0,
         0.0,
         None,
@@ -275,6 +282,7 @@ async fn cost_cap_aborts() {
         &provider,
         &NoopCallbacks,
         None,
+        &ContextConfig::default(),
         1.0, // max_cost
         5.0, // prior_cost already over
         None,
@@ -339,6 +347,7 @@ async fn cancelled_aborts_before_calling_model() {
         &NeverProvider,
         &CancelledCb,
         None,
+        &ContextConfig::default(),
         0.0,
         0.0,
         None,
@@ -392,6 +401,7 @@ async fn agents_md_is_appended_to_system_prompt() {
         &provider,
         &NoopCallbacks,
         Some(flows.path()),
+        &ContextConfig::default(),
         0.0,
         0.0,
         None,
@@ -415,13 +425,14 @@ async fn agents_md_is_appended_to_system_prompt() {
 
 #[test]
 fn read_only_tools_omit_write_defs() {
-    use flows_core::models::ToolsConfig;
+    use flows_core::models::{ContextConfig, ToolsConfig};
+    let ctx = ContextConfig::default();
     let ro = ToolsConfig {
         files: true,
         read_only: true,
         ..Default::default()
     };
-    let names: Vec<String> = flows_runner::agent::build_tool_defs(&ro)
+    let names: Vec<String> = flows_runner::agent::build_tool_defs(&ro, &ctx)
         .into_iter()
         .map(|d| d.name)
         .collect();
@@ -434,9 +445,35 @@ fn read_only_tools_omit_write_defs() {
         files: true,
         ..Default::default()
     };
-    let rw_names: Vec<String> = flows_runner::agent::build_tool_defs(&rw)
+    let rw_names: Vec<String> = flows_runner::agent::build_tool_defs(&rw, &ctx)
         .into_iter()
         .map(|d| d.name)
         .collect();
     assert!(rw_names.contains(&"write_file".to_string()));
+}
+
+#[test]
+fn context_flags_gate_search_and_range() {
+    use flows_core::models::{ContextConfig, ToolsConfig};
+    let tools = ToolsConfig {
+        files: true,
+        read_only: true, // search_code must survive read-only phases
+        ..Default::default()
+    };
+    // Baseline: no search_code tool, read_file has no range args.
+    let base = flows_runner::agent::build_tool_defs(&tools, &ContextConfig::default());
+    assert!(!base.iter().any(|d| d.name == "search_code"));
+    let rf = base.iter().find(|d| d.name == "read_file").unwrap();
+    assert!(rf.parameters["properties"].get("start_line").is_none());
+
+    // Flags on: search_code appears, read_file gains the line window.
+    let on = ContextConfig {
+        search_tool: true,
+        range_reads: true,
+        ..ContextConfig::default()
+    };
+    let defs = flows_runner::agent::build_tool_defs(&tools, &on);
+    assert!(defs.iter().any(|d| d.name == "search_code"));
+    let rf = defs.iter().find(|d| d.name == "read_file").unwrap();
+    assert!(rf.parameters["properties"].get("start_line").is_some());
 }
