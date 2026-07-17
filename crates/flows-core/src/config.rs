@@ -446,6 +446,10 @@ pub fn parse_context_block(raw: &Value) -> ContextConfig {
         retrieval_max_chunks: get_u32(&ctx_raw, "retrieval_max_chunks")
             .map(|n| n as usize)
             .unwrap_or(d.retrieval_max_chunks),
+        retrieval_reindex_threshold: ctx_raw
+            .get("retrieval_reindex_threshold")
+            .and_then(Value::as_f64)
+            .unwrap_or(d.retrieval_reindex_threshold),
     }
 }
 

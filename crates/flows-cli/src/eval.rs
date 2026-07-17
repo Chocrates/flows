@@ -514,6 +514,7 @@ fn pin_config(
     if !base_project.context.retrieval_model.is_empty() {
         merged.retrieval_model = base_project.context.retrieval_model.clone();
         merged.retrieval_max_chunks = base_project.context.retrieval_max_chunks;
+        merged.retrieval_reindex_threshold = base_project.context.retrieval_reindex_threshold;
     }
     merged.search_tool = ctx.search_tool;
     merged.range_reads = ctx.range_reads;

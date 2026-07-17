@@ -109,6 +109,29 @@ injected verbatim (via `FLOWS_ORACLE_CONTEXT`) as an upper-bound reference. Reas
 not explanations). Measured result: baseline hallucinates; oracle is grounded; rag
 reaches ~oracle grounding at ~45% of the tokens.
 
+**D11 — Retrieval index: embed once per flow, persist, rebuild past a churn threshold.** *(refines D9's "in-memory, rebuilt per run")*
+The first cut re-embedded the whole repo on **every agent phase** — a multi-phase
+pipeline paid it repeatedly. Instead:
+- **Once per flow:** the index is built on first retrieval and **memoized per
+  process** (keyed by canonical repo path + model), so every phase in the flow
+  reuses it (only the per-idea query embeds — no chunk re-embed). Process-scoped
+  memo rather than threading through `Ctx`: a `flows run` is one process, and eval
+  trials use distinct temp repos so their keys never collide.
+- **Persist across flows:** store the index at `~/.flows/index/<repo-hash>/<model>.bin`
+  (bincode: `chunker_version`, per-file blake3 hashes, chunks + vectors).
+- **Rebuild decision at flow start** (binary, no per-file patching): compute
+  `churn = (changed+new+deleted)/max(prev_total, curr_total)` from file hashes;
+  **rebuild all** when there is no index, the model or `chunker_version` changed, or
+  `churn >= retrieval_reindex_threshold` (default 0.4); otherwise **reuse as-is**.
+
+Deliberate trade-off: below the threshold, edited files keep slightly **stale**
+vectors until the next rebuild — acceptable because retrieval is fuzzy and the
+threshold bounds staleness, and it avoids all manifest-diff/incremental complexity.
+Branch switches show up as high churn → a full rebuild (correct, simple; it
+thrashes only under frequent switching). A **content-addressed** vector cache
+(`chunk_hash → vector`, branch-agnostic, embed each file version once ever) is the
+noted upgrade if that thrash matters; this binary rebuild is the v1.
+
 **D8 — Gate every feature independently, default to baseline, and evaluate.**
 Each feature sits behind a `context.*` flag defaulting to the pre-change baseline
 (off), with a per-run override so a harness can A/B without editing config. Prove

@@ -32,6 +32,9 @@
 - [~] 3.4 Config `retrieval` (default false), `retrieval_model` (local model name; empty → all-MiniLM-L6-v2), `retrieval_max_chunks` (default 8) in the `context` block (global + project). Disabled-by-default path tested. _(No `budget_fraction`; no endpoint — local.)_
 - [x] 3.5 N/A under the local design — embeddings make no outbound request at inference (model fetch goes through `hf-hub` to its cache). The `http_get` SSRF guard still covers all model-supplied URLs; no new network surface for the agent.
 - [x] 3.6 Gate/verify (fmt, clippy -D warnings, tests) — green; verified end-to-end on the reasoner fixtures (baseline vs oracle vs rag).
+- [x] 3.7 `retrieval::RepoIndex`: persist at `~/.flows/index/<repo-hash>/<model>.json` (`chunker_version`, per-file blake3 hashes, chunks + vectors; atomic temp+rename). Built **once per flow** and memoized per process (keyed by canonical repo path + model), so every phase reuses it (only the per-idea query embeds). _(JSON not bincode — reuses the existing `serde_json` dep; no new dep beyond `blake3`.)_
+- [x] 3.8 Rebuild decision (binary, no per-file patching): `churn = (changed+new+deleted)/max(prev_total, curr_total)` from blake3 file hashes; rebuild when the index is absent, the model/`CHUNKER_VERSION` changed, or `churn >= retrieval_reindex_threshold`; else reuse as-is. Config key `retrieval_reindex_threshold` (default 0.4). Tests: `churn` math; ignored E2E proves build → unchanged reuse (query-only embed) → high-churn rebuild.
+- [x] 3.9 Memoized `load_or_build_index` used from `build_pushed_context` via `spawn_blocking` — no `Ctx` threading needed (process memo gives once-per-flow; disk persistence gives cross-flow reuse for a stable repo path). _(Follow-ups still open: tree-sitter symbol chunks; content-addressed vector cache to avoid branch-switch thrash; eviction cap on the on-disk index.)_
 
 ## 4. Gating (do first — every feature lands behind a flag)
 

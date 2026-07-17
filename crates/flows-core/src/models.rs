@@ -398,10 +398,18 @@ pub struct ContextConfig {
     /// Max retrieved chunks injected when `retrieval` is on.
     #[serde(default = "default_max_chunks")]
     pub retrieval_max_chunks: usize,
+    /// Fraction of files that must change before the persisted retrieval index is
+    /// rebuilt in full (else it is reused as-is). 0.0 = always rebuild.
+    #[serde(default = "default_reindex_threshold")]
+    pub retrieval_reindex_threshold: f64,
 }
 
 fn default_max_chunks() -> usize {
     8
+}
+
+fn default_reindex_threshold() -> f64 {
+    0.4
 }
 
 impl Default for ContextConfig {
@@ -417,6 +425,7 @@ impl Default for ContextConfig {
             oracle: false,
             retrieval_model: String::new(),
             retrieval_max_chunks: default_max_chunks(),
+            retrieval_reindex_threshold: default_reindex_threshold(),
         }
     }
 }

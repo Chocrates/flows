@@ -589,16 +589,18 @@ async fn build_pushed_context(context: &ContextConfig, repo_root: &Path, idea: &
     if context.retrieval {
         // Local ONNX embedding — blocking CPU work (and a first-run model
         // download), so run it off the async runtime.
-        let (root, idea_s, model, max_chunks) = (
+        let (root, idea_s, model, max_chunks, threshold) = (
             repo_root.to_path_buf(),
             idea.to_string(),
             context.retrieval_model.clone(),
             context.retrieval_max_chunks,
+            context.retrieval_reindex_threshold,
         );
-        let result =
-            tokio::task::spawn_blocking(move || crate::retrieval::retrieve(&root, &idea_s, &model, max_chunks))
-                .await
-                .unwrap_or_else(|e| Err(format!("retrieval task panicked: {e}")));
+        let result = tokio::task::spawn_blocking(move || {
+            crate::retrieval::retrieve(&root, &idea_s, &model, max_chunks, threshold)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("retrieval task panicked: {e}")));
         match result {
             Ok(chunks) if !chunks.trim().is_empty() => {
                 out.push_str(

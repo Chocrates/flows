@@ -41,16 +41,32 @@ The model SHALL be fetched once to a local cache and reused across runs.
 - **WHEN** a phase computes retrieval
 - **THEN** no outbound request is made from a model-supplied URL, so the `http_get` SSRF guard's invariants are unaffected (the only network access is the one-time model download via the embedder's own cache mechanism).
 
-### Requirement: Cached, incremental index
+### Requirement: Persisted index, embedded once per flow, rebuilt on high churn
 
-The system SHALL persist the embedding index outside the model context (on disk)
-and update it incrementally, re-embedding only content that changed since the
-last index, so repeated runs do not re-embed the whole repository.
+The system SHALL compute the repository embedding index **once per flow** (not per
+phase) and hold it for the duration of the run so every phase reuses it. The index
+SHALL be persisted outside the model context (on disk, keyed by repository and
+embedding model). At flow start the system SHALL reuse the persisted index unless
+it is absent, the embedding model or chunker version changed, or the fraction of
+files changed since it was built meets a configured threshold
+(`retrieval_reindex_threshold`, default 0.4) — in which case it SHALL rebuild the
+whole index. Below the threshold the persisted index is reused as-is (recently
+edited files may carry slightly stale vectors until the next rebuild).
 
-#### Scenario: Reuse across runs
+#### Scenario: One embed pass per flow
 
-- **WHEN** a repository is indexed and unchanged on a later run
-- **THEN** the existing index is reused without re-embedding unchanged content.
+- **WHEN** a multi-phase flow runs with retrieval enabled
+- **THEN** the repository is embedded at most once for the flow and every phase reuses that index.
+
+#### Scenario: Reuse across flows when little changed
+
+- **WHEN** a repository was indexed and, on a later flow, fewer than the threshold fraction of files changed
+- **THEN** the persisted index is reused without re-embedding.
+
+#### Scenario: Rebuild when churn is high or the model/chunker changed
+
+- **WHEN** the fraction of changed files meets the threshold, or the embedding model or chunker version differs from the persisted index
+- **THEN** the index is rebuilt in full and re-persisted.
 
 #### Scenario: Incremental update
 
