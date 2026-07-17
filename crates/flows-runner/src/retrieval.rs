@@ -3,16 +3,54 @@
 //! is a **push** path — the model receives relevant code up front, so it works for
 //! models that cannot call tools (many reasoning models).
 //!
+//! Embeddings run **locally, in-process** via `fastembed` (ONNX) — no embeddings
+//! server required. The model (a small sentence-transformer, default
+//! all-MiniLM-L6-v2) is downloaded once to the fastembed cache and reused.
+//!
 //! First cut: line-window chunking (no tree-sitter yet) and an in-memory index
-//! (no on-disk cache / incremental re-embed yet) — both are follow-ups. The
-//! embeddings endpoint is the run's configured LLM endpoint (`/v1/embeddings`).
+//! (no on-disk vector cache / incremental re-embed yet) — both are follow-ups.
 
-use flows_llm::embeddings::embed;
-use flows_llm::types::LlmError;
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use ignore::WalkBuilder;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use crate::repo_context::DENY;
+
+/// Process-wide cache of loaded embedders, keyed by model name. Loading an ONNX
+/// model is expensive (and downloads on first use), so we keep one per model for
+/// the lifetime of the process. `embed` needs `&mut self`, hence the Mutex.
+static EMBEDDERS: OnceLock<Mutex<HashMap<String, TextEmbedding>>> = OnceLock::new();
+
+/// Map a config model name to a fastembed model. Unknown/empty → a small, fast
+/// default (all-MiniLM-L6-v2, 384-dim). Kept small so first-run download + CPU
+/// inference stay cheap.
+fn resolve_model(name: &str) -> EmbeddingModel {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "" | "minilm" | "all-minilm-l6-v2" | "allminilml6v2" => EmbeddingModel::AllMiniLML6V2,
+        "bge-small" | "bge-small-en-v1.5" | "bgesmallenv15" => EmbeddingModel::BGESmallENV15,
+        "bge-base" | "bge-base-en-v1.5" | "bgebaseenv15" => EmbeddingModel::BGEBaseENV15,
+        _ => EmbeddingModel::AllMiniLML6V2,
+    }
+}
+
+/// Embed a batch locally, loading (and caching) the model on first use. Blocking
+/// CPU work — call from a blocking context (`spawn_blocking`).
+fn embed_local(model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    let mut map = EMBEDDERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "embedder cache poisoned".to_string())?;
+    if !map.contains_key(model) {
+        let emb = TextEmbedding::try_new(TextInitOptions::new(resolve_model(model)))
+            .map_err(|e| format!("load embedding model `{model}`: {e}"))?;
+        map.insert(model.to_string(), emb);
+    }
+    let emb = map.get_mut(model).expect("just inserted");
+    emb.embed(texts, None)
+        .map_err(|e| format!("embed failed: {e}"))
+}
 
 /// Source extensions worth embedding. Keeps the index focused on code + docs and
 /// skips binaries/data that would waste embedding calls.
@@ -139,29 +177,29 @@ fn format_chunks(chunks: &[Chunk], picks: &[usize]) -> String {
     s.trim_end().to_string()
 }
 
-/// Embed the repo + the idea and return the top-`max_chunks` most relevant chunks
-/// as an injectable string (empty when there's nothing to retrieve). Errors only
-/// on embedding-endpoint failure.
-pub async fn retrieve(
+/// Embed the repo + the idea locally and return the top-`max_chunks` most relevant
+/// chunks as an injectable string (empty when there's nothing to retrieve).
+/// Blocking (ONNX inference + possible first-run model download) — the caller runs
+/// it on a blocking thread.
+pub fn retrieve(
     repo_root: &Path,
     idea: &str,
-    api_key: &str,
-    api_base: &str,
     model: &str,
     max_chunks: usize,
-) -> Result<String, LlmError> {
+) -> Result<String, String> {
     let chunks = chunk_repo(repo_root);
     if chunks.is_empty() || max_chunks == 0 {
         return Ok(String::new());
     }
-    // One batch: [idea, chunk_0, chunk_1, ...] so the query shares the request.
+    // One batch: [idea, chunk_0, chunk_1, ...] so the query embeds alongside the
+    // chunks in a single call.
     let mut inputs = Vec::with_capacity(chunks.len() + 1);
     inputs.push(idea.to_string());
     inputs.extend(chunks.iter().map(|c| c.text.clone()));
-    let embs = embed(api_key, api_base, model, &inputs).await?;
+    let embs = embed_local(model, &inputs)?;
     let (query, chunk_embs) = embs
         .split_first()
-        .ok_or_else(|| LlmError::Parse("embeddings response empty".into()))?;
+        .ok_or_else(|| "embedder returned no vectors".to_string())?;
     let picks = rank_top_k(query, chunk_embs, max_chunks);
     Ok(format_chunks(&chunks, &picks))
 }
@@ -170,6 +208,29 @@ pub async fn retrieve(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// End-to-end local embedding: downloads the default model on first run and
+    /// ranks a query against real chunks. Ignored by default (network + ~90MB
+    /// download + CPU); run with `cargo test -- --ignored retrieve_local`.
+    #[test]
+    #[ignore]
+    fn retrieve_local_ranks_relevant_chunk_first() {
+        let d = tempdir().unwrap();
+        let r = d.path();
+        std::fs::write(
+            r.join("auth.rs"),
+            "fn validate_token(t: &str) -> bool { verify signature and expiry }",
+        )
+        .unwrap();
+        std::fs::write(
+            r.join("math.rs"),
+            "fn add(a: i32, b: i32) -> i32 { a + b }",
+        )
+        .unwrap();
+        let out = retrieve(r, "how are auth tokens validated?", "", 1).unwrap();
+        assert!(out.contains("auth.rs"), "expected auth chunk, got: {out}");
+        assert!(!out.contains("math.rs"));
+    }
 
     #[test]
     fn cosine_basic() {

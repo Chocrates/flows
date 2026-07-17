@@ -19,6 +19,7 @@ template: explain
 configs:
   - baseline
   - oracle
+  - rag
 rubric: |
   - Identifies the cache key as (model + api_base + api_key) — distinct endpoints
     /keys get distinct providers, same-config phases share one.

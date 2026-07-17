@@ -14,7 +14,7 @@ Delivered in three tiers so value lands early:
   - Add a **repo map**: per source file, its key symbols (fn / struct / class / type signatures), ranked by relevance to the idea, injected in place of / alongside the slim tree — a symbol-level index of the codebase without full files.
   - Add **agent-loop context budgeting**: using the already-measured context-window size, truncate/summarize old tool results and stale rounds when input tokens approach a configured fraction of the window, so the loop never overflows.
 - **Tier 3 — semantic retrieval (heavier, best relevance)**
-  - Add embedding-based retrieval: index repo chunks and inject the top-k most relevant to the idea/phase. Local-first — embeddings run against an OpenAI-compatible `/v1/embeddings` endpoint (llama.cpp), no cloud required. Opt-in via config.
+  - Add embedding-based retrieval: index repo chunks and inject the top-k most relevant to the idea/phase. Embeddings run **locally in-process** (`fastembed`/ONNX, a small sentence-transformer downloaded once) — no cloud, no embeddings server, no config. Opt-in via config.
 - **Cross-cutting cleanup**
   - Scope per-phase context: stop injecting the full `prior_artifacts` map *and* each key (current double-injection); give each phase only the artifacts/context it needs.
 - **Gating & evaluation** (so we can prove each tier earns its tokens)
@@ -28,7 +28,7 @@ Non-goals: changing the phase/pipeline model, the sandbox, or the on-disk run fo
 ### New Capabilities
 - `code-search`: repo-scoped code search (`search_code`) and range-aware file reads that let an agent locate and read exactly the code it needs.
 - `repo-context`: assembling the per-prompt repository context — a bounded repo tree, a ranked symbol-level repo map, per-phase context scoping, and context-window budgeting/trimming in the agent loop.
-- `semantic-retrieval`: optional embedding-based retrieval of the most relevant repo chunks for a phase, using a local/OpenAI-compatible embeddings endpoint.
+- `semantic-retrieval`: optional embedding-based retrieval of the most relevant repo chunks for a phase, using a local in-process embedder (`fastembed`/ONNX).
 - `context-eval`: independent feature gating (`context.*` flags + per-run override) and an eval harness that measures retrieval quality and end-to-end task outcomes per configuration, so each tier's usefulness is quantified against the baseline.
 
 ### Modified Capabilities
@@ -38,6 +38,6 @@ Non-goals: changing the phase/pipeline model, the sandbox, or the on-disk run fo
 
 - **Code**: `flows-runner` (`agent.rs` context assembly + tool defs/dispatch, `repo_context.rs` tree → map, new budgeting in the tool loop, new retrieval module); `flows-tools` (`files.rs` range reads, new `search.rs`); `flows-llm` (embeddings request path for Tier 3); `flows-core` (config for retrieval + budgeting knobs).
 - **Prompts**: template variables gain `repo_map` / retrieved-context; existing `repo_tree` slimmed. Prompt templates in `flows-runner/assets/prompts` updated to use them.
-- **Dependencies**: Tier 1 search via the `ignore` + `regex` crates (ripgrep core, no external binary); Tier 2 symbol extraction via **tree-sitter** grammars (rust, python, js/ts, go) — reused by Tier 3 chunking; Tier 3 a small on-disk vector index cached under `~/.flows`, embeddings via an OpenAI-compatible `/v1/embeddings` endpoint.
-- **Security**: `search_code` and range reads are repo-scoped (same path guards as file tools); embeddings requests go through the existing SSRF-guarded HTTP path. `security-model` invariants preserved.
+- **Dependencies**: Tier 1 search via the `ignore` + `regex` crates (ripgrep core, no external binary); Tier 2 symbol extraction via **tree-sitter** grammars (rust, python, js/ts, go); Tier 3 embeddings via **`fastembed`/ONNX** in-process (model cached by fastembed) — currently line-window chunks + in-memory index (tree-sitter chunking + on-disk cache are follow-ups).
+- **Security**: `search_code` and range reads are repo-scoped (same path guards as file tools); embeddings are computed locally in-process (no outbound request at inference, no model-supplied URL), so no new network surface. `security-model` invariants preserved.
 - **Config/formats**: additive config keys only; no change to `state.json` / artifacts / `llm.jsonl`.

@@ -3,7 +3,6 @@
 //! tool calls, extended thinking / reasoning). `make_provider` selects by model.
 
 pub mod anthropic;
-pub mod embeddings;
 pub mod openai;
 pub mod provider;
 pub mod retry;

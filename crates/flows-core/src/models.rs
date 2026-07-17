@@ -390,8 +390,9 @@ pub struct ContextConfig {
     /// without needing to pull it. Outside eval there is no source, so it no-ops.
     #[serde(default)]
     pub oracle: bool,
-    /// Embedding model name for `retrieval`, queried at the run's LLM endpoint
-    /// (`/v1/embeddings`). Empty disables retrieval even when the flag is on.
+    /// Local embedding model for `retrieval` (fastembed / ONNX, run in-process).
+    /// Empty → a small default (all-MiniLM-L6-v2). Accepts e.g. `bge-small`,
+    /// `bge-base`. Downloaded once to the fastembed cache on first use.
     #[serde(default)]
     pub retrieval_model: String,
     /// Max retrieved chunks injected when `retrieval` is on.

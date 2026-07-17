@@ -24,22 +24,22 @@ embedding cost or dependency.
 - **WHEN** retrieval runs against a small context window
 - **THEN** fewer chunks are injected so the retrieved set fits the configured fraction of the context budget (retrieval auto-scales rather than overflowing).
 
-### Requirement: Local-capable, guarded embeddings
+### Requirement: Local, in-process embeddings
 
-The system SHALL obtain embeddings from an OpenAI-compatible `/v1/embeddings`
-endpoint (allowing a local llama.cpp server, no cloud required), and all
-embedding requests SHALL go through the existing SSRF-guarded HTTP path so
-retrieval cannot reach blocked addresses.
+The system SHALL compute embeddings **locally, in-process** (via a bundled ONNX
+embedder) using a small sentence-transformer model selected by `retrieval_model`
+(default all-MiniLM-L6-v2), with no embeddings server and no cloud dependency.
+The model SHALL be fetched once to a local cache and reused across runs.
 
-#### Scenario: Local embeddings endpoint
+#### Scenario: Works with no hosted embeddings model
 
-- **WHEN** retrieval is configured against a local `/v1/embeddings` endpoint
-- **THEN** embeddings are computed with no cloud dependency and no API key required.
+- **WHEN** retrieval is enabled and the user runs no `/v1/embeddings` server
+- **THEN** embeddings are still computed locally and retrieval works, requiring no endpoint and no API key.
 
-#### Scenario: Embeddings honor network guards
+#### Scenario: No new network surface at inference
 
-- **WHEN** the configured embeddings endpoint resolves to a blocked address
-- **THEN** the request is refused by the same guard that protects `http_get`.
+- **WHEN** a phase computes retrieval
+- **THEN** no outbound request is made from a model-supplied URL, so the `http_get` SSRF guard's invariants are unaffected (the only network access is the one-time model download via the embedder's own cache mechanism).
 
 ### Requirement: Cached, incremental index
 

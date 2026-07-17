@@ -20,18 +20,24 @@
 
 ## 3. Tier 3 — semantic retrieval (opt-in)
 
-- [ ] 3.1 Add an embeddings request path in `flows-llm` (`/v1/embeddings`, OpenAI-compatible) routed through the SSRF-guarded HTTP layer; no key required for a local endpoint.
-- [ ] 3.2 Add `flows-runner` (or a new `flows-index`) module: chunk by tree-sitter symbol (reuse 2.1), splitting any symbol over ~350 tokens; embed; persist an on-disk vector index under `~/.flows` keyed by a repo hash; incremental re-embed by per-chunk content hash.
-- [ ] 3.3 Cosine retrieval for the phase idea, **budget-bounded**: fill highest-scoring chunks up to `retrieval.budget_fraction` (0.25) of the phase context budget, capped by `retrieval.max_chunks` (8); inject into the phase context. Tests for ranked selection, budget cap, and incremental update (unchanged repo reuses index).
-- [ ] 3.4 Add config `retrieval.enabled` (default false), `retrieval.budget_fraction` (0.25), `retrieval.max_chunks` (8), and endpoint; when disabled, no embedding requests and prompt assembly unchanged. Test the disabled-by-default path.
-- [ ] 3.5 Verify embeddings honor the network guard (blocked endpoint refused, same as `http_get`).
-- [ ] 3.6 Gate/verify (fmt, clippy -D warnings, tests).
+> **Design change:** embeddings run **locally, in-process** via `fastembed` (ONNX),
+> not against a hosted `/v1/embeddings` server. The original server design assumed
+> the user's inference endpoint also serves an embedding model — it does not, so a
+> server path would leave retrieval inert. Local embedding needs zero hosting/zero
+> config and works offline after a one-time model download. See `design.md` (D8).
+
+- [x] 3.1 ~~Server embeddings path in `flows-llm`~~ → **local** embeddings: `fastembed`/ONNX in `flows-runner`, model downloaded once to the fastembed cache. No network at inference; no SSRF surface (no model-supplied URLs). _(server `flows-llm/embeddings.rs` was built then removed in favor of local.)_
+- [~] 3.2 `flows-runner/src/retrieval.rs`: chunk repo source into **line windows** (~50 lines), gitignore + deny-list aware, capped at 600 chunks; embed in-process. _(First cut: line-window chunks, **not** tree-sitter symbols (needs 2.1); **in-memory** index, no on-disk cache / incremental re-embed yet — follow-ups.)_
+- [~] 3.3 Cosine retrieval for the phase idea, capped by `retrieval_max_chunks` (default 8); injected into the phase context as a labeled block. Unit tests for cosine, ranked selection, chunking; ignored E2E test downloads the model and ranks a relevant chunk first. _(No `budget_fraction` / no incremental-reuse test — index is rebuilt per run for now.)_
+- [~] 3.4 Config `retrieval` (default false), `retrieval_model` (local model name; empty → all-MiniLM-L6-v2), `retrieval_max_chunks` (default 8) in the `context` block (global + project). Disabled-by-default path tested. _(No `budget_fraction`; no endpoint — local.)_
+- [x] 3.5 N/A under the local design — embeddings make no outbound request at inference (model fetch goes through `hf-hub` to its cache). The `http_get` SSRF guard still covers all model-supplied URLs; no new network surface for the agent.
+- [x] 3.6 Gate/verify (fmt, clippy -D warnings, tests) — green; verified end-to-end on the reasoner fixtures (baseline vs oracle vs rag).
 
 ## 4. Gating (do first — every feature lands behind a flag)
 
 - [x] 4.1 Add a `context` config block to `flows-core` with independent flags `search_tool`, `range_reads`, `slim_tree`, `repo_map`, `budgeting`, and `retrieval.enabled` — all defaulting to the pre-change baseline (off). Tests: all-off round-trips baseline.
 - [x] 4.2 Add a per-run override (a `run --context k=v,…` flag or run-level config) that sets `context.*` for one run without touching global/project config. Test the override is scoped to the run.
-- [~] 4.3 Gate each feature from Tiers 1–3 on its flag at the assembly/tool-registration site (search_code tool, range args, tree vs slim tree, repo_map injection, loop budgeting, retrieval). Test: enabling exactly one flag activates only that feature. _(Tier 1 done: `search_tool`/`range_reads`/`slim_tree` gated + tested; `repo_map`/`budgeting`/`retrieval` pending their tiers.)_
+- [~] 4.3 Gate each feature from Tiers 1–3 on its flag at the assembly/tool-registration site (search_code tool, range args, tree vs slim tree, repo_map injection, loop budgeting, retrieval). Test: enabling exactly one flag activates only that feature. _(Done + tested: `search_tool`/`range_reads`/`slim_tree`, `retrieval` (rag), and the eval-only `oracle` push; `repo_map`/`budgeting` pending Tier 2.)_
 
 ## 5. Evaluation harness
 
@@ -40,6 +46,23 @@
 - [ ] 5.3 `flows eval` subcommand (or `flows-eval` crate): run `(fixture × config × trial)` headless, capture success (verifier), tokens, peak context size, cost, tool-rounds, loop-backs from the run records.
 - [ ] 5.4 Report: per-config table (baseline vs each flag, ablated + cumulative) with mean ± spread across trials; run at temperature 0/low for comparability.
 - [ ] 5.5 Verify: run the harness on the starter corpus for baseline vs +search vs +search+map vs +…+budgeting vs +…+retrieval; capture the table.
+
+## 7. No-tool models & push context (this iteration)
+
+Small **reasoning models often can't function-call** (e.g. `deepseek-r1-70b`), so
+the Tier 1 pull tools (search/range reads) are inert for them. Added a **push**
+path and made prompts honest about tool availability.
+
+- [x] 7.1 Gate tool sections on `tools_enabled` (`llm.supports_tools != Some(false)`): a no-tool model gets no tool schemas, no `## Tools available` section (plan/implement/gather/explain), and a tool-neutral repo tree (footers no longer name `search_code`/`list_files`). Tests over the real templates.
+- [x] 7.2 Add an **oracle push** (eval stopgap): the eval sets `FLOWS_ORACLE_CONTEXT` from a fixture's labeled `relevant` files; the runner injects it as up-front reference code. Config flag `oracle` (token, kept out of `all`). Verified: baseline hallucinates → oracle is grounded.
+- [x] 7.3 Add semantic **retrieval push** injected into the same `pushed_context` variable — works for no-tool models (Tier 3, local embeddings). Verified: rag reaches ~oracle grounding at ~45% of the tokens.
+- [x] 7.4 Add an **`explain`** template + prompt (`feature/explain.md`) that asks for a prose-answer artifact (`content.answer`) instead of a build plan, so reasoner "explain" fixtures produce the shape their rubric grades. Point reasoner fixtures at it.
+
+## 8. Eval-harness enhancements (this iteration)
+
+- [x] 8.1 Per-fixture context config axis: a fixture declares `configs: [baseline, oracle, rag]`; absent → the run's `--configs`. Reasoner fixtures A/B automatically.
+- [x] 8.2 `--models <suite>` (e.g. `coder`/`reasoner`) expands to every profile tagged that suite; `model:suite` still overrides. 0-run guard errors clearly when suite-restricted models don't cover the selected fixtures.
+- [x] 8.3 Config carries context settings on **global** `GlobalConfig` too (shared `parse_context_block`); eval `pin_config` preserves `retrieval_model`/`retrieval_max_chunks` while overlaying token flags.
 
 ## 6. Docs & wrap-up
 

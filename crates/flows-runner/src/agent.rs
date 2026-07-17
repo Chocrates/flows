@@ -569,12 +569,7 @@ fn append_transcript_round(
 ///
 /// Returns "" when neither is enabled/available. Retrieval failures degrade to an
 /// empty retrieval section (logged to stderr) rather than aborting the phase.
-async fn build_pushed_context(
-    context: &ContextConfig,
-    repo_root: &Path,
-    idea: &str,
-    llm: &LLMConfig,
-) -> String {
+async fn build_pushed_context(context: &ContextConfig, repo_root: &Path, idea: &str) -> String {
     let mut out = String::new();
 
     if context.oracle {
@@ -591,17 +586,20 @@ async fn build_pushed_context(
         }
     }
 
-    if context.retrieval && !context.retrieval_model.is_empty() {
-        match crate::retrieval::retrieve(
-            repo_root,
-            idea,
-            &llm.api_key,
-            &llm.api_base,
-            &context.retrieval_model,
+    if context.retrieval {
+        // Local ONNX embedding — blocking CPU work (and a first-run model
+        // download), so run it off the async runtime.
+        let (root, idea_s, model, max_chunks) = (
+            repo_root.to_path_buf(),
+            idea.to_string(),
+            context.retrieval_model.clone(),
             context.retrieval_max_chunks,
-        )
-        .await
-        {
+        );
+        let result =
+            tokio::task::spawn_blocking(move || crate::retrieval::retrieve(&root, &idea_s, &model, max_chunks))
+                .await
+                .unwrap_or_else(|e| Err(format!("retrieval task panicked: {e}")));
+        match result {
             Ok(chunks) if !chunks.trim().is_empty() => {
                 out.push_str(
                     "# Retrieved code (most relevant to the task)\n\n\
@@ -662,7 +660,7 @@ pub async fn run_agent_phase(
     // that can't call tools still gets grounding. Two sources feed one variable:
     // the eval oracle (labeled reference files) and semantic retrieval (top-k
     // embedded chunks). Concatenated when both are on.
-    let pushed_context = build_pushed_context(context, repo_root, idea, llm).await;
+    let pushed_context = build_pushed_context(context, repo_root, idea).await;
     ctx.insert("pushed_context".into(), json!(pushed_context));
     ctx.insert(
         "prior_artifacts".into(),

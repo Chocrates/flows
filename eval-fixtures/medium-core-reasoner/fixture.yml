@@ -19,6 +19,7 @@ template: explain
 configs:
   - baseline
   - oracle
+  - rag
 rubric: |
   - States the precedence: explicit profile `api_key` (env-expanded) → dialect
     default env var (ANTHROPIC_API_KEY for claude/anthropic, else OPENAI_API_KEY)

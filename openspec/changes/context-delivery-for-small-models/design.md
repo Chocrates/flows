@@ -71,7 +71,7 @@ inject only what a phase's template needs. Agent prompts carry **both** the slim
 (symbol detail); the tree gives orientation, the map gives what's inside the
 relevant files.
 
-**D7 — Tier 3 retrieval: symbol chunks, budget-bounded, `/v1/embeddings`, opt-in.** *(resolves Q4)*
+**D7 — Tier 3 retrieval: symbol chunks, budget-bounded, `/v1/embeddings`, opt-in.** *(resolves Q4; embeddings host superseded by D9)*
 Add an embeddings request path in `flows-llm`; chunk source files **by tree-sitter
 symbol (reusing D4), splitting any symbol over ~350 tokens** so no chunk
 dominates; embed via an OpenAI-compatible `/v1/embeddings` endpoint through the
@@ -82,6 +82,32 @@ phase's context budget) rather than a fixed k, capped by `retrieval.max_chunks`
 (default 8) — so retrieval auto-scales (~8 chunks on a large window, 2–3 on a
 tiny local one) and never overflows. Gated by `retrieval.enabled` (default off) so
 default runs are unaffected.
+
+**D9 — Embeddings run locally in-process, not against a hosted endpoint.** *(supersedes the `/v1/embeddings` part of D7)*
+The D7 server assumption — that the user's inference endpoint also serves an
+embedding model — is false in practice (a chat-only llama.cpp/vLLM server hosts no
+embed model), which would leave retrieval silently inert. Instead embed **in
+process** with `fastembed` (ONNX Runtime, `ort-download-binaries`): a small
+sentence-transformer (default all-MiniLM-L6-v2, selectable via `retrieval_model`)
+downloaded once to the fastembed cache, then reused. Trade-off: larger binary +
+ONNX dependency and CPU inference, in exchange for **zero hosting, zero config,
+offline-after-first-run** retrieval that works on any user's box. No SSRF surface
+(no model-supplied URLs; model fetch goes through `hf-hub` to its cache). First cut
+uses **line-window chunks** (not yet tree-sitter symbols per D4/D7) and an
+**in-memory** index (no on-disk cache yet) — both tracked as follow-ups.
+
+**D10 — Push context for models that can't call tools.** *(new; unblocks small reasoners)*
+Tier 1's search/range tools are **pull**: useless to a reasoning model that can't
+function-call (many can't). So gate every prompt tool section on
+`tools_enabled = supports_tools != Some(false)` (no schemas, no `## Tools
+available`, tool-neutral tree) and add a **push** channel injected up front as one
+`pushed_context` variable, fed by two sources: (a) **retrieval** (D9) for real
+runs, and (b) an eval-only **oracle** — the fixture's labeled `relevant` files
+injected verbatim (via `FLOWS_ORACLE_CONTEXT`) as an upper-bound reference. Reasoner
+"explain" fixtures also move to an `explain` template whose artifact is a prose
+`answer`, matching what a rubric grades (the `plan` template produced build-plans,
+not explanations). Measured result: baseline hallucinates; oracle is grounded; rag
+reaches ~oracle grounding at ~45% of the tokens.
 
 **D8 — Gate every feature independently, default to baseline, and evaluate.**
 Each feature sits behind a `context.*` flag defaulting to the pre-change baseline
@@ -123,4 +149,4 @@ All four open questions were resolved with the user:
 
 ## Open Questions
 
-- None outstanding. (Chunking/index cache location is fixed under `~/.flows`; embedding model is whatever the configured `/v1/embeddings` endpoint serves.)
+- None blocking. Embeddings run locally (D9): the model is `retrieval_model` (default all-MiniLM-L6-v2), cached by fastembed. Follow-ups (not blockers): tree-sitter symbol chunking (currently line windows), and an on-disk vector index (currently in-memory, rebuilt per run).
