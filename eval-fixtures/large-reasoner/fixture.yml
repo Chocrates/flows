@@ -18,8 +18,10 @@ template: explain
 # Run both without and with the context features so review can A/B their effect.
 configs:
   - baseline
-  - oracle
+  - map
   - rag
+  - map+rag
+  - oracle
 rubric: |
   - Identifies the cache key as (model + api_base + api_key) — distinct endpoints
     /keys get distinct providers, same-config phases share one.

@@ -9,8 +9,10 @@ template: explain
 # Run both without and with the context features so review can A/B their effect.
 configs:
   - baseline
-  - oracle
+  - map
   - rag
+  - map+rag
+  - oracle
 rubric: |
   - Identifies the off-by-one: the loop uses `while [ $i -lt $n ]` so it stops at n-1 and never adds n.
   - Proposes the correct fix (`-le` instead of `-lt`, or start/stop bounds adjusted).

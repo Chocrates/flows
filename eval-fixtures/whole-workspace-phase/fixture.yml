@@ -22,3 +22,8 @@ timeout_secs: 1800
 relevant:
   - crates/flows-core/src/config.rs
   - "parse_context_config"
+# Pull-feature ablation for a tool-capable coder model.
+configs:
+  - baseline
+  - search+range+slim
+  - all

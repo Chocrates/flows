@@ -66,6 +66,7 @@ path and made prompts honest about tool availability.
 - [x] 8.1 Per-fixture context config axis: a fixture declares `configs: [baseline, oracle, rag]`; absent → the run's `--configs`. Reasoner fixtures A/B automatically.
 - [x] 8.2 `--models <suite>` (e.g. `coder`/`reasoner`) expands to every profile tagged that suite; `model:suite` still overrides. 0-run guard errors clearly when suite-restricted models don't cover the selected fixtures.
 - [x] 8.3 Config carries context settings on **global** `GlobalConfig` too (shared `parse_context_block`); eval `pin_config` preserves `retrieval_model`/`retrieval_max_chunks` while overlaying token flags.
+- [x] 8.4 Feature-ablation config axes on the fixtures: reasoner (no-tool) → `[baseline, map, rag, map+rag, oracle]` (push ablation); coder (tool-capable) → `[baseline, search+range+slim, all]` (pull ablation; `all` exercises budgeting on long flows). So each shipped feature is measured, matched to model capability.
 
 ## 6. Docs & wrap-up
 

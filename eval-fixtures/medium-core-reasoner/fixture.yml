@@ -18,8 +18,10 @@ template: explain
 # whether search_code + range reads + slim tree change the reasoning quality.
 configs:
   - baseline
-  - oracle
+  - map
   - rag
+  - map+rag
+  - oracle
 rubric: |
   - States the precedence: explicit profile `api_key` (env-expanded) → dialect
     default env var (ANTHROPIC_API_KEY for claude/anthropic, else OPENAI_API_KEY)

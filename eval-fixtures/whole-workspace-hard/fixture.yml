@@ -29,3 +29,8 @@ relevant:
   - "parse_context_config"
   - "eval_loop_condition"
   - "preflight_llm"
+# Pull-feature ablation for a tool-capable coder model.
+configs:
+  - baseline
+  - search+range+slim
+  - all
