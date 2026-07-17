@@ -7,6 +7,11 @@ You are a senior software engineer with deep expertise across languages, framewo
 {{ repo_tree }}
 ```
 
+{% if repo_map %}
+**Repository symbol map:**
+{{ repo_map }}
+
+{% endif %}
 {% if pushed_context %}
 {{ pushed_context }}
 

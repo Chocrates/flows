@@ -265,11 +265,28 @@ All UI (TUI, foreground print, background notify) is implemented via `RunnerCall
 
 ### Agent phase (flows-runner::agent)
 
-1. Load project context (file tree + file contents, respecting `.gitignore` + exclude)
-2. Load prior phase artifacts as context
-3. Render prompt template (MiniJinja) with: `idea`, `repo_tree`, `repo_files`, prior artifact vars
-4. Resolve extended thinking (see below) and run the provider (Anthropic/OpenAI) completion with a tool loop (tools enabled per phase config)
-5. Clarification loop: up to `max_clarification_rounds`, then proceed with best guess
+1. Load project context (file tree, respecting `.gitignore` + exclude)
+2. Load prior phase artifacts as context (injected **once** as the `prior_artifacts` map)
+3. Assemble optional context-delivery features (all gated by the `context:` block, default off)
+4. Render prompt template (MiniJinja) with: `idea`, `repo_tree`, `repo_map`, `pushed_context`, `tools_enabled`, `prior_artifacts`
+5. Resolve extended thinking and run the provider completion with a tool loop (tools enabled per phase config; a `supports_tools: false` model gets no schemas and no tool prompt sections)
+6. Clarification loop: up to `max_clarification_rounds`, then proceed with best guess
+
+#### Context delivery (small models)
+
+Optional, independently flagged, default-off features that fit a large repo into a
+small window — some **pull** (a tool the model calls), some **push** (injected):
+
+- **`search_code`** (pull) — repo-scoped ripgrep-style search (`flows-tools::code_search`).
+- **range reads** (pull) — `read_file(path, start_line, end_line)` reads slices, not whole files.
+- **slim tree** (push) — bounded, gitignore-aware repo tree (`repo_context::build_slim_tree`).
+- **repo map** (push) — tree-sitter symbol signatures per file, ranked by task overlap, token-bounded (`repo_map`).
+- **budgeting** — before each send, trim oldest tool-result bodies once estimated tokens exceed `budget_fraction × window` (`budget`), preserving system prompt + task + recent turns.
+- **retrieval** (push) — local in-process embeddings (`fastembed`/ONNX) of line-window chunks; top-k by cosine to the task, injected up front (`retrieval`). The index is built once per flow, persisted at `~/.flows/index/<repo-hash>/<model>.json`, and rebuilt only when ≥ `retrieval_reindex_threshold` of files change.
+
+Push features (repo map, retrieval) and tool-gating make the agent usable by
+reasoning models that can't function-call. Feature usefulness is meant to be a
+**measured** delta — see `flows eval` / `flows eval retrieval`.
 
 ### Script phase (flows-runner::script)
 

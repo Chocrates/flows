@@ -450,6 +450,16 @@ pub fn parse_context_block(raw: &Value) -> ContextConfig {
             .get("retrieval_reindex_threshold")
             .and_then(Value::as_f64)
             .unwrap_or(d.retrieval_reindex_threshold),
+        budget_fraction: ctx_raw
+            .get("budget_fraction")
+            .and_then(Value::as_f64)
+            .unwrap_or(d.budget_fraction),
+        unknown_window_tokens: get_u32(&ctx_raw, "unknown_window_tokens")
+            .map(|n| n as usize)
+            .unwrap_or(d.unknown_window_tokens),
+        repo_map_max_tokens: get_u32(&ctx_raw, "repo_map_max_tokens")
+            .map(|n| n as usize)
+            .unwrap_or(d.repo_map_max_tokens),
     }
 }
 

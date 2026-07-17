@@ -402,6 +402,17 @@ pub struct ContextConfig {
     /// rebuilt in full (else it is reused as-is). 0.0 = always rebuild.
     #[serde(default = "default_reindex_threshold")]
     pub retrieval_reindex_threshold: f64,
+    /// When `budgeting` is on, trim old tool results once estimated request tokens
+    /// exceed this fraction of the model's context window.
+    #[serde(default = "default_budget_fraction")]
+    pub budget_fraction: f64,
+    /// Assumed context window (tokens) when the model's is unknown (e.g. a local
+    /// model), so budgeting still bounds growth.
+    #[serde(default = "default_unknown_window")]
+    pub unknown_window_tokens: usize,
+    /// Token budget for the injected repo map (`repo_map`).
+    #[serde(default = "default_repo_map_tokens")]
+    pub repo_map_max_tokens: usize,
 }
 
 fn default_max_chunks() -> usize {
@@ -410,6 +421,18 @@ fn default_max_chunks() -> usize {
 
 fn default_reindex_threshold() -> f64 {
     0.4
+}
+
+fn default_budget_fraction() -> f64 {
+    0.6
+}
+
+fn default_unknown_window() -> usize {
+    8000
+}
+
+fn default_repo_map_tokens() -> usize {
+    1500
 }
 
 impl Default for ContextConfig {
@@ -426,6 +449,9 @@ impl Default for ContextConfig {
             retrieval_model: String::new(),
             retrieval_max_chunks: default_max_chunks(),
             retrieval_reindex_threshold: default_reindex_threshold(),
+            budget_fraction: default_budget_fraction(),
+            unknown_window_tokens: default_unknown_window(),
+            repo_map_max_tokens: default_repo_map_tokens(),
         }
     }
 }

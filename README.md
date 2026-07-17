@@ -227,6 +227,43 @@ flows init --global   # scaffold ~/.flows/config.yml + sync templates + prompts 
 
 ---
 
+## Context delivery for small models
+
+Small local models have narrow context windows but real repos are large. These
+features give a model the *right* code without blowing the window — some **pull**
+(the model calls a tool), some **push** (injected up front, so they help even
+models that can't function-call, like many reasoning models). All live under a
+`context:` block and **default off** (baseline behavior); enable per feature:
+
+```yaml
+context:
+  search_tool: true          # `search_code` tool: repo-scoped ripgrep-style search
+  range_reads: true          # read_file(path, start_line, end_line) — read slices
+  slim_tree: true            # bounded, gitignore-aware repo tree (vs the flat dump)
+  repo_map: true             # tree-sitter symbol map, ranked by the task (push)
+  budgeting: true            # trim old tool results as the window fills
+  retrieval: true            # local embedding retrieval of relevant chunks (push)
+  # tuning:
+  retrieval_model: minilm            # local embed model (empty → all-MiniLM-L6-v2)
+  retrieval_max_chunks: 8
+  retrieval_reindex_threshold: 0.4   # ≥40% files changed → rebuild the index
+  budget_fraction: 0.6               # trim when est. tokens exceed this × window
+  unknown_window_tokens: 8000        # assumed window when the model's is unknown
+  repo_map_max_tokens: 1500
+```
+
+- **Push vs pull.** `search_tool` / `range_reads` are tools (pull). `slim_tree`,
+  `repo_map`, and `retrieval` are injected (push). A model configured with
+  `supports_tools: false` gets **no** tool schemas and no tool sections in its
+  prompt — only push context — so it never wastes turns trying to call tools.
+- **Retrieval is fully local.** Embeddings run in-process (`fastembed`/ONNX, a
+  small model downloaded once) — no embeddings server, no cloud, no API key. The
+  index is built once per flow, persisted under `~/.flows/index/`, and rebuilt
+  only when enough files change (`retrieval_reindex_threshold`).
+- **Measure before enabling.** Use `flows eval` (below) to A/B a config against
+  baseline on your model, and `flows eval retrieval` to check ranking quality
+  deterministically. "Useful" is a measured delta, not an assumption.
+
 ## Benchmarking your model (`flows eval`)
 
 Small local models vary a lot in how well they drive an agent loop. `flows eval`
@@ -244,6 +281,7 @@ flows eval list                     # show discovered fixtures (filter --suite/-
 flows eval review                   # grade ungraded trials (reasoner pass signal)
 flows eval report                   # comparison table (filter --model/--config/--suite)
 flows eval clean                    # delete stored results (no filters = wipe all)
+flows eval retrieval                # deterministic recall@k / MRR of the rankers (no LLM)
 ```
 
 `flows eval clean` removes trials from the store — filter with `--model`,
@@ -266,9 +304,15 @@ model behavior (old and new trials would otherwise average together in `report`)
   by appending `:coder` / `:reasoner` to a model (`--models coder:reasoner`); an
   untagged model with no override runs all suites.
 - **`--configs`** — CSV of context configurations: `baseline` (all off), `all`, or
-  combined feature tokens `+search`, `+range`, `+slim`, `+map`, `+budget`, `+rag`
-  (e.g. `+search+map`). These select the upcoming context-delivery features; until
-  those land every config runs identically (baseline).
+  combined feature tokens joined with `+`: `search`, `range`, `slim`, `map`,
+  `budget`, `rag` (e.g. `search+map`), plus the eval-only `oracle` (injects a
+  fixture's labeled `relevant` files as an upper-bound reference). A fixture can
+  declare its own `configs:` axis to A/B automatically. See
+  [Context delivery](#context-delivery-for-small-models) for what each does.
+- **`flows eval retrieval`** — a **deterministic** ranking eval (no model call):
+  for every fixture with labeled `relevant` files, it ranks files by the repo map
+  and by embedding retrieval and reports recall@1/3/5 + MRR (with a MEAN row), so
+  you can tune retrieval quality without spending model time.
 
 ```
 model            config     suite    size        pass    in_tok      peak_ctx     cost  rounds   n

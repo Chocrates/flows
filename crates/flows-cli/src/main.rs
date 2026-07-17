@@ -187,6 +187,16 @@ enum EvalCmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Deterministic retrieval-quality eval: recall@k / MRR of the repo map and
+    /// embedding retrieval against each fixture's labeled `relevant` files. No LLM.
+    Retrieval {
+        /// Directory of fixture folders (each with fixture.yml + repo/). Omit for built-ins.
+        #[arg(long)]
+        fixtures: Option<String>,
+        /// Local embedding model for the retrieval ranker (empty → all-MiniLM-L6-v2).
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -307,6 +317,9 @@ fn main() -> ExitCode {
                 &granularity,
                 yes,
             ),
+            EvalCmd::Retrieval { fixtures, model } => {
+                eval::cmd_retrieval(fixtures.as_deref(), model.as_deref())
+            }
         },
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "flows", &mut std::io::stdout());

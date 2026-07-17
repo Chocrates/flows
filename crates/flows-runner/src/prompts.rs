@@ -244,4 +244,22 @@ mod tests {
         assert!(with.contains("# Reference code") && with.contains("fn foo() {}"));
         assert!(!without.contains("# Reference code"));
     }
+
+    /// The repo map is injected when present and absent otherwise.
+    #[test]
+    fn repo_map_injected_when_present() {
+        let tmpl = BUILTIN
+            .get_file("feature/plan.md")
+            .unwrap()
+            .contents_utf8()
+            .unwrap();
+        let with = render_prompt(
+            tmpl,
+            &json!({"idea": "x", "repo_map": "# Repo map\n### a.rs\n- fn go()"}),
+        )
+        .unwrap();
+        let without = render_prompt(tmpl, &json!({"idea": "x"})).unwrap();
+        assert!(with.contains("Repository symbol map") && with.contains("fn go()"));
+        assert!(!without.contains("Repository symbol map"));
+    }
 }

@@ -1,0 +1,316 @@
+//! Repo map (Tier 2): a symbol-level index of the codebase. For each source file
+//! in a supported language, extract its top-level symbol **signatures** (function /
+//! type / class / trait / … headers) via tree-sitter, rank files by relevance to
+//! the run's idea, and render a token-bounded map. This is **push** context — a
+//! model sees the shape of the codebase (what's defined where) without whole files
+//! or tool calls, so it helps small and no-tool models alike.
+//!
+//! Signatures are the first line of each definition node (up to the body), which is
+//! cheap and language-agnostic enough for a map. Ranking is idea↔(path + symbol
+//! names) token overlap plus a small recent-modification boost (mtime proxy for
+//! git recency). Follow-up: true git-recency and per-language queries.
+
+use std::collections::HashSet;
+use std::path::Path;
+use tree_sitter::{Node, Parser};
+
+use crate::retrieval::source_files;
+
+/// ~4 chars/token heuristic, matching the budgeting estimator.
+fn est_tokens(s: &str) -> usize {
+    s.len() / 4 + 1
+}
+
+#[derive(Clone, Copy)]
+enum Lang {
+    Rust,
+    Python,
+    JavaScript,
+    TypeScript,
+    Go,
+}
+
+impl Lang {
+    fn from_ext(ext: &str) -> Option<Lang> {
+        Some(match ext {
+            "rs" => Lang::Rust,
+            "py" => Lang::Python,
+            "js" | "jsx" => Lang::JavaScript,
+            "ts" | "tsx" => Lang::TypeScript,
+            "go" => Lang::Go,
+            _ => return None,
+        })
+    }
+
+    fn ts_language(self) -> tree_sitter::Language {
+        match self {
+            Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Lang::Python => tree_sitter_python::LANGUAGE.into(),
+            Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Lang::Go => tree_sitter_go::LANGUAGE.into(),
+        }
+    }
+
+    /// Node kinds that name a definition worth listing in the map.
+    fn def_kinds(self) -> &'static [&'static str] {
+        match self {
+            Lang::Rust => &[
+                "function_item",
+                "struct_item",
+                "enum_item",
+                "trait_item",
+                "type_item",
+                "mod_item",
+                "macro_definition",
+                "const_item",
+                "static_item",
+            ],
+            Lang::Python => &["function_definition", "class_definition"],
+            Lang::JavaScript => &[
+                "function_declaration",
+                "class_declaration",
+                "method_definition",
+            ],
+            Lang::TypeScript => &[
+                "function_declaration",
+                "class_declaration",
+                "method_definition",
+                "interface_declaration",
+                "type_alias_declaration",
+                "enum_declaration",
+            ],
+            Lang::Go => &[
+                "function_declaration",
+                "method_declaration",
+                "type_declaration",
+            ],
+        }
+    }
+}
+
+/// One file's extracted signatures.
+struct FileSymbols {
+    path: String,
+    signatures: Vec<String>,
+    mtime: u64,
+}
+
+/// The first line of a node's source, trimmed and with a trailing `{` removed — a
+/// compact signature (e.g. `pub fn parse(s: &str) -> Result<T>`).
+fn signature_line(node: Node, src: &str) -> Option<String> {
+    let text = node.utf8_text(src.as_bytes()).ok()?;
+    let first = text.lines().next()?.trim();
+    let sig = first.trim_end_matches('{').trim_end();
+    (!sig.is_empty()).then(|| sig.to_string())
+}
+
+/// Walk the tree, collecting a signature for each definition-kind node.
+fn extract_signatures(lang: Lang, src: &str) -> Vec<String> {
+    let mut parser = Parser::new();
+    if parser.set_language(&lang.ts_language()).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(src, None) else {
+        return Vec::new();
+    };
+    let kinds: HashSet<&str> = lang.def_kinds().iter().copied().collect();
+    let mut sigs = Vec::new();
+    let mut cursor = tree.walk();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if kinds.contains(node.kind()) {
+            if let Some(sig) = signature_line(node, src) {
+                sigs.push(sig);
+            }
+        }
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    sigs
+}
+
+/// Lowercase alphanumeric tokens (length ≥ 3), split on non-alphanumerics and
+/// camelCase/snake_case boundaries — for overlap scoring.
+fn tokenize(s: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            if ch.is_uppercase() && prev_lower && cur.len() >= 3 {
+                out.insert(std::mem::take(&mut cur));
+            }
+            cur.push(ch.to_ascii_lowercase());
+            prev_lower = ch.is_lowercase();
+        } else {
+            if cur.len() >= 3 {
+                out.insert(std::mem::take(&mut cur));
+            }
+            cur.clear();
+            prev_lower = false;
+        }
+    }
+    if cur.len() >= 3 {
+        out.insert(cur);
+    }
+    out
+}
+
+/// Relevance score of a file to the idea: number of idea tokens that appear in the
+/// file's path + signatures, plus a small boost for recently modified files.
+fn score(idea_tokens: &HashSet<String>, f: &FileSymbols, newest_mtime: u64) -> f64 {
+    let mut hay = f.path.clone();
+    hay.push(' ');
+    hay.push_str(&f.signatures.join(" "));
+    let file_tokens = tokenize(&hay);
+    let overlap = idea_tokens.intersection(&file_tokens).count() as f64;
+    // Recency boost in [0, 0.5]: newest file gets +0.5, older ones less.
+    let recency = if newest_mtime == 0 {
+        0.0
+    } else {
+        0.5 * (f.mtime as f64 / newest_mtime as f64)
+    };
+    overlap + recency
+}
+
+/// Extract symbols for every supported file, then rank by relevance to `idea`
+/// (highest first). Shared by the rendered map and the deterministic eval.
+fn collect_ranked(repo_root: &Path, idea: &str) -> Vec<FileSymbols> {
+    let mut files: Vec<FileSymbols> = Vec::new();
+    let mut newest_mtime = 0u64;
+    for (rel, abs) in source_files(repo_root) {
+        let Some(lang) = abs
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Lang::from_ext)
+        else {
+            continue;
+        };
+        let Ok(src) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+        let signatures = extract_signatures(lang, &src);
+        if signatures.is_empty() {
+            continue;
+        }
+        let mtime = std::fs::metadata(&abs)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        newest_mtime = newest_mtime.max(mtime);
+        files.push(FileSymbols {
+            path: rel,
+            signatures,
+            mtime,
+        });
+    }
+    let idea_tokens = tokenize(idea);
+    files.sort_by(|a, b| {
+        score(&idea_tokens, b, newest_mtime)
+            .total_cmp(&score(&idea_tokens, a, newest_mtime))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    files
+}
+
+/// Ranked repo-relative file paths (most relevant first) — for the retrieval eval.
+pub fn rank_files(repo_root: &Path, idea: &str) -> Vec<String> {
+    collect_ranked(repo_root, idea)
+        .into_iter()
+        .map(|f| f.path)
+        .collect()
+}
+
+/// Build a token-bounded repo map ranked by relevance to `idea`. Returns an empty
+/// string when nothing parses. Appends a partial marker when files were dropped to
+/// fit `max_tokens`.
+pub fn build_repo_map(repo_root: &Path, idea: &str, max_tokens: usize) -> String {
+    let files = collect_ranked(repo_root, idea);
+    if files.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("# Repo map (symbols)\n\n");
+    let mut used = est_tokens(&out);
+    for (included, f) in files.iter().enumerate() {
+        let mut block = format!("### {}\n", f.path);
+        for sig in &f.signatures {
+            block.push_str(&format!("- {sig}\n"));
+        }
+        block.push('\n');
+        let cost = est_tokens(&block);
+        if used + cost > max_tokens && included > 0 {
+            out.push_str(&format!(
+                "_(map truncated to a token budget; {included} of {} files shown — use `search_code` for the rest)_\n",
+                files.len()
+            ));
+            break;
+        }
+        out.push_str(&block);
+        used += cost;
+    }
+    out.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn extracts_rust_and_python_signatures() {
+        let rs = extract_signatures(
+            Lang::Rust,
+            "pub fn add(a: i32, b: i32) -> i32 {\n a+b \n}\nstruct Point { x: i32 }\n",
+        );
+        assert!(rs.iter().any(|s| s.contains("fn add")));
+        assert!(rs.iter().any(|s| s.starts_with("struct Point")));
+        let py = extract_signatures(
+            Lang::Python,
+            "def greet(name):\n    return name\nclass Dog:\n    pass\n",
+        );
+        assert!(py.iter().any(|s| s.starts_with("def greet")));
+        assert!(py.iter().any(|s| s.starts_with("class Dog")));
+    }
+
+    #[test]
+    fn tokenize_splits_camel_and_snake() {
+        let t = tokenize("resolve_llm dialectEnvKey");
+        assert!(t.contains("resolve"));
+        assert!(t.contains("llm")); // len 3 → kept
+        assert!(t.contains("dialect"));
+        assert!(t.contains("env"));
+    }
+
+    #[test]
+    fn map_ranks_relevant_file_first_and_bounds_budget() {
+        let d = tempdir().unwrap();
+        let r = d.path();
+        std::fs::write(
+            r.join("auth.rs"),
+            "pub fn validate_token(t: &str) -> bool { true }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            r.join("math.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )
+        .unwrap();
+        let map = build_repo_map(r, "how are tokens validated?", 10_000);
+        let auth = map.find("auth.rs").unwrap();
+        let math = map.find("math.rs").unwrap();
+        assert!(auth < math, "relevant file should rank first:\n{map}");
+        assert!(map.contains("validate_token"));
+
+        // Tiny budget → partial marker.
+        let small = build_repo_map(r, "tokens", 12);
+        assert!(
+            small.contains("truncated to a token budget"),
+            "got: {small}"
+        );
+    }
+}

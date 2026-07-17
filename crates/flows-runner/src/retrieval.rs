@@ -94,8 +94,9 @@ pub struct Chunk {
 
 /// Source files under `repo_root` worth indexing: `.gitignore`- and deny-list-
 /// aware, filtered to [`SOURCE_EXTS`]. Returns `(repo-relative path, abs path)`,
-/// sorted, so chunking and hashing see the exact same file set.
-fn source_files(repo_root: &Path) -> Vec<(String, PathBuf)> {
+/// sorted, so chunking and hashing see the exact same file set. Shared with the
+/// repo map so all context features see one consistent file set.
+pub(crate) fn source_files(repo_root: &Path) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     let walk = WalkBuilder::new(repo_root)
         .hidden(false)
@@ -402,6 +403,40 @@ pub fn retrieve(
         })
         .collect();
     Ok(format_chunks(&chunks, &picks))
+}
+
+/// Ranked, de-duplicated file paths (most relevant first) by best-scoring chunk —
+/// for the deterministic retrieval eval. Blocking (embeds the idea; builds/loads
+/// the index).
+pub fn rank_paths(
+    repo_root: &Path,
+    idea: &str,
+    model: &str,
+    reindex_threshold: f64,
+) -> Result<Vec<String>, String> {
+    let index = load_or_build_index(repo_root, model, reindex_threshold)?;
+    if index.chunks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query = embed_local(model, &[idea.to_string()])?
+        .pop()
+        .ok_or_else(|| "empty query embedding".to_string())?;
+    let mut scored: Vec<(usize, f32)> = index
+        .chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (i, cosine(&query, &c.vector)))
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut seen = std::collections::HashSet::new();
+    let mut paths = Vec::new();
+    for (i, _) in scored {
+        let p = &index.chunks[i].path;
+        if seen.insert(p.clone()) {
+            paths.push(p.clone());
+        }
+    }
+    Ok(paths)
 }
 
 #[cfg(test)]

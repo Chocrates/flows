@@ -2,8 +2,10 @@
 //! (linear and DAG, loops, retries, cost guard, mid-phase cancel).
 
 pub mod agent;
+pub mod budget;
 pub mod prompts;
 pub mod repo_context;
+pub mod repo_map;
 pub mod retrieval;
 pub mod runner;
 pub mod script;

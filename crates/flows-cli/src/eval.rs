@@ -27,6 +27,7 @@ use flows_core::models::{
 use flows_core::state::Store;
 use flows_llm::{CompletionRequest, Message};
 use flows_runner::runner::{run_pipeline, RunnerCallbacks};
+use flows_runner::{repo_map, retrieval};
 
 use crate::eval_store::{self, Ratings, TrialMeta, TrialRecord};
 
@@ -1490,6 +1491,131 @@ fn trunc(s: &str, n: usize) -> String {
     } else {
         format!("{}…", s.chars().take(n - 1).collect::<String>())
     }
+}
+
+// ---------------------------------------------------------------------------
+// `eval retrieval` — deterministic ranking quality (no LLM call)
+// ---------------------------------------------------------------------------
+
+/// A fixture's `relevant` entries that are actual files in its repo (symbol labels
+/// and non-existent paths are dropped) — the retrieval targets.
+fn relevant_files(f: &Fixture) -> Vec<String> {
+    let files: HashSet<&str> = f.repo_files.iter().map(|(p, _)| p.as_str()).collect();
+    f.spec
+        .relevant
+        .iter()
+        .filter(|r| files.contains(r.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn recall_at(ranked: &[String], targets: &HashSet<String>, k: usize) -> f64 {
+    if targets.is_empty() {
+        return 0.0;
+    }
+    let hit = ranked
+        .iter()
+        .take(k)
+        .filter(|p| targets.contains(*p))
+        .count();
+    hit as f64 / targets.len() as f64
+}
+
+/// Mean reciprocal rank of the first relevant hit (0 when none surfaces).
+fn mrr(ranked: &[String], targets: &HashSet<String>) -> f64 {
+    ranked
+        .iter()
+        .position(|p| targets.contains(p))
+        .map(|i| 1.0 / (i as f64 + 1.0))
+        .unwrap_or(0.0)
+}
+
+type Agg = HashMap<&'static str, (f64, f64, f64, f64, usize)>;
+
+fn report_row(
+    name: &str,
+    ranker: &'static str,
+    ranked: &[String],
+    targets: &HashSet<String>,
+    agg: &mut Agg,
+) {
+    let (r1, r3, r5, m) = (
+        recall_at(ranked, targets, 1),
+        recall_at(ranked, targets, 3),
+        recall_at(ranked, targets, 5),
+        mrr(ranked, targets),
+    );
+    println!(
+        "{:<24} {:<6} {:>6.2} {:>6.2} {:>6.2} {:>6.2}",
+        trunc(name, 24),
+        ranker,
+        r1,
+        r3,
+        r5,
+        m
+    );
+    let e = agg.entry(ranker).or_insert((0.0, 0.0, 0.0, 0.0, 0));
+    e.0 += r1;
+    e.1 += r3;
+    e.2 += r5;
+    e.3 += m;
+    e.4 += 1;
+}
+
+/// Deterministic retrieval eval: for each fixture with labeled `relevant` files,
+/// rank files by the repo map and by embedding retrieval and score recall@k + MRR
+/// against the labels. No LLM call (embeddings run locally).
+pub fn cmd_retrieval(fixtures_dir: Option<&str>, model: Option<&str>) -> Result<(), String> {
+    let model = model.unwrap_or("");
+    let fixtures = load_fixtures(fixtures_dir)?;
+    let scored: Vec<&Fixture> = fixtures
+        .iter()
+        .filter(|f| !relevant_files(f).is_empty())
+        .collect();
+    if scored.is_empty() {
+        return Err("no fixtures with labeled `relevant` files to score".into());
+    }
+
+    println!("Deterministic retrieval eval — recall@k / MRR vs labeled files\n");
+    println!(
+        "{:<24} {:<6} {:>6} {:>6} {:>6} {:>6}",
+        "fixture", "ranker", "r@1", "r@3", "r@5", "MRR"
+    );
+    let mut agg: Agg = HashMap::new();
+    for f in &scored {
+        let work = materialize(f)?;
+        let targets: HashSet<String> = relevant_files(f).into_iter().collect();
+        report_row(
+            &f.name,
+            "map",
+            &repo_map::rank_files(work.path(), &f.spec.task),
+            &targets,
+            &mut agg,
+        );
+        match retrieval::rank_paths(work.path(), &f.spec.task, model, 0.4) {
+            Ok(rr) => report_row(&f.name, "rag", &rr, &targets, &mut agg),
+            Err(e) => eprintln!("  {} rag skipped: {e}", f.name),
+        }
+    }
+
+    println!();
+    for ranker in ["map", "rag"] {
+        if let Some((r1, r3, r5, m, n)) = agg.get(ranker) {
+            if *n > 0 {
+                let n = *n as f64;
+                println!(
+                    "{:<24} {:<6} {:>6.2} {:>6.2} {:>6.2} {:>6.2}",
+                    "MEAN",
+                    ranker,
+                    r1 / n,
+                    r3 / n,
+                    r5 / n,
+                    m / n
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

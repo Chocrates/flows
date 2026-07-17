@@ -156,6 +156,8 @@ const MAX_TOOL_ROUNDS: u32 = 20;
 const DEFAULT_MAX_TOKENS: u32 = 16384;
 /// Abort after this many identical failing tool-call rounds in a row.
 const MAX_REPEATED_TOOL_ERRORS: u32 = 3;
+/// Most-recent messages budgeting never trims (keeps the live turn coherent).
+const BUDGET_RECENT_KEEP: usize = 4;
 
 /// Hooks into the agent loop. All have no-op defaults for headless runs.
 #[async_trait]
@@ -657,6 +659,14 @@ pub async fn run_agent_phase(
         crate::repo_context::build_repo_tree(repo_root, 500)
     };
     ctx.insert("repo_tree".into(), json!(repo_tree));
+    // Repo map (2.3): symbol signatures ranked by idea overlap, injected alongside
+    // the tree (tree = layout, map = symbols). Push context — helps no-tool models.
+    let repo_map = if context.repo_map {
+        crate::repo_map::build_repo_map(repo_root, idea, context.repo_map_max_tokens)
+    } else {
+        String::new()
+    };
+    ctx.insert("repo_map".into(), json!(repo_map));
     ctx.insert("phase_name".into(), json!(phase.name));
     // Pushed context: code delivered up front (not pulled via tools), so a model
     // that can't call tools still gets grounding. Two sources feed one variable:
@@ -664,13 +674,14 @@ pub async fn run_agent_phase(
     // embedded chunks). Concatenated when both are on.
     let pushed_context = build_pushed_context(context, repo_root, idea).await;
     ctx.insert("pushed_context".into(), json!(pushed_context));
+    // Per-phase scoping (2.6): expose prior artifacts exactly **once**, as the
+    // `prior_artifacts` map. Templates self-select what they need (`.get('plan')`,
+    // `['spec']`, `.items()`), so no phase is force-fed the whole history and the
+    // old redundant per-key top-level injection is gone.
     ctx.insert(
         "prior_artifacts".into(),
         Value::Object(prior_artifacts.clone()),
     );
-    for (k, v) in prior_artifacts {
-        ctx.insert(k.clone(), v.clone());
-    }
     let mut system_prompt = crate::prompts::render_prompt(&prompt_template, &Value::Object(ctx))
         .unwrap_or(prompt_template);
 
@@ -761,6 +772,21 @@ relevant slice of a large file instead of the whole thing.\n",
             "thinking...".to_string()
         };
         callbacks.on_status(&status);
+
+        // Context-window budgeting (2.4): before sending, trim old tool results if
+        // the request approaches the window. Preserves system prompt, task, and the
+        // most recent turns. No-op unless the `budgeting` flag is on.
+        if context.budgeting {
+            let window = flows_core::pricing::context_window(&model)
+                .unwrap_or(context.unknown_window_tokens as u64);
+            crate::budget::trim_to_budget(
+                &mut messages,
+                &system_prompt,
+                window,
+                context.budget_fraction,
+                BUDGET_RECENT_KEEP,
+            );
+        }
 
         let req = CompletionRequest {
             model: model.clone(),
