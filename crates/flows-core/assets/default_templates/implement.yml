@@ -8,6 +8,9 @@ phases:
   - name: implement
     type: agent
     prompt: feature/implement.md
+    # Generous loop budget — local/self-hosted models take more tool rounds to
+    # implement + build + fix than a frontier model.
+    max_tool_rounds: 200
     tools:
       files: true
       bash:

@@ -40,7 +40,7 @@ fn feature_has_expected_phase_shape() {
     assert_eq!(commit.phase_type, PhaseType::Script);
     // implement got the raised tool-round budget
     let implement = phases.iter().find(|p| p.name == "implement").unwrap();
-    assert_eq!(implement.max_tool_rounds, Some(40));
+    assert_eq!(implement.max_tool_rounds, Some(200));
 }
 
 #[test]

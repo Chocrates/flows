@@ -149,7 +149,7 @@ impl StreamFilter {
 
 /// Per-phase cap on tool-call/work rounds (default; overridable via
 /// `phase.max_tool_rounds`).
-const MAX_TOOL_ROUNDS: u32 = 20;
+const MAX_TOOL_ROUNDS: u32 = 40;
 /// Default per-call completion-token cap. Generous so reasoning models (which
 /// emit long hidden reasoning before the answer) aren't truncated; a phase can
 /// raise it further via `phase.max_tokens`. It's a cap — short answers cost less.

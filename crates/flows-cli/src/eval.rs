@@ -409,34 +409,37 @@ fn materialize(fixture: &Fixture) -> Result<tempfile::TempDir, String> {
     let _ = Command::new("git")
         .args(["init", "-q"])
         .current_dir(dir.path())
-        .status();
+        .output();
     let _ = Command::new("git")
         .args(["config", "user.email", "eval@flows.local"])
         .current_dir(dir.path())
-        .status();
+        .output();
     let _ = Command::new("git")
         .args(["config", "user.name", "flows eval"])
         .current_dir(dir.path())
-        .status();
+        .output();
     let _ = Command::new("git")
         .args(["add", "-A"])
         .current_dir(dir.path())
-        .status();
+        .output();
     let _ = Command::new("git")
         .args(["commit", "-q", "-m", "fixture baseline", "--allow-empty"])
         .current_dir(dir.path())
-        .status();
+        .output();
     Ok(dir)
 }
 
 /// Run the fixture's `verify` command in the work dir; exit 0 == success.
 fn verify(work: &Path, cmd: &str) -> bool {
+    // `.output()` (not `.status()`) so the verifier's stdout/stderr are captured,
+    // not inherited — a `cargo test`/`make` verifier must not dump its build output
+    // onto the eval's terminal.
     Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(work)
-        .status()
-        .map(|s| s.success())
+        .output()
+        .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
@@ -445,7 +448,7 @@ fn capture_diff(work: &Path) -> String {
     let _ = Command::new("git")
         .args(["add", "-A"])
         .current_dir(work)
-        .status();
+        .output();
     Command::new("git")
         .args(["--no-pager", "diff", "--cached"])
         .current_dir(work)

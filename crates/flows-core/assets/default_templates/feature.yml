@@ -33,7 +33,7 @@ phases:
           - "ruff*"
           - "rm*"
     on_failure: stop
-    max_tool_rounds: 40
+    max_tool_rounds: 200
 
   # @auto resolves the command in the runner (no LLM): a `make lint`/`make test`
   # target if present, else the language's tool (cargo/pytest/npm/go/…). If no
@@ -63,7 +63,7 @@ phases:
     on_failure: stop
     loop_back_to: implement
     loop_condition: "content.get('verdict') not in ('approved', 'approved_with_suggestions')"
-    max_loop_iterations: 3
+    max_loop_iterations: 30
 
   - name: approve
     type: human
