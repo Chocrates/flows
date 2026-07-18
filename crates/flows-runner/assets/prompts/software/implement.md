@@ -1,7 +1,5 @@
 You are a software engineer implementing a complete system.
 
-**Idea:** {{ idea }}
-
 **Design:**
 {{ prior_artifacts.design.content if prior_artifacts.get('design') else 'Implement based on idea and spec.' }}
 

@@ -358,16 +358,20 @@ fn load_fixtures(fixtures_dir: Option<&str>) -> Result<Vec<Fixture>, String> {
     Ok(fx)
 }
 
-fn filtered(
-    fx: &[Fixture],
+fn filtered<'a>(
+    fx: &'a [Fixture],
     suite: Option<Suite>,
     size: Option<Size>,
     gran: Option<Granularity>,
-) -> Vec<&Fixture> {
+    names: &[String],
+) -> Vec<&'a Fixture> {
     fx.iter()
         .filter(|f| suite.map_or(true, |s| f.spec.suite == s))
         .filter(|f| size.map_or(true, |s| f.spec.size == s))
         .filter(|f| gran.map_or(true, |g| f.spec.granularity == g))
+        // Name filter: keep a fixture if any CSV term is a substring of its name
+        // (so `--fixture core` matches medium-core-{reasoner,coder}). Empty = all.
+        .filter(|f| names.is_empty() || names.iter().any(|n| f.name.contains(n.as_str())))
         .collect()
 }
 
@@ -463,7 +467,7 @@ fn capture_output(work: &Path, store: &Store, run_id: &str, phases: &[PhaseConfi
                 s.push_str(&format!(
                     "=== artifact: {} ===\n{}\n\n",
                     ph.name,
-                    text.trim()
+                    pretty_artifact(&text)
                 ));
             }
         }
@@ -473,6 +477,50 @@ fn capture_output(work: &Path, store: &Store, run_id: &str, phases: &[PhaseConfi
         s.push_str(&format!("=== diff ===\n{diff}\n"));
     }
     s
+}
+
+/// Render an artifact's `content` for grading: each field as a labeled section with
+/// real newlines (no YAML quoting/escaping), dropping envelope noise
+/// (`version`/`phase`/`run_id`/`idea` — the question is already shown as the task,
+/// so we don't repeat it). Falls back to the raw text if it doesn't parse or has no
+/// `content`.
+fn pretty_artifact(raw: &str) -> String {
+    use serde_yaml_ng::Value;
+    let Ok(val) = serde_yaml_ng::from_str::<Value>(raw) else {
+        return raw.trim().to_string();
+    };
+    let Some(content) = val.get("content") else {
+        return raw.trim().to_string();
+    };
+    let out = match content {
+        // `content` is a bare string (model returned prose, not a field map) →
+        // render it as the answer.
+        Value::String(s) => format!("## answer\n{}", s.trim()),
+        // `content` is a field map → each field as a labeled section.
+        Value::Mapping(map) => {
+            let mut s = String::new();
+            for (k, v) in map {
+                let key = k.as_str().unwrap_or("field");
+                s.push_str(&format!("## {key}\n"));
+                match v {
+                    Value::String(str_val) => s.push_str(str_val.trim()),
+                    other => s.push_str(
+                        serde_yaml_ng::to_string(other)
+                            .unwrap_or_default()
+                            .trim_end(),
+                    ),
+                }
+                s.push_str("\n\n");
+            }
+            s
+        }
+        _ => return raw.trim().to_string(),
+    };
+    if out.trim().is_empty() {
+        raw.trim().to_string()
+    } else {
+        out.trim_end().to_string()
+    }
 }
 
 /// Build the oracle payload: each of the fixture's `relevant` entries that is an
@@ -762,6 +810,7 @@ pub fn cmd_run(
     suite: &str,
     size: &str,
     granularity: &str,
+    fixture: Option<&str>,
     fixtures_dir: Option<&str>,
     trials: usize,
 ) -> Result<(), String> {
@@ -771,7 +820,8 @@ pub fn cmd_run(
     let trials = trials.max(1);
 
     let fixtures = load_fixtures(fixtures_dir)?;
-    let selected = filtered(&fixtures, suite_f, size_f, gran_f);
+    let name_f = split_csv(fixture).unwrap_or_default();
+    let selected = filtered(&fixtures, suite_f, size_f, gran_f, &name_f);
     if selected.is_empty() {
         return Err("no fixtures match the suite/size/granularity filter".into());
     }
@@ -796,20 +846,31 @@ pub fn cmd_run(
         return Err("no runnable fixtures (all failed phase/granularity validation)".into());
     }
 
-    // Config axis. `--configs` is the run default; a fixture that declares its
-    // own `configs:` overrides it (its own on/off matrix). Resolve one axis per
-    // prepared fixture, validating every config token up front.
-    let default_config_names: Vec<String> =
-        split_csv(configs).unwrap_or_else(|| vec!["baseline".into()]);
+    // Config axis. A fixture that declares `configs:` uses that axis; otherwise the
+    // run default (`--configs` or `baseline`). When `--configs` is passed
+    // explicitly it also acts as a **filter** over a declared axis — so
+    // `--configs oracle` runs only the oracle config even for fixtures that declare
+    // the full ablation. Resolve one axis per fixture, validating tokens up front.
+    let cli_configs: Option<Vec<String>> = split_csv(configs);
+    let default_config_names: Vec<String> = cli_configs
+        .clone()
+        .unwrap_or_else(|| vec!["baseline".into()]);
     let mut fixture_axes: Vec<Vec<(String, ContextConfig)>> = Vec::with_capacity(prepared.len());
     for (f, _) in &prepared {
-        let names = if f.spec.configs.is_empty() {
-            &default_config_names
+        let names: Vec<String> = if f.spec.configs.is_empty() {
+            default_config_names.clone()
+        } else if let Some(filter) = &cli_configs {
+            f.spec
+                .configs
+                .iter()
+                .filter(|n| filter.contains(n))
+                .cloned()
+                .collect()
         } else {
-            &f.spec.configs
+            f.spec.configs.clone()
         };
         let mut axis = Vec::with_capacity(names.len());
-        for name in names {
+        for name in &names {
             let ctx =
                 parse_context_config(name).map_err(|e| format!("fixture `{}`: {e}", f.name))?;
             axis.push((name.clone(), ctx));
@@ -1021,12 +1082,14 @@ pub fn cmd_list(
     suite: &str,
     size: &str,
     granularity: &str,
+    fixture: Option<&str>,
 ) -> Result<(), String> {
     let suite_f = Suite::parse_filter(suite)?;
     let size_f = Size::parse_filter(size)?;
     let gran_f = Granularity::parse_filter(granularity)?;
     let fixtures = load_fixtures(fixtures_dir)?;
-    let selected = filtered(&fixtures, suite_f, size_f, gran_f);
+    let name_f = split_csv(fixture).unwrap_or_default();
+    let selected = filtered(&fixtures, suite_f, size_f, gran_f, &name_f);
     println!("{} fixture(s):", selected.len());
     for f in &selected {
         // Show only the first line of the task, clipped, so multi-line tasks
@@ -1079,25 +1142,29 @@ pub fn cmd_review(suite: &str, model: Option<&str>) -> Result<(), String> {
                 let transcript = eval_store::read_transcript(&flows_dir, &r.trial);
                 let output = eval_store::read_output(&flows_dir, &r.trial);
                 let meta = eval_store::read_meta(&flows_dir, &r.trial);
-                let content = if !transcript.is_empty() {
-                    transcript
-                } else if !output.is_empty() {
-                    output
-                } else {
-                    "(no output)".to_string()
-                };
                 let is_turn = r.granularity == Granularity::Turn.as_str();
-                let (task, body) = match meta {
-                    Some(m) => {
-                        let mut b = String::new();
-                        if let Some(rub) = &m.rubric {
-                            b.push_str(&format!("--- rubric ---\n{rub}\n\n"));
-                        }
-                        b.push_str(&content);
-                        (m.task, b)
+                // Lead with the pretty artifact (real newlines in the answer) — the
+                // thing being graded — then the full transcript below for context.
+                let mut b = String::new();
+                if let Some(m) = &meta {
+                    if let Some(rub) = &m.rubric {
+                        b.push_str(&format!("--- rubric ---\n{rub}\n\n"));
                     }
-                    None => (String::new(), content),
-                };
+                }
+                if !output.trim().is_empty() {
+                    b.push_str(&format!("--- answer ---\n{}\n\n", output.trim()));
+                }
+                if !transcript.trim().is_empty() {
+                    b.push_str(&format!(
+                        "--- transcript (context) ---\n{}",
+                        transcript.trim()
+                    ));
+                }
+                if b.trim().is_empty() {
+                    b.push_str("(no output)");
+                }
+                let task = meta.map(|m| m.task).unwrap_or_default();
+                let (task, body) = (task, b);
                 crate::eval_tui::ReviewItem {
                     record: r,
                     transcript: body,
@@ -1136,16 +1203,18 @@ pub fn cmd_review(suite: &str, model: Option<&str>) -> Result<(), String> {
                 body.push_str(&format!("\nrubric:\n{rubric}\n"));
             }
         }
-        let content = if !transcript.is_empty() {
-            &transcript
-        } else if !output.is_empty() {
-            &output
-        } else {
-            "(no output)"
-        };
-        body.push_str(&format!(
-            "\n--- transcript (input + response) ---\n{content}\n"
-        ));
+        // Lead with the pretty artifact (real newlines), transcript below.
+        if !output.trim().is_empty() {
+            body.push_str(&format!("\n--- answer ---\n{}\n", output.trim()));
+        }
+        if !transcript.trim().is_empty() {
+            body.push_str(&format!(
+                "\n--- transcript (input + response) ---\n{}\n",
+                transcript.trim()
+            ));
+        } else if output.trim().is_empty() {
+            body.push_str("\n(no output)\n");
+        }
         show_scrollable(&body);
 
         // Rate every dimension 1-5 (no skipping). tool_use is n/a for a turn
@@ -1565,12 +1634,18 @@ fn report_row(
 /// Deterministic retrieval eval: for each fixture with labeled `relevant` files,
 /// rank files by the repo map and by embedding retrieval and score recall@k + MRR
 /// against the labels. No LLM call (embeddings run locally).
-pub fn cmd_retrieval(fixtures_dir: Option<&str>, model: Option<&str>) -> Result<(), String> {
+pub fn cmd_retrieval(
+    fixtures_dir: Option<&str>,
+    model: Option<&str>,
+    fixture: Option<&str>,
+) -> Result<(), String> {
     let model = model.unwrap_or("");
     let fixtures = load_fixtures(fixtures_dir)?;
+    let name_f = split_csv(fixture).unwrap_or_default();
     let scored: Vec<&Fixture> = fixtures
         .iter()
         .filter(|f| !relevant_files(f).is_empty())
+        .filter(|f| name_f.is_empty() || name_f.iter().any(|n| f.name.contains(n.as_str())))
         .collect();
     if scored.is_empty() {
         return Err("no fixtures with labeled `relevant` files to score".into());
@@ -1625,6 +1700,40 @@ pub fn cmd_retrieval(fixtures_dir: Option<&str>, model: Option<&str>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pretty_artifact_renders_answer_and_drops_envelope() {
+        let raw = "version: '1'\nphase: explain\nrun_id: abc\nidea: the question here\n\
+                   content:\n  answer: 'Line one. Line two.'\n  references:\n    - a.rs\n    - b.rs\n";
+        let out = pretty_artifact(raw);
+        // Envelope (idea/version/run_id) dropped; content fields shown as sections.
+        assert!(out.contains("## answer") && out.contains("Line one. Line two."));
+        assert!(out.contains("## references") && out.contains("a.rs"));
+        assert!(
+            !out.contains("the question here"),
+            "envelope idea should be dropped"
+        );
+        assert!(!out.contains("run_id"));
+        // Non-artifact text falls back unchanged.
+        assert_eq!(pretty_artifact("not yaml : : ["), "not yaml : : [");
+    }
+
+    #[test]
+    fn pretty_artifact_preserves_answer_newlines() {
+        // Mimic the runner: a JSON `content` serialized to YAML (serde_yaml_ng).
+        let artifact = serde_json::json!({
+            "version": "1",
+            "phase": "explain",
+            "content": { "answer": "Para one.\n\n1. First\n2. Second" }
+        });
+        let yaml = serde_yaml_ng::to_string(&artifact).unwrap();
+        let out = pretty_artifact(&yaml);
+        assert!(
+            out.contains("Para one.\n\n1. First\n2. Second"),
+            "newlines lost:\n{out}"
+        );
+        assert!(out.lines().count() >= 4, "expected multiple lines:\n{out}");
+    }
 
     #[test]
     fn oracle_blob_reads_relevant_files_skips_symbols_and_missing() {

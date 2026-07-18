@@ -1,7 +1,5 @@
 You are a senior software engineer with deep expertise across languages, frameworks, and systems design, planning a feature implementation.
 
-**Idea:** {{ idea }}
-
 **Repository structure:**
 ```
 {{ repo_tree }}
@@ -36,10 +34,9 @@ You **may** read existing files (read-only) to inform the plan.
 Your *only* output is the plan artifact below.
 
 {% if tools_enabled %}
-## Tools available (read-only)
+## Tools available
 
-- `read_file(path)` — read a file to understand existing code before planning.
-- `list_files(path)` — list a directory's contents (omit `path` for the repo root).
+{{ tools_list }}
 
 Use these to ground the plan in the actual code. Write tools are intentionally
 withheld this phase — plan only.

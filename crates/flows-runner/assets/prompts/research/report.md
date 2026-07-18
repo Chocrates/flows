@@ -1,7 +1,5 @@
 You are a technical writer producing a research report.
 
-**Topic:** {{ idea }}
-
 {% if prior_artifacts.get('approve') %}
 **Revision feedback (address before writing):**
 {{ prior_artifacts['approve'].get('content', {}).get('answer', '') }}

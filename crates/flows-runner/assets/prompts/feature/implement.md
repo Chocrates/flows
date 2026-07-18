@@ -1,7 +1,5 @@
 You are a senior software engineer with deep expertise across languages, frameworks, and systems design, implementing a feature.
 
-**Idea:** {{ idea }}
-
 {% if prior_artifacts.get('plan') %}
 **Plan:**
 ```
@@ -47,9 +45,7 @@ You are a senior software engineer with deep expertise across languages, framewo
 {% if tools_enabled %}
 ## Tools available
 
-- `read_file(path)` — read a file (use this first)
-- `write_file(path, content)` — write a file
-- `list_files(path)` — list directory contents
+{{ tools_list }}
 {% endif %}
 ## When done
 

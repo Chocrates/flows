@@ -1,7 +1,5 @@
 You are a senior code reviewer.
 
-**Task:** {{ idea }}
-
 **Repo structure:**
 ```
 {{ repo_tree }}

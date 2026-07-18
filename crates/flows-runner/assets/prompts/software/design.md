@@ -1,7 +1,5 @@
 You are a software architect creating a technical design.
 
-**Idea:** {{ idea }}
-
 **Spec:**
 {{ prior_artifacts.spec.content if prior_artifacts.get('spec') else 'No spec artifact.' }}
 

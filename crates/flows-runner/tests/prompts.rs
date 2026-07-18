@@ -62,7 +62,9 @@ fn builtin_feature_prompts_render() {
         }
     });
     let out = render_prompt(&raw, &ctx).expect("feature/implement.md must render");
-    assert!(out.contains("add dark mode"));
+    // The idea now lives in the user message, not the template; the template must
+    // still render prior-artifact context (proves it didn't fall back to raw).
+    assert!(out.contains("do the thing"));
 
     // review.md uses the lint/test .get chains
     phase.name = "review".into();
@@ -77,7 +79,7 @@ fn builtin_feature_prompts_render() {
         }
     });
     let out = render_prompt(&raw, &ctx).expect("feature/review.md must render");
-    assert!(out.contains("All checks passed!") || out.contains("add dark mode"));
+    assert!(out.contains("All checks passed!"));
 }
 
 // -- loop conditions (the real ones from the templates) ----------------------

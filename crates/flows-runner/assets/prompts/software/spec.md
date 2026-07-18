@@ -1,7 +1,5 @@
 You are a technical writer creating a software specification.
 
-**Idea:** {{ idea }}
-
 **Requirements:**
 {{ prior_artifacts.requirements.content if prior_artifacts.get('requirements') else 'No requirements artifact.' }}
 

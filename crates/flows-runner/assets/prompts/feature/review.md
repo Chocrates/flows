@@ -1,7 +1,5 @@
 You are a senior software engineer with deep expertise across languages, frameworks, and systems design, reviewing and fixing a feature implementation.
 
-**Idea:** {{ idea }}
-
 {% if prior_artifacts.get('lint') %}
 **Lint output:**
 ```

@@ -206,6 +206,40 @@ fn error_artifact(phase: &str, idea: &str, msg: impl Into<String>) -> Artifact {
 // Tool definitions + dispatch
 // ---------------------------------------------------------------------------
 
+/// Render the registered tool schemas as a markdown bullet list for the prompt's
+/// "Tools available" section — one line per tool: `` - `name(a, b?)` — description ``
+/// (required params plain, optional suffixed `?`). Generated from `build_tool_defs`
+/// so the prompt always matches exactly what the model can call.
+fn tools_list_markdown(defs: &[ToolDef]) -> String {
+    let mut s = String::new();
+    for d in defs {
+        let required: Vec<&str> = d
+            .parameters
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let sig = match d.parameters.get("properties").and_then(Value::as_object) {
+            Some(props) => {
+                let parts: Vec<String> = props
+                    .keys()
+                    .map(|k| {
+                        if required.contains(&k.as_str()) {
+                            k.clone()
+                        } else {
+                            format!("{k}?")
+                        }
+                    })
+                    .collect();
+                format!("{}({})", d.name, parts.join(", "))
+            }
+            None => format!("{}()", d.name),
+        };
+        s.push_str(&format!("- `{sig}` — {}\n", d.description));
+    }
+    s.trim_end().to_string()
+}
+
 pub fn build_tool_defs(tools: &ToolsConfig, ctx: &ContextConfig) -> Vec<ToolDef> {
     let mut defs = Vec::new();
     if tools.files {
@@ -647,10 +681,19 @@ pub async fn run_agent_phase(
     // schemas and no tool guidance — the prompt templates gate their tool
     // sections on `tools_enabled` so a no-tool model is never told to call tools.
     let tools_enabled = llm.supports_tools != Some(false);
+    // Build the tool schemas first so the prompt's tools section is generated from
+    // the REAL registered toolset (single source of truth) — no hand-maintained
+    // list that drifts (e.g. `research_ro`'s http_get/web_search going unlisted).
+    let tool_defs = if tools_enabled {
+        build_tool_defs(&phase.tools, context)
+    } else {
+        Vec::new()
+    };
 
     let mut ctx = Map::new();
     ctx.insert("idea".into(), json!(idea));
     ctx.insert("tools_enabled".into(), json!(tools_enabled));
+    ctx.insert("tools_list".into(), json!(tools_list_markdown(&tool_defs)));
     // Slim tree (depth-bounded, tightly capped, points at tools) for small
     // models when enabled; otherwise the full baseline tree.
     let repo_tree = if context.slim_tree {
@@ -694,11 +737,6 @@ pub async fn run_agent_phase(
 
     // No-tool models get no schemas; instead the agent tells them to inline any
     // file writes in the artifact's `content.files` map (written to disk after).
-    let tool_defs = if tools_enabled {
-        build_tool_defs(&phase.tools, context)
-    } else {
-        Vec::new()
-    };
     if !tools_enabled {
         system_prompt.push_str(
             "\n\n# No tools available\n\n\
@@ -709,24 +747,13 @@ contents. Example:\n\
 ```json\n{\"type\": \"artifact\", \"content\": {\"files\": {\"src/x.rs\": \"...full contents...\"}, \"summary\": \"...\"}}\n```",
         );
     } else if context.search_tool || context.range_reads {
-        // Flag-aware guidance so the model uses the context tools it actually
-        // has. Kept in Rust (not the markdown templates) so it stays in sync
-        // with the tool schemas gated just above.
-        system_prompt.push_str("\n\n# Finding code efficiently\n\n");
-        if context.search_tool {
-            system_prompt.push_str(
-                "- `search_code(pattern, scope?, cap?)` — regex-search the repo for `path:line: match`. \
-Use it to locate definitions/usages instead of reading files to hunt for them.\n",
-            );
-        }
-        if context.range_reads {
-            system_prompt.push_str(
-                "- `read_file(path, start_line?, end_line?)` — pass a line range to read just the \
-relevant slice of a large file instead of the whole thing.\n",
-            );
-        }
+        // The tools themselves are listed in the prompt's tools section (generated
+        // from the schemas); this is just usage *strategy* for the context tools.
         system_prompt.push_str(
-            "Prefer searching + range reads over reading whole files; keep your context small.",
+            "\n\n# Finding code efficiently\n\n\
+Prefer `search_code` + range reads (`read_file` with start_line/end_line) over \
+reading whole files — locate the relevant code, then read just that slice, to keep \
+your context small.",
         );
     }
     // `llm` is already the phase's resolved config (profile/literal resolved by
@@ -958,8 +985,25 @@ relevant slice of a large file instead of the whole thing.\n",
                 continue;
             }
             Some("artifact") => {
+                // Extract the artifact body. Compliant: `{type, content: {...}}` →
+                // use `content`. But models often flatten, emitting the answer as a
+                // bare `content` string with sibling fields (`references`, …) — keep
+                // those instead of silently dropping them: fold everything (minus
+                // `type`) into the content, renaming a bare `content` value to
+                // `answer` so it reads as a field.
                 let content = parsed
-                    .and_then(|mut p| p.as_object_mut().and_then(|o| o.remove("content")))
+                    .and_then(|mut p| p.as_object_mut().map(std::mem::take))
+                    .map(|mut o| {
+                        o.remove("type");
+                        if o.len() == 1 && o.contains_key("content") {
+                            o.remove("content").unwrap()
+                        } else {
+                            if let Some(c) = o.remove("content") {
+                                o.insert("answer".into(), c);
+                            }
+                            Value::Object(o)
+                        }
+                    })
                     .unwrap_or(json!({}));
                 // No-tools models can't call write_file, so they inline files in
                 // `content.files` (path → contents); write them here.
@@ -1011,6 +1055,36 @@ relevant slice of a large file instead of the whole thing.\n",
     AgentResult {
         artifact: error_artifact(&phase.name, idea, "max rounds exceeded"),
         cost_usd: phase_cost,
+    }
+}
+
+#[cfg(test)]
+mod tool_list_tests {
+    use super::{build_tool_defs, tools_list_markdown};
+    use flows_core::models::{resolve_preset, ContextConfig};
+
+    #[test]
+    fn tools_list_surfaces_full_research_ro_toolset() {
+        // research_ro registers read_file + list_files + http_get + web_search —
+        // all must appear (the old static template listed only the first two).
+        let tools = resolve_preset("research_ro").unwrap();
+        let defs = build_tool_defs(&tools, &ContextConfig::default());
+        let md = tools_list_markdown(&defs);
+        for t in ["read_file", "list_files", "http_get", "web_search"] {
+            assert!(md.contains(t), "tools_list missing `{t}`:\n{md}");
+        }
+        // Read-only phase → no write_file.
+        assert!(!md.contains("write_file"));
+        // search_code only when the flag is on.
+        assert!(!md.contains("search_code"));
+        let with_search = build_tool_defs(
+            &tools,
+            &ContextConfig {
+                search_tool: true,
+                ..ContextConfig::default()
+            },
+        );
+        assert!(tools_list_markdown(&with_search).contains("search_code"));
     }
 }
 

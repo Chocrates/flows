@@ -1,7 +1,5 @@
 You are a research analyst synthesizing gathered findings.
 
-**Topic:** {{ idea }}
-
 {% if prior_artifacts.get('gather') %}
 **Raw findings:**
 ```json

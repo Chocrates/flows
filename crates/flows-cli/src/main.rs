@@ -125,7 +125,9 @@ enum EvalCmd {
         /// (e.g. `coder:coder,reasoner:reasoner`). Omit → configured default.
         #[arg(long)]
         models: Option<String>,
-        /// Context configs (CSV, e.g. `baseline,+search,+search+map`). Omit → baseline.
+        /// Context configs (CSV, e.g. `baseline,search+map`). Omit → each fixture's
+        /// own `configs:` axis (or `baseline`). When given, also FILTERS a fixture's
+        /// declared axis — e.g. `--configs oracle` runs only the oracle config.
         #[arg(long)]
         configs: Option<String>,
         /// Fixture suite filter: coder | reasoner | all.
@@ -137,6 +139,10 @@ enum EvalCmd {
         /// Granularity filter: flow | phase | turn | all.
         #[arg(long, default_value = "all")]
         granularity: String,
+        /// Fixture-name filter (CSV, substring match, e.g. `--fixture core` or
+        /// `--fixture medium-core-reasoner`). Omit → all matching the other filters.
+        #[arg(long)]
+        fixture: Option<String>,
         /// Directory of fixture folders (each with fixture.yml + repo/). Omit for built-ins.
         #[arg(long)]
         fixtures: Option<String>,
@@ -154,6 +160,9 @@ enum EvalCmd {
         size: String,
         #[arg(long, default_value = "all")]
         granularity: String,
+        /// Fixture-name filter (CSV, substring match).
+        #[arg(long)]
+        fixture: Option<String>,
     },
     /// Manually grade ungraded trials (the pass signal for reasoner tasks).
     Review {
@@ -196,6 +205,9 @@ enum EvalCmd {
         /// Local embedding model for the retrieval ranker (empty → all-MiniLM-L6-v2).
         #[arg(long)]
         model: Option<String>,
+        /// Fixture-name filter (CSV, substring match).
+        #[arg(long)]
+        fixture: Option<String>,
     },
 }
 
@@ -280,6 +292,7 @@ fn main() -> ExitCode {
                 suite,
                 size,
                 granularity,
+                fixture,
                 fixtures,
                 trials,
             } => eval::cmd_run(
@@ -288,6 +301,7 @@ fn main() -> ExitCode {
                 &suite,
                 &size,
                 &granularity,
+                fixture.as_deref(),
                 fixtures.as_deref(),
                 trials,
             ),
@@ -296,7 +310,14 @@ fn main() -> ExitCode {
                 suite,
                 size,
                 granularity,
-            } => eval::cmd_list(fixtures.as_deref(), &suite, &size, &granularity),
+                fixture,
+            } => eval::cmd_list(
+                fixtures.as_deref(),
+                &suite,
+                &size,
+                &granularity,
+                fixture.as_deref(),
+            ),
             EvalCmd::Review { suite, model } => eval::cmd_review(&suite, model.as_deref()),
             EvalCmd::Report {
                 model,
@@ -317,9 +338,11 @@ fn main() -> ExitCode {
                 &granularity,
                 yes,
             ),
-            EvalCmd::Retrieval { fixtures, model } => {
-                eval::cmd_retrieval(fixtures.as_deref(), model.as_deref())
-            }
+            EvalCmd::Retrieval {
+                fixtures,
+                model,
+                fixture,
+            } => eval::cmd_retrieval(fixtures.as_deref(), model.as_deref(), fixture.as_deref()),
         },
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "flows", &mut std::io::stdout());
