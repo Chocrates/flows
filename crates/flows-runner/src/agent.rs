@@ -156,6 +156,11 @@ const MAX_TOOL_ROUNDS: u32 = 40;
 const DEFAULT_MAX_TOKENS: u32 = 16384;
 /// Abort after this many identical failing tool-call rounds in a row.
 const MAX_REPEATED_TOOL_ERRORS: u32 = 3;
+/// After a write-capable phase has started writing code, abort if this many tool
+/// rounds pass with no successful `write_file` — catches *varied* flailing (each
+/// command different, so the identical-signature guard never trips) where the
+/// agent thrashes on builds/searches without making code progress.
+const MAX_ROUNDS_WITHOUT_PROGRESS: u32 = 30;
 /// Most-recent messages budgeting never trims (keeps the live turn coherent).
 const BUDGET_RECENT_KEEP: usize = 4;
 
@@ -300,7 +305,9 @@ pub fn build_tool_defs(tools: &ToolsConfig, ctx: &ContextConfig) -> Vec<ToolDef>
     if tools.bash.is_some() {
         defs.push(ToolDef {
             name: "bash".into(),
-            description: "Run a shell command in the project repository.".into(),
+            description: "Run a shell command. It always executes from the repository \
+root (your working directory) — use repo-relative paths and do NOT `cd` elsewhere \
+(e.g. never `cd /tmp`); each call starts fresh at the repo root.".into(),
             parameters: json!({"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}),
         });
     }
@@ -551,6 +558,17 @@ fn append_transcript_round(
     let mut s = String::new();
     if round == 0 {
         s.push_str(&format!("\n========== PHASE: {phase} ==========\n"));
+        // Surface the task at the very top for review. It's delivered as the first
+        // user message (logged below), which otherwise sits *after* the long system
+        // prompt — so a reviewer scrolling from the top sees the repo tree before
+        // ever seeing what the task is.
+        if let Some(task) = new_messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .and_then(|m| m.content.as_deref())
+        {
+            s.push_str(&format!("TASK: {}\n", task.trim()));
+        }
     }
     s.push_str(&format!(
         "\n----- ROUND {round} REQUEST ({} in tok) -----\n",
@@ -562,6 +580,12 @@ fn append_transcript_round(
         s.push_str(&format!("[system]\n{system}\n\n"));
     }
     for m in new_messages {
+        // Assistant messages (the model's own content + tool calls) are the
+        // RESPONSE of the previous round, already logged in that round's RESPONSE
+        // block — skip them here so each tool call is logged exactly once.
+        if m.role == Role::Assistant {
+            continue;
+        }
         let role = match m.role {
             Role::System => "system",
             Role::User => "user",
@@ -770,6 +794,11 @@ your context small.",
     let mut phase_cost = 0.0;
     let mut last_sig: Option<Vec<(String, String)>> = None;
     let mut repeated_errors = 0u32;
+    // No-progress guard (write-capable phases only): once the agent has written
+    // code, count rounds with no successful `write_file`; abort if it thrashes.
+    let can_write = phase.tools.files && !phase.tools.read_only;
+    let mut has_written = false;
+    let mut rounds_without_write = 0u32;
 
     // Optional full-prompt transcript (what the model actually saw each round),
     // gated by `FLOWS_TRANSCRIPT` so normal runs aren't bloated. The eval harness
@@ -907,6 +936,7 @@ your context small.",
             ));
 
             let mut all_errored = true;
+            let mut wrote_this_round = false;
             for tc in &completion.tool_calls {
                 let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
                 callbacks.on_tool_call(&tc.name, &summarize_tool_call(&tc.name, &args));
@@ -917,8 +947,33 @@ your context small.",
                 callbacks.on_tool_result(&tc.name, &summary, is_error);
                 if !is_error {
                     all_errored = false;
+                    if tc.name == "write_file" {
+                        wrote_this_round = true;
+                    }
                 }
                 messages.push(Message::tool_result(tc.id.clone(), result));
+            }
+
+            // No-progress guard: once code has been written, thrashing many rounds
+            // without another successful write means the agent is stuck.
+            if wrote_this_round {
+                has_written = true;
+                rounds_without_write = 0;
+            } else if has_written {
+                rounds_without_write += 1;
+            }
+            if can_write && has_written && rounds_without_write >= MAX_ROUNDS_WITHOUT_PROGRESS {
+                return AgentResult {
+                    artifact: error_artifact(
+                        &phase.name,
+                        idea,
+                        format!(
+                            "aborted: no code written in {MAX_ROUNDS_WITHOUT_PROGRESS} tool rounds \
+after starting — likely stuck in a build/search loop"
+                        ),
+                    ),
+                    cost_usd: phase_cost,
+                };
             }
 
             // Degenerate-loop guard.

@@ -21,6 +21,20 @@ _{{ phase_name }}:_ {{ artifact.get('content', {}) | tojson }}
 {% endfor %}
 {% endif %}
 
+{% if prior_artifacts and prior_artifacts.get('approve_plan', {}).get('content', {}).get('answer', '').strip() %}
+## Revise your previous plan — reviewer feedback
+
+A human reviewed your plan and asked for changes. **Produce an updated plan that
+addresses this feedback** (keep what still applies, change what they flagged):
+
+> {{ prior_artifacts['approve_plan']['content']['answer'] }}
+
+Your previous plan:
+```json
+{{ prior_artifacts.get('plan', {}).get('content', {}) | tojson(indent=2) }}
+```
+
+{% endif %}
 ## Your job — PLAN ONLY, do not implement
 
 **This is the planning phase. You do NOT write code here.** A later phase

@@ -53,6 +53,9 @@ serde_yaml_ng = "0.10"
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 TOML
+  # Coder agents run `make test/lint` (per AGENTS.md) — ship the Makefile so they
+  # don't flail trying to run bare cargo. `--workspace` scopes to the slice.
+  cp Makefile "$dest/repo/Makefile"
 }
 
 # Replace a Rust fn body (identified by its signature line) with `todo!()`.

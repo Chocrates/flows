@@ -1146,20 +1146,25 @@ pub fn cmd_review(suite: &str, model: Option<&str>) -> Result<(), String> {
                 let output = eval_store::read_output(&flows_dir, &r.trial);
                 let meta = eval_store::read_meta(&flows_dir, &r.trial);
                 let is_turn = r.granularity == Granularity::Turn.as_str();
-                // Lead with the pretty artifact (real newlines in the answer) — the
-                // thing being graded — then the full transcript below for context.
+                // Two clearly-labeled sections: the final answer (rendered) to grade,
+                // then the full run below for context. The transcript naturally ends
+                // with the same answer as its last message — the headers make clear
+                // that's the run playing out, not a duplicate/cutoff.
                 let mut b = String::new();
                 if let Some(m) = &meta {
                     if let Some(rub) = &m.rubric {
-                        b.push_str(&format!("--- rubric ---\n{rub}\n\n"));
+                        b.push_str(&format!("═══ RUBRIC ═══\n{rub}\n\n"));
                     }
                 }
                 if !output.trim().is_empty() {
-                    b.push_str(&format!("--- answer ---\n{}\n\n", output.trim()));
+                    b.push_str(&format!(
+                        "═══ FINAL ANSWER (rendered) ═══\n{}\n\n",
+                        output.trim()
+                    ));
                 }
                 if !transcript.trim().is_empty() {
                     b.push_str(&format!(
-                        "--- transcript (context) ---\n{}",
+                        "═══ FULL RUN (task → tool loop → final message) ═══\n{}\n\n═══ END OF RUN ═══",
                         transcript.trim()
                     ));
                 }
@@ -1206,13 +1211,16 @@ pub fn cmd_review(suite: &str, model: Option<&str>) -> Result<(), String> {
                 body.push_str(&format!("\nrubric:\n{rubric}\n"));
             }
         }
-        // Lead with the pretty artifact (real newlines), transcript below.
+        // Final answer (rendered) to grade, then the full run below.
         if !output.trim().is_empty() {
-            body.push_str(&format!("\n--- answer ---\n{}\n", output.trim()));
+            body.push_str(&format!(
+                "\n═══ FINAL ANSWER (rendered) ═══\n{}\n",
+                output.trim()
+            ));
         }
         if !transcript.trim().is_empty() {
             body.push_str(&format!(
-                "\n--- transcript (input + response) ---\n{}\n",
+                "\n═══ FULL RUN (task → tool loop → final message) ═══\n{}\n\n═══ END OF RUN ═══\n",
                 transcript.trim()
             ));
         } else if output.trim().is_empty() {

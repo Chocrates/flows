@@ -245,6 +245,33 @@ mod tests {
         assert!(!without.contains("# Reference code"));
     }
 
+    /// plan.md folds reviewer feedback back in on a rework loop (`approve_plan`
+    /// feedback present → a "Revise your previous plan" section), and stays silent
+    /// on the first pass (no feedback).
+    #[test]
+    fn plan_reworks_on_reviewer_feedback() {
+        let tmpl = BUILTIN
+            .get_file("feature/plan.md")
+            .unwrap()
+            .contents_utf8()
+            .unwrap();
+        let first = render_prompt(tmpl, &json!({"idea": "x"})).unwrap();
+        assert!(!first.contains("Revise your previous plan"));
+        let rework = render_prompt(
+            tmpl,
+            &json!({
+                "idea": "x",
+                "prior_artifacts": {
+                    "plan": {"content": {"summary": "old plan"}},
+                    "approve_plan": {"content": {"answer": "use a trait, not an enum"}}
+                }
+            }),
+        )
+        .unwrap();
+        assert!(rework.contains("Revise your previous plan"));
+        assert!(rework.contains("use a trait, not an enum"));
+    }
+
     /// The repo map is injected when present and absent otherwise.
     #[test]
     fn repo_map_injected_when_present() {
