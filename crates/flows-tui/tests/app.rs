@@ -305,3 +305,16 @@ fn system_prompt_event_shows_when_toggled() {
     assert!(vis.contains("SYSTEM LINE TWO"));
     assert!(vis.contains("system prompt"));
 }
+
+#[test]
+fn status_shows_paused_while_awaiting_input_then_resumes() {
+    let mut a = app();
+    a.handle_ui_event(UiEvent::PhaseStart { name: "approve_plan".into(), index: 1, total: 3 });
+    assert!(a.status.contains("running"));
+    let (reply, _rx) = tokio::sync::oneshot::channel();
+    a.handle_ui_event(UiEvent::NeedInput { prompt: "⏸ Review the plan".into(), reply });
+    assert!(a.status.contains("paused") && a.status.contains("approval"), "status: {}", a.status);
+    assert!(!a.status.contains("running"));
+    a.handle_key(key(KeyCode::Enter));
+    assert!(!a.status.contains("paused"));
+}

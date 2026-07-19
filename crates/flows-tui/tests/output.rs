@@ -252,3 +252,20 @@ fn system_category_hidden_until_toggled() {
     p.toggle_system();
     assert!(p.visible_lines().iter().any(|l| l.contains("secret")));
 }
+
+#[test]
+fn meta_always_visible_regardless_of_system_toggle() {
+    let mut p = OutputPane::new();
+    p.set_viewport(24, 80);
+    p.push_line(Category::Meta, "▶ plan");
+    p.push_line(Category::Meta, "▸ task: add a widget");
+    p.push_line(Category::System, "you are an assistant"); // system prompt
+                                                           // System prompt hidden by default, but Meta (markers/task) always shows.
+    let vis = p.visible_lines().join("\n");
+    assert!(vis.contains("▶ plan") && vis.contains("task: add a widget"));
+    assert!(!vis.contains("you are an assistant"));
+    // Toggling system doesn't affect Meta visibility.
+    p.toggle_system();
+    let vis = p.visible_lines().join("\n");
+    assert!(vis.contains("▶ plan") && vis.contains("you are an assistant"));
+}

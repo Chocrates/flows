@@ -16,7 +16,11 @@ pub enum Category {
     Thinking,
     Json,
     Tool,
+    /// The assembled system prompt — verbose, toggled off by default (`s`).
     System,
+    /// Always-visible scaffolding: phase markers, the user's task/input, script
+    /// results. Never gated by a toggle.
+    Meta,
 }
 
 #[derive(Debug, Clone)]

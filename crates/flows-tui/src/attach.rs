@@ -98,6 +98,7 @@ fn push_output_line(app: &mut App, line: &str) {
                 "j" => app.output.push_token(Category::Json, x),
                 "o" => app.output.push_line(Category::Tool, x.to_string()),
                 "s" => app.output.push_line(Category::System, x.to_string()),
+                "m" => app.output.push_line(Category::Meta, x.to_string()),
                 _ => app.output.push_token(Category::Normal, x),
             }
         }

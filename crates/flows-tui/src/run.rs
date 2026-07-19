@@ -47,6 +47,10 @@ pub fn run_tui(
 
     let names: Vec<String> = phases.iter().map(|p| p.name.clone()).collect();
     let mut app = App::new(&names);
+    // Echo the user's task at the top (always visible) so it's clear what the run
+    // was asked to do — independent of the system-prompt toggle.
+    app.output
+        .push_line(crate::output::Category::Meta, format!("▸ task: {idea}"));
     let model = flows_core::config::merge_llm(&global_cfg, &project_cfg).model;
     app.context_window = flows_core::pricing::context_window(&model);
     let loops: Vec<crate::phases::LoopEdge> = phases

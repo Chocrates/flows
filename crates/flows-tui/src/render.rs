@@ -80,7 +80,11 @@ fn category_style(cat: Category) -> Style {
             .add_modifier(Modifier::ITALIC),
         Category::Json => Style::default().fg(Color::Blue),
         Category::Tool => Style::default().fg(Color::Yellow),
-        Category::System => Style::default().fg(Color::Cyan),
+        // System prompt reads as dim scaffolding; Meta (markers/task) stands out.
+        Category::System => Style::default().fg(Color::DarkGray),
+        Category::Meta => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     }
 }
 

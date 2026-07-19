@@ -897,7 +897,8 @@ impl Waiting {
     /// tail it live (a backgrounded worker has no terminal of its own). Written
     /// as JSONL `{"c": category, "x": text}` so the reader can restore the
     /// thinking/normal/tool categories (and their toggles). `c`: n=normal,
-    /// t=thinking, o=tool, s=system.
+    /// t=thinking, j=json, o=tool, s=system (toggled), m=meta (task / phase
+    /// markers / scripts, always visible).
     fn emit(&self, cat: &str, text: &str) {
         use std::io::Write;
         let line = serde_json::json!({ "c": cat, "x": text }).to_string();
@@ -957,9 +958,14 @@ impl RunnerCallbacks for Waiting {
     }
 
     // -- live output streamed to output.log (tailed by `flows attach`) --------
+    // Phase markers use "m" (Meta, always visible); the system prompt uses "s"
+    // (System, hidden behind the `s` toggle).
+    fn on_system(&self, _phase: &str, prompt: &str) {
+        self.emit("s", prompt);
+    }
     fn on_phase_start(&self, phase: &str, index: usize, total: usize) {
         self.emit(
-            "s",
+            "m",
             &format!("━━ phase {}/{}: {phase} ━━", index + 1, total),
         );
     }
@@ -980,7 +986,7 @@ impl RunnerCallbacks for Waiting {
         self.emit("o", &format!("{glyph} {name} {summary}"));
     }
     fn on_script_result(&self, _phase: &str, exit_code: i32, stdout: &str, _stderr: &str) {
-        self.emit("s", &format!("script → exit {exit_code}\n{stdout}"));
+        self.emit("m", &format!("script → exit {exit_code}\n{stdout}"));
     }
 }
 
@@ -1163,6 +1169,9 @@ fn cmd_worker(run_id: &str) -> Result<(), String> {
         notify: global.notifications.enabled,
         sound: global.notifications.sound,
     };
+    // Echo the task first so `attach` shows what the run was asked to do, even
+    // before the model produces any tokens (matches the live `run_tui` path).
+    waiting.emit("m", &format!("▸ task: {idea}"));
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let result = rt.block_on(run_pipeline(
         run_id,

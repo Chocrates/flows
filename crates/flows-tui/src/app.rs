@@ -240,7 +240,7 @@ impl App {
         match ev {
             UiEvent::PhaseStart { name, .. } => {
                 self.phases.set_status(&name, PhaseStatus::Running);
-                self.output.push_line(Category::System, format!("▶ {name}"));
+                self.output.push_line(Category::Meta, format!("▶ {name}"));
                 self.status = format!("running {name}");
             }
             UiEvent::Token { text } => self.output.push_token(Category::Normal, &text),
@@ -269,7 +269,7 @@ impl App {
             UiEvent::Context { input_tokens } => self.context_tokens = input_tokens,
             UiEvent::ScriptResult { exit_code } => self
                 .output
-                .push_line(Category::System, format!("script exited {exit_code}")),
+                .push_line(Category::Meta, format!("script exited {exit_code}")),
             UiEvent::PhaseEnd { name } => {
                 if self.phases.status_of(&name) != Some(PhaseStatus::Failed) {
                     self.phases.set_status(&name, PhaseStatus::Done);
@@ -288,6 +288,13 @@ impl App {
                 self.status = format!("✗ failed at {phase}: {error}");
             }
             UiEvent::NeedInput { prompt, reply } => {
+                // The run is paused waiting on the human — reflect that, not "running".
+                // A `⏸`-prefixed prompt is a human gate (approval); `?` is a question.
+                self.status = if prompt.starts_with('⏸') {
+                    "⏸ paused — awaiting your approval (Enter to accept, or type feedback)".into()
+                } else {
+                    "⏸ paused — awaiting your answer".into()
+                };
                 self.input = Some(InputState {
                     prompt,
                     buffer: String::new(),
@@ -365,6 +372,7 @@ impl App {
                     let _ = reply.send(answer);
                 }
                 self.input = None;
+                self.status = "resuming…".into();
             }
             KeyCode::Esc => {
                 // send empty (accept) and close
@@ -372,6 +380,7 @@ impl App {
                     let _ = reply.send(String::new());
                 }
                 self.input = None;
+                self.status = "resuming…".into();
             }
             _ => {}
         }
