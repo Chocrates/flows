@@ -89,6 +89,7 @@ enum Command {
     Runs,
     /// Delete a single run by id (use --force to stop + delete a running one).
     Delete {
+        /// Run id to delete (from `flows runs`; a unique prefix works).
         run_id: String,
         /// Cancel + kill the worker first if the run is still active.
         #[arg(long)]
@@ -100,15 +101,22 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Evaluate models on task fixtures (model × context-config × suite × size).
+    /// Benchmark models on task fixtures: a model × context-config × fixture ×
+    /// trial matrix, stored for offline grading and comparison.
     Eval {
         #[command(subcommand)]
         command: EvalCmd,
     },
     /// Show token usage + cost for a run.
-    Usage { run_id: String },
+    Usage {
+        /// Run id to report on (from `flows runs`; a unique prefix works).
+        run_id: String,
+    },
     /// Attach a TUI view to a run (shows phase progress from its state).
-    Attach { run_id: String },
+    Attach {
+        /// Run id to attach to (from `flows runs`; a unique prefix works).
+        run_id: String,
+    },
     /// Print a shell completion script (bash/zsh/fish/…).
     Completions { shell: clap_complete::Shell },
     /// Internal: run a backgrounded pipeline (spawned by `run --background`).
@@ -152,12 +160,16 @@ enum EvalCmd {
     },
     /// List discovered fixtures.
     List {
+        /// Directory of fixture folders (each with fixture.yml + repo/). Omit for built-ins.
         #[arg(long)]
         fixtures: Option<String>,
+        /// Filter to this suite: coder | reasoner | all.
         #[arg(long, default_value = "all")]
         suite: String,
+        /// Filter to this size: small | medium | large | all.
         #[arg(long, default_value = "all")]
         size: String,
+        /// Filter to this granularity: flow | phase | turn | all.
         #[arg(long, default_value = "all")]
         granularity: String,
         /// Fixture-name filter (CSV, substring match).
@@ -166,30 +178,40 @@ enum EvalCmd {
     },
     /// Manually grade ungraded trials (the pass signal for reasoner tasks).
     Review {
+        /// Only grade this suite: coder | reasoner | all.
         #[arg(long, default_value = "all")]
         suite: String,
+        /// Only grade trials from this model (profile name or literal).
         #[arg(long)]
         model: Option<String>,
     },
     /// Print a comparison table from the stored results (no model calls).
     Report {
+        /// Filter to this model (profile name or literal).
         #[arg(long)]
         model: Option<String>,
+        /// Filter to this context config (e.g. `baseline`, `oracle`, `rag`).
         #[arg(long)]
         config: Option<String>,
+        /// Filter to this suite: coder | reasoner | all.
         #[arg(long, default_value = "all")]
         suite: String,
+        /// Filter to this granularity: flow | phase | turn | all.
         #[arg(long, default_value = "all")]
         granularity: String,
     },
     /// Delete stored results (no filters = wipe the whole store).
     Clean {
+        /// Only delete trials from this model.
         #[arg(long)]
         model: Option<String>,
+        /// Only delete trials from fixtures whose name matches (CSV substring).
         #[arg(long)]
         fixture: Option<String>,
+        /// Only delete this suite: coder | reasoner | all.
         #[arg(long, default_value = "all")]
         suite: String,
+        /// Only delete this granularity: flow | phase | turn | all.
         #[arg(long, default_value = "all")]
         granularity: String,
         /// Skip the confirmation prompt.
@@ -227,8 +249,13 @@ enum TemplatesCmd {
 enum ConfigCmd {
     /// Show the resolved config (model, provider, endpoint, limits).
     Show,
-    /// Set a value: `model`, `api-base`, `api-key`, or `max-cost`.
-    Set { key: String, value: String },
+    /// Set a value in ~/.flows/config.yml.
+    Set {
+        /// Which setting: `model`, `api-base`, `api-key`, or `max-cost`.
+        key: String,
+        /// The new value (for `max-cost`, USD; 0 = no cap).
+        value: String,
+    },
 }
 
 fn home_dir() -> PathBuf {
