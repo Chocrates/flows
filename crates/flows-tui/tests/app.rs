@@ -177,6 +177,35 @@ fn input_mode_keys_do_not_trigger_shortcuts() {
     assert_eq!(a.input_prompt().unwrap().1, "q");
 }
 
+#[test]
+fn input_mode_view_controls_still_work() {
+    let mut a = app();
+    // Some scrollback so scroll has an effect.
+    for _ in 0..50 {
+        a.handle_ui_event(UiEvent::Token { text: "x\n".into() });
+    }
+    let (reply, _rx) = tokio::sync::oneshot::channel();
+    a.handle_ui_event(UiEvent::NeedInput {
+        prompt: "?".into(),
+        reply,
+    });
+
+    // Plain 't' types into the answer (not a toggle).
+    let before = a.output.show_thinking;
+    a.handle_key(key(KeyCode::Char('t')));
+    assert_eq!(a.output.show_thinking, before);
+    assert_eq!(a.input_prompt().unwrap().1, "t");
+
+    // Alt+t toggles thinking without inserting the letter.
+    a.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT));
+    assert_eq!(a.output.show_thinking, !before);
+    assert_eq!(a.input_prompt().unwrap().1, "t"); // unchanged
+
+    // Scroll keys still work while composing.
+    a.handle_key(key(KeyCode::Up));
+    assert!(!a.output.following());
+}
+
 // -- mouse selection ---------------------------------------------------------
 
 #[test]

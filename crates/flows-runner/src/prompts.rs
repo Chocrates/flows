@@ -188,7 +188,7 @@ mod tests {
             "tools off → section omitted"
         );
         // The non-tool body still renders either way.
-        assert!(off.contains("Clarify ambiguities first"));
+        assert!(off.contains("PLAN ONLY"));
     }
 
     /// The explain template asks for a prose answer artifact (not a build plan),

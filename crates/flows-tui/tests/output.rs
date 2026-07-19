@@ -6,7 +6,7 @@ use flows_tui::OutputPane;
 
 fn pane(h: usize) -> OutputPane {
     let mut p = OutputPane::new();
-    p.set_viewport_height(h);
+    p.set_viewport(h, 1000);
     p
 }
 
@@ -220,4 +220,35 @@ fn partial_scroll_down_stays_unpinned() {
     p.scroll_down(3); // still above bottom
     assert!(!p.following());
     assert_eq!(p.scroll_y(), 3);
+}
+
+// -- long-line wrapping (the "long responses" bug) ---------------------------
+
+#[test]
+fn long_line_wraps_to_width_not_truncated() {
+    let mut p = OutputPane::new();
+    p.set_viewport(10, 10); // 10-col content width
+    p.push_line(Category::Normal, "aaaa bbbb cccc dddd eeee ffff"); // 29 chars
+
+    let lines = p.visible_lines();
+    // Wrapped into multiple display lines, each within the width.
+    assert!(lines.len() > 1, "should wrap: {lines:?}");
+    assert!(lines.iter().all(|l| l.chars().count() <= 10));
+    // No text lost — the words all survive across the wrap.
+    let joined: String = lines.join("");
+    for w in ["aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff"] {
+        assert!(joined.contains(w), "lost `{w}`");
+    }
+    // Scroll math counts wrapped rows, so the bottom is reachable.
+    assert_eq!(p.visible_count(), lines.len());
+}
+
+#[test]
+fn system_category_hidden_until_toggled() {
+    let mut p = OutputPane::new();
+    p.set_viewport(24, 80);
+    p.push_line(Category::System, "secret system prompt");
+    assert!(!p.visible_lines().iter().any(|l| l.contains("secret")));
+    p.toggle_system();
+    assert!(p.visible_lines().iter().any(|l| l.contains("secret")));
 }

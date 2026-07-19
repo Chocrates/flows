@@ -49,9 +49,13 @@ pub struct OutputPane {
     current: Option<Entry>,
     scroll_y: usize,
     viewport_h: usize,
+    /// Content width — long lines wrap to this so nothing is truncated off-screen.
+    viewport_w: usize,
     follow: bool,
     pub show_thinking: bool,
     pub show_json: bool,
+    /// System prompt is verbose; hidden by default, toggle to inspect it.
+    pub show_system: bool,
     /// (anchor, cursor) in visible-buffer coordinates.
     selection: Option<(Cell, Cell)>,
 }
@@ -63,12 +67,50 @@ impl Default for OutputPane {
             current: None,
             scroll_y: 0,
             viewport_h: 24,
+            viewport_w: 80,
             follow: true,
             show_thinking: true,
             show_json: true,
+            show_system: false,
             selection: None,
         }
     }
+}
+
+/// Wrap a logical line to `w` columns: greedy word-wrap, hard-breaking any word
+/// longer than `w`. Returns ≥1 line (empty text → one empty line) so line counts
+/// stay stable. Char-based (terminal columns), not byte-based.
+fn wrap_line(text: &str, w: usize) -> Vec<String> {
+    if w == 0 || text.chars().count() <= w {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    let mut cur_len = 0usize;
+    for word in text.split_inclusive(' ') {
+        let wl = word.chars().count();
+        if cur_len > 0 && cur_len + wl > w {
+            lines.push(std::mem::take(&mut cur));
+            cur_len = 0;
+        }
+        if wl > w {
+            for ch in word.chars() {
+                if cur_len == w {
+                    lines.push(std::mem::take(&mut cur));
+                    cur_len = 0;
+                }
+                cur.push(ch);
+                cur_len += 1;
+            }
+        } else {
+            cur.push_str(word);
+            cur_len += wl;
+        }
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
 }
 
 impl OutputPane {
@@ -76,8 +118,9 @@ impl OutputPane {
         Self::default()
     }
 
-    pub fn set_viewport_height(&mut self, h: usize) {
+    pub fn set_viewport(&mut self, h: usize, w: usize) {
         self.viewport_h = h.max(1);
+        self.viewport_w = w.max(1);
         self.apply_follow();
     }
 
@@ -85,6 +128,7 @@ impl OutputPane {
         match c {
             Category::Thinking => self.show_thinking,
             Category::Json => self.show_json,
+            Category::System => self.show_system,
             _ => true,
         }
     }
@@ -142,34 +186,31 @@ impl OutputPane {
         self.visible_entries().into_iter().map(|(_, t)| t).collect()
     }
 
-    /// Visible lines paired with their category (for per-category styling).
+    /// Visible lines paired with their category (for per-category styling), each
+    /// **wrapped** to the viewport width — so scroll/selection/render all operate
+    /// on the same display lines and long lines are never truncated.
     pub fn visible_entries(&self) -> Vec<(Category, String)> {
-        let mut out: Vec<(Category, String)> = self
-            .entries
-            .iter()
-            .filter(|e| self.is_visible(e.category))
-            .map(|e| (e.category, e.text.clone()))
-            .collect();
+        let mut out: Vec<(Category, String)> = Vec::new();
+        let push = |cat: Category, text: &str, out: &mut Vec<(Category, String)>| {
+            for wl in wrap_line(text, self.viewport_w) {
+                out.push((cat, wl));
+            }
+        };
+        for e in &self.entries {
+            if self.is_visible(e.category) {
+                push(e.category, &e.text, &mut out);
+            }
+        }
         if let Some(cur) = &self.current {
             if !cur.text.is_empty() && self.is_visible(cur.category) {
-                out.push((cur.category, cur.text.clone()));
+                push(cur.category, &cur.text, &mut out);
             }
         }
         out
     }
 
     pub fn visible_count(&self) -> usize {
-        let mut n = self
-            .entries
-            .iter()
-            .filter(|e| self.is_visible(e.category))
-            .count();
-        if let Some(cur) = &self.current {
-            if !cur.text.is_empty() && self.is_visible(cur.category) {
-                n += 1;
-            }
-        }
-        n
+        self.visible_entries().len()
     }
 
     pub fn max_scroll(&self) -> usize {
@@ -228,6 +269,11 @@ impl OutputPane {
 
     pub fn toggle_json(&mut self) {
         self.show_json = !self.show_json;
+        self.apply_follow();
+    }
+
+    pub fn toggle_system(&mut self) {
+        self.show_system = !self.show_system;
         self.apply_follow();
     }
 

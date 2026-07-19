@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 use flows_core::models::{Artifact, ContextConfig, LLMConfig, PhaseConfig, ToolsConfig};
 use flows_core::pricing::calculate_cost;
 use flows_core::thinking::{model_supports_thinking, resolve_thinking};
-use flows_llm::types::{Completion, CompletionRequest, Message, Role, ToolDef};
+use flows_llm::types::{Completion, CompletionRequest, Message, Role, ToolCall, ToolDef};
 use flows_llm::Provider;
 use flows_tools::{bash, code_search, files, plugin};
 
@@ -177,6 +177,8 @@ pub trait AgentCallbacks: Send + Sync {
     /// Input tokens of the latest request (current context-window usage).
     fn on_context(&self, _input_tokens: u64) {}
     fn on_thinking(&self, _text: &str) {}
+    /// The assembled system prompt for this phase (emitted once, at phase start).
+    fn on_system(&self, _prompt: &str) {}
     fn on_tool_call(&self, _name: &str, _summary: &str) {}
     fn on_tool_result(&self, _name: &str, _summary: &str, _is_error: bool) {}
     /// Return true to abort the tool loop mid-phase (user cancelled the run).
@@ -506,6 +508,39 @@ fn summarize_tool_result(result: &str) -> (String, bool) {
 // Response parsing
 // ---------------------------------------------------------------------------
 
+/// Belt-and-suspenders for models that emit tool calls as **text** instead of
+/// structured `tool_calls` — some thinking models drift and write
+/// `<tool_call>{…}</tool_call>` (or the declaration tag `<tools>{…}</tools>`)
+/// inside their content/reasoning, which the server never converts. Extract those
+/// blocks into real `ToolCall`s so the call still executes instead of stalling.
+pub fn extract_text_tool_calls(text: &str) -> Vec<ToolCall> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?s)<(?:tool_call|tools)>(.*?)</(?:tool_call|tools)>").unwrap()
+    });
+    let mut out = Vec::new();
+    for cap in re.captures_iter(text) {
+        let inner = cap[1].trim();
+        let Ok(v) = serde_json::from_str::<Value>(inner) else {
+            continue;
+        };
+        let Some(name) = v.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let args = v.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        let arguments = match &args {
+            Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).unwrap_or_else(|_| "{}".into()),
+        };
+        out.push(ToolCall {
+            id: format!("text-{}", out.len()),
+            name: name.to_string(),
+            arguments,
+        });
+    }
+    out
+}
+
 fn fenced_json(content: &str) -> Vec<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"(?s)```(?:json)?\s*(\{.*?\})\s*```").unwrap());
@@ -787,6 +822,9 @@ your context small.",
     let thinking_budget =
         (thinking_enabled && model_supports_thinking(&model)).then_some(thinking_budget);
 
+    // Surface the assembled system prompt once (the UI shows it under a toggle).
+    callbacks.on_system(&system_prompt);
+
     let mut messages: Vec<Message> = vec![Message::user(format!("Idea: {idea}"))];
     let max_tool_rounds = phase.max_tool_rounds.unwrap_or(MAX_TOOL_ROUNDS);
     let total_rounds = phase.max_clarification_rounds + max_tool_rounds;
@@ -928,16 +966,28 @@ your context small.",
             };
         }
 
-        // Tool calls?
-        if !completion.tool_calls.is_empty() {
+        // Tool calls — prefer structured; fall back to any the model leaked as
+        // text (some thinking models write `<tool_call>{…}</tool_call>` or
+        // `<tools>{…}</tools>` in content/reasoning instead of real tool_calls).
+        let tool_calls: Vec<ToolCall> = if !completion.tool_calls.is_empty() {
+            completion.tool_calls.clone()
+        } else {
+            let mut ex = extract_text_tool_calls(&completion.content);
+            if let Some(r) = &completion.reasoning {
+                ex.extend(extract_text_tool_calls(r));
+            }
+            ex
+        };
+
+        if !tool_calls.is_empty() {
             messages.push(Message::assistant_tools(
                 (!completion.content.is_empty()).then(|| completion.content.clone()),
-                completion.tool_calls.clone(),
+                tool_calls.clone(),
             ));
 
             let mut all_errored = true;
             let mut wrote_this_round = false;
-            for tc in &completion.tool_calls {
+            for tc in &tool_calls {
                 let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
                 callbacks.on_tool_call(&tc.name, &summarize_tool_call(&tc.name, &args));
                 let result =
@@ -977,8 +1027,7 @@ after starting — likely stuck in a build/search loop"
             }
 
             // Degenerate-loop guard.
-            let sig: Vec<(String, String)> = completion
-                .tool_calls
+            let sig: Vec<(String, String)> = tool_calls
                 .iter()
                 .map(|tc| (tc.name.clone(), tc.arguments.clone()))
                 .collect();
@@ -991,11 +1040,8 @@ after starting — likely stuck in a build/search loop"
             };
             last_sig = Some(sig);
             if repeated_errors >= MAX_REPEATED_TOOL_ERRORS {
-                let names: BTreeMap<&str, ()> = completion
-                    .tool_calls
-                    .iter()
-                    .map(|tc| (tc.name.as_str(), ()))
-                    .collect();
+                let names: BTreeMap<&str, ()> =
+                    tool_calls.iter().map(|tc| (tc.name.as_str(), ())).collect();
                 let names: Vec<&str> = names.into_keys().collect();
                 return AgentResult {
                     artifact: error_artifact(
@@ -1115,8 +1161,25 @@ after starting — likely stuck in a build/search loop"
 
 #[cfg(test)]
 mod tool_list_tests {
-    use super::{build_tool_defs, tools_list_markdown};
+    use super::{build_tool_defs, extract_text_tool_calls, tools_list_markdown};
     use flows_core::models::{resolve_preset, ContextConfig};
+
+    #[test]
+    fn extracts_leaked_text_tool_calls() {
+        // A thinking model leaked the call as text with the declaration tag.
+        let text = "So let's list the crates.\n<tools>\n{\"name\": \"list_files\", \"arguments\": {\"path\": \"crates\"}}\n</tools>\n";
+        let calls = extract_text_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "list_files");
+        assert_eq!(calls[0].arguments, r#"{"path":"crates"}"#);
+        // Also the proper call tag.
+        let calls = extract_text_tool_calls(
+            "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>",
+        );
+        assert_eq!(calls[0].name, "read_file");
+        // No tool blocks → nothing.
+        assert!(extract_text_tool_calls("just some prose, no tools").is_empty());
+    }
 
     #[test]
     fn tools_list_surfaces_full_research_ro_toolset() {

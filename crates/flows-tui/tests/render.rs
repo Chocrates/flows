@@ -25,7 +25,7 @@ fn row_text(buf: &Buffer, y: u16, area: Rect) -> String {
 fn output_draws_visible_lines() {
     let (mut buf, area) = buffer(20, 4);
     let mut pane = OutputPane::new();
-    pane.set_viewport_height(4);
+    pane.set_viewport(4, 1000);
     for i in 0..3 {
         pane.push_line(Category::Normal, format!("line{i}"));
     }
@@ -38,7 +38,7 @@ fn output_draws_visible_lines() {
 fn selection_highlight_paints() {
     let (mut buf, area) = buffer(20, 2);
     let mut pane = OutputPane::new();
-    pane.set_viewport_height(2);
+    pane.set_viewport(2, 1000);
     pane.push_line(Category::Normal, "0123456789");
     pane.start_selection(2, 0);
     pane.update_selection(6, 0);
@@ -60,7 +60,7 @@ fn selection_highlight_paints() {
 fn output_respects_scroll() {
     let (mut buf, area) = buffer(20, 3);
     let mut pane = OutputPane::new();
-    pane.set_viewport_height(3);
+    pane.set_viewport(3, 1000);
     for i in 0..20 {
         pane.push_line(Category::Normal, format!("L{i:02}"));
     }

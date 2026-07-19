@@ -47,6 +47,7 @@ phases:
     tools: files_and_test
     on_failure: stop
     max_tool_rounds: 200
+    max_clarification_rounds: 0
     # model: coder                     # fast/local coder for implementation
 
   # Resolved in the runner (no LLM): make lint/test target, else the language's
@@ -65,6 +66,7 @@ phases:
   # signed-off spec (and that tests/lint pass); loop back to implement if not.
   - name: verify
     type: agent
+    max_clarification_rounds: 0
     tools: files_and_test
     on_failure: stop
     loop_back_to: implement

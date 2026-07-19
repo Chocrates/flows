@@ -44,6 +44,7 @@ phases:
           - "rm*"
     on_failure: stop
     max_tool_rounds: 200
+    max_clarification_rounds: 0
 
   # @auto resolves the command in the runner (no LLM): a `make lint`/`make test`
   # target if present, else the language's tool (cargo/pytest/npm/go/…). If no
@@ -60,6 +61,8 @@ phases:
 
   - name: review
     type: agent
+    # Automated review + fix (build/tests/lint/security) — hands-off, never asks.
+    max_clarification_rounds: 0
     tools:
       files: true
       bash:

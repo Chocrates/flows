@@ -11,6 +11,7 @@ phases:
     # Generous loop budget — local/self-hosted models take more tool rounds to
     # implement + build + fix than a frontier model.
     max_tool_rounds: 200
+    max_clarification_rounds: 0
     # Same toolset as the real `feature` pipeline's implement phase, so the eval
     # measures production behavior — not an agent hobbled by a narrower allowlist.
     tools:

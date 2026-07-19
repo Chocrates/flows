@@ -55,7 +55,7 @@ Your *only* output is the plan artifact below.
 Use these to ground the plan in the actual code. Write tools are intentionally
 withheld this phase — plan only.
 {% endif %}
-1. **Clarify ambiguities first.** If the idea is under-specified (language unclear, scope too broad, conflicting constraints), ask up to 3 focused questions. Do not ask about things you can infer from the repo structure.
+1. **Clarify ambiguities first — planning is interactive.** A human is available to answer. If the idea is under-specified (unclear language, scope too broad, conflicting constraints), emit a `questions` response with up to 3 focused questions. Don't ask about things you can infer from the repo. **Be decisive:** when something is unclear, ask it immediately — do not deliberate in your reasoning about whether to ask; every turn ends in exactly one action (a tool call, a `questions` response, or the plan).
 
 2. **Then produce a concrete plan** covering:
    - Which files to create or modify (with reasoning) — *describe* them, don't create them
