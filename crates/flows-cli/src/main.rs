@@ -87,6 +87,11 @@ enum Command {
     },
     /// List recent runs and their status.
     Runs,
+    /// Stop a running flow: cancel it and kill its worker (keeps the run + output).
+    Stop {
+        /// Run id to stop (from `flows runs`; a unique prefix works).
+        run_id: String,
+    },
     /// Delete a single run by id (use --force to stop + delete a running one).
     Delete {
         /// Run id to delete (from `flows runs`; a unique prefix works).
@@ -310,6 +315,7 @@ fn main() -> ExitCode {
             background,
         } => cmd_run(&idea.join(" "), template.as_deref(), tui, background),
         Command::Runs => cmd_runs(),
+        Command::Stop { run_id } => cmd_stop(&run_id),
         Command::Delete { run_id, force } => cmd_delete(&run_id, force),
         Command::Clean { all } => cmd_clean(all),
         Command::Eval { command } => match command {
@@ -897,8 +903,9 @@ impl Waiting {
     /// tail it live (a backgrounded worker has no terminal of its own). Written
     /// as JSONL `{"c": category, "x": text}` so the reader can restore the
     /// thinking/normal/tool categories (and their toggles). `c`: n=normal,
-    /// t=thinking, j=json, o=tool, s=system (toggled), m=meta (task / phase
-    /// markers / scripts, always visible).
+    /// t=thinking, j=json, o=tool, s=system (toggled), u=user turn, m=meta (task
+    /// / phase markers / scripts, always visible). Non-display metrics for the
+    /// status bar: ctx=input tokens, cost=usd total, cw=context window.
     fn emit(&self, cat: &str, text: &str) {
         use std::io::Write;
         let line = serde_json::json!({ "c": cat, "x": text }).to_string();
@@ -962,6 +969,18 @@ impl RunnerCallbacks for Waiting {
     // (System, hidden behind the `s` toggle).
     fn on_system(&self, _phase: &str, prompt: &str) {
         self.emit("s", prompt);
+    }
+    fn on_user(&self, _phase: &str, message: &str) {
+        self.emit("u", message);
+    }
+    fn on_note(&self, _phase: &str, text: &str) {
+        self.emit("m", text);
+    }
+    fn on_context(&self, input_tokens: u64) {
+        self.emit("ctx", &input_tokens.to_string());
+    }
+    fn on_cost(&self, total_usd: f64) {
+        self.emit("cost", &total_usd.to_string());
     }
     fn on_phase_start(&self, phase: &str, index: usize, total: usize) {
         self.emit(
@@ -1135,7 +1154,7 @@ fn spawn_background(
     let err_file = log_file.try_clone().map_err(|e| e.to_string())?;
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    Command::new(exe)
+    let child = Command::new(exe)
         .arg("worker")
         .arg(run_id)
         .env("FLOWS_IDEA", idea)
@@ -1147,6 +1166,12 @@ fn spawn_background(
         .process_group(0) // detach from the parent's job control
         .spawn()
         .map_err(|e| e.to_string())?;
+
+    // Record the worker's pid so `flows stop`/`delete --force` can actually kill it
+    // (a worker deep in an LLM call may not poll the cancel signal promptly).
+    let mut meta = meta;
+    meta.pid = Some(child.id() as i32);
+    let _ = store.write_meta(&meta);
 
     if announce {
         println!("Started background run {run_id}");
@@ -1172,6 +1197,12 @@ fn cmd_worker(run_id: &str) -> Result<(), String> {
     // Echo the task first so `attach` shows what the run was asked to do, even
     // before the model produces any tokens (matches the live `run_tui` path).
     waiting.emit("m", &format!("▸ task: {idea}"));
+    // Publish the context window once so `attach` can show token usage as a
+    // percentage (the default model's window; per-phase models may differ).
+    let model = flows_core::config::merge_llm(&global, &project).model;
+    if let Some(w) = flows_core::pricing::context_window(&model) {
+        waiting.emit("cw", &w.to_string());
+    }
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let result = rt.block_on(run_pipeline(
         run_id,
@@ -1396,21 +1427,69 @@ fn cmd_delete(run_id: &str, force: bool) -> Result<(), String> {
         ));
     }
     if active && force {
-        // Ask the worker to stop, and kill it if we know its pid, before deleting
-        // (so it isn't writing into a directory we're removing).
-        let _ = store.send_cancel(run_id);
-        if let Some(pid) = store.read_meta(run_id).ok().and_then(|m| m.pid) {
-            if pid > 0 {
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(pid, libc::SIGTERM);
-                }
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Stop the worker (signal + kill) before deleting so it isn't writing into
+        // a directory we're removing.
+        stop_active_run(&store, run_id);
     }
     store.delete_run(run_id).map_err(|e| e.to_string())?;
     println!("deleted run {run_id}");
+    Ok(())
+}
+
+/// Stop a still-active run: send the cancel signal, then SIGTERM (and SIGKILL as a
+/// fallback) the worker pid if we recorded one — a worker mid-LLM-call may not poll
+/// the cancel promptly. Returns whether the run was active.
+fn stop_active_run(store: &Store, run_id: &str) -> bool {
+    let status = store
+        .read_state(run_id)
+        .ok()
+        .flatten()
+        .map(|s| s.status)
+        .unwrap_or_default();
+    let active = matches!(
+        status.as_str(),
+        "running" | "waiting_input" | "waiting_approval" | ""
+    );
+    if !active {
+        return false;
+    }
+    let _ = store.send_cancel(run_id);
+    match store.read_meta(run_id).ok().and_then(|m| m.pid) {
+        Some(pid) if pid > 0 => {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            // Still alive? (signal 0 just checks existence) → SIGKILL.
+            #[cfg(unix)]
+            unsafe {
+                if libc::kill(pid, 0) == 0 {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+        // No pid recorded (older run): fall back to the cancel signal + grace.
+        _ => std::thread::sleep(std::time::Duration::from_millis(300)),
+    }
+    true
+}
+
+fn cmd_stop(run_id: &str) -> Result<(), String> {
+    let store = Store::new(flows_dir());
+    let run_id = &resolve_run_id(&store, run_id)?;
+    if !stop_active_run(&store, run_id) {
+        println!("run {run_id} is not active — nothing to stop");
+        return Ok(());
+    }
+    // Reflect the stop in state so listings/attach show it (the worker may have been
+    // killed before it could update its own status).
+    if let Ok(Some(mut st)) = store.read_state(run_id) {
+        st.status = "cancelled".into();
+        st.questions = vec![];
+        let _ = store.write_state(&st);
+    }
+    println!("stopped run {run_id}");
     Ok(())
 }
 

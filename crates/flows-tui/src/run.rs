@@ -53,6 +53,17 @@ pub fn run_tui(
         .push_line(crate::output::Category::Meta, format!("▸ task: {idea}"));
     let model = flows_core::config::merge_llm(&global_cfg, &project_cfg).model;
     app.context_window = flows_core::pricing::context_window(&model);
+
+    // Persist output to the run's `output.log` so a later `flows attach` replays
+    // this session instead of showing a blank pane. Seed it with the task + window
+    // (the live app already shows those in-memory). Ensure the run dir exists first
+    // so the seed writes land before the pipeline creates it.
+    let _ = store.ensure_run_dir(&run_id);
+    let output_log = crate::app::OutputLog::new(store.run_dir(&run_id).join("output.log"));
+    output_log.emit("m", &format!("▸ task: {idea}"));
+    if let Some(w) = app.context_window {
+        output_log.emit("cw", &w.to_string());
+    }
     let loops: Vec<crate::phases::LoopEdge> = phases
         .iter()
         .filter_map(|p| {
@@ -69,7 +80,10 @@ pub fn run_tui(
     let task_store = store.clone();
     let task_run_id = run_id.clone();
     rt.spawn(async move {
-        let cb = ChannelCallbacks { tx };
+        let cb = ChannelCallbacks {
+            tx,
+            log: Some(output_log),
+        };
         let _ = run_pipeline(
             &task_run_id,
             &idea,

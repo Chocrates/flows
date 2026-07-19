@@ -84,7 +84,7 @@ impl Default for OutputPane {
 /// Wrap a logical line to `w` columns: greedy word-wrap, hard-breaking any word
 /// longer than `w`. Returns ≥1 line (empty text → one empty line) so line counts
 /// stay stable. Char-based (terminal columns), not byte-based.
-fn wrap_line(text: &str, w: usize) -> Vec<String> {
+pub(crate) fn wrap_line(text: &str, w: usize) -> Vec<String> {
     if w == 0 || text.chars().count() <= w {
         return vec![text.to_string()];
     }

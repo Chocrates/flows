@@ -179,6 +179,11 @@ pub trait AgentCallbacks: Send + Sync {
     fn on_thinking(&self, _text: &str) {}
     /// The assembled system prompt for this phase (emitted once, at phase start).
     fn on_system(&self, _prompt: &str) {}
+    /// The first user turn for this phase (the question), emitted once at start.
+    fn on_user(&self, _message: &str) {}
+    /// A structural marker line for the output pane (always visible), e.g. the
+    /// per-round LLM request/response boundaries.
+    fn on_note(&self, _text: &str) {}
     fn on_tool_call(&self, _name: &str, _summary: &str) {}
     fn on_tool_result(&self, _name: &str, _summary: &str, _is_error: bool) {}
     /// Return true to abort the tool loop mid-phase (user cancelled the run).
@@ -825,13 +830,28 @@ your context small.",
     // Surface the assembled system prompt once (the UI shows it under a toggle).
     callbacks.on_system(&system_prompt);
 
-    let mut messages: Vec<Message> = vec![Message::user(format!("Idea: {idea}"))];
+    // Surface the first user turn (the question) so the pane reads as a real
+    // conversation, not just the assistant's replies.
+    let first_user = format!("Idea: {idea}");
+    callbacks.on_user(&first_user);
+    let mut messages: Vec<Message> = vec![Message::user(first_user)];
+
+    // Show an up-front context-size estimate so the token count isn't blank while
+    // the first (often largest) request is in flight. Replaced by the provider's
+    // exact `usage.input_tokens` once the response lands.
+    callbacks.on_context(
+        crate::budget::estimate_request_tokens(&system_prompt, &messages) as u64,
+    );
     let max_tool_rounds = phase.max_tool_rounds.unwrap_or(MAX_TOOL_ROUNDS);
     let total_rounds = phase.max_clarification_rounds + max_tool_rounds;
 
     let mut phase_cost = 0.0;
     let mut last_sig: Option<Vec<(String, String)>> = None;
     let mut repeated_errors = 0u32;
+    // Clarification budget is spent per *question actually asked*, not per round —
+    // so read-only research (tens of tool calls) doesn't starve the phase of its
+    // chances to ask the human.
+    let mut clarifications_asked = 0u32;
     // No-progress guard (write-capable phases only): once the agent has written
     // code, count rounds with no successful `write_file`; abort if it thrashes.
     let can_write = phase.tools.files && !phase.tools.read_only;
@@ -890,6 +910,14 @@ your context small.",
             max_tokens: phase.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             thinking_budget,
         };
+        // Mark the outbound call so the LLM I/O is visible in the pane (the
+        // response marker below closes it, with exact token usage).
+        callbacks.on_note(&format!(
+            "→ request · round {} · {} msg · ~{} tok in",
+            round_num + 1,
+            messages.len(),
+            crate::budget::estimate_request_tokens(&system_prompt, &messages),
+        ));
         // Stream content tokens live, but suppress questions-envelope JSON via a
         // buffering filter. Reasoning is emitted once after the round (below), so
         // the thinking sink here is a no-op.
@@ -915,6 +943,10 @@ your context small.",
         };
         filter.lock().unwrap().finish(&emit);
         let latency_ms = t0.elapsed().as_millis() as i64;
+        callbacks.on_note(&format!(
+            "← response · in {} / out {} tok · {} ms",
+            completion.usage.input_tokens, completion.usage.output_tokens, latency_ms,
+        ));
         if let Some(log) = logger {
             log.response(
                 &phase.name,
@@ -1077,10 +1109,11 @@ after starting — likely stuck in a build/search loop"
                             .collect()
                     })
                     .unwrap_or_default();
-                if round_num >= phase.max_clarification_rounds {
+                if clarifications_asked >= phase.max_clarification_rounds {
                     messages.push(Message::user("(proceeding without further clarification)"));
                 } else {
                     let answer = callbacks.on_questions(&questions).await;
+                    clarifications_asked += 1;
                     messages.push(Message::user(answer));
                 }
                 continue;

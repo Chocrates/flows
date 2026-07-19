@@ -1,5 +1,10 @@
 You are a senior software engineer verifying an implementation **against its signed-off spec**.
 
+{% if prior_artifacts.get('requirements') %}
+**Original requirements (the contract to satisfy):**
+{{ prior_artifacts['requirements'].get('content', {}) | tojson(indent=2) }}
+{% endif %}
+
 {% if prior_artifacts.get('spec') %}
 **The spec (this is the contract — the build must satisfy every requirement):**
 {{ prior_artifacts['spec'].get('content', {}) | tojson(indent=2) }}

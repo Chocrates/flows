@@ -99,6 +99,16 @@ fn push_output_line(app: &mut App, line: &str) {
                 "o" => app.output.push_line(Category::Tool, x.to_string()),
                 "s" => app.output.push_line(Category::System, x.to_string()),
                 "m" => app.output.push_line(Category::Meta, x.to_string()),
+                "u" => {
+                    app.output.push_line(Category::Meta, "── user ──".to_string());
+                    for line in x.lines() {
+                        app.output.push_line(Category::Meta, line.to_string());
+                    }
+                }
+                // Status-bar metrics — update the field, no scrollback line.
+                "ctx" => app.context_tokens = x.parse().unwrap_or(0),
+                "cost" => app.total_cost = x.parse().unwrap_or(0.0),
+                "cw" => app.context_window = x.parse().ok(),
                 _ => app.output.push_token(Category::Normal, x),
             }
         }
@@ -338,6 +348,34 @@ mod tests {
             .visible_lines()
             .iter()
             .any(|l| l == "plain old line"));
+    }
+
+    #[test]
+    fn attach_replays_existing_output_log_from_start() {
+        // Regression: attaching to an already-running (or finished) run must
+        // backfill the prior output, not show a blank pane waiting for new output.
+        use crate::app::OutputLog;
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("output.log");
+        let log = OutputLog::new(log_path.clone());
+        log.emit("m", "▸ task: build solitaire");
+        log.emit("n", "hello ");
+        log.emit("n", "world\n");
+        log.emit("o", "✓ write_file ok");
+
+        // Replay exactly as attach_loop does: tail from offset 0, split lines, push.
+        let mut app = App::new(&["plan".into()]);
+        let mut off = 0u64;
+        let mut line_buf = super::tail_from(&log_path, &mut off);
+        while let Some(nl) = line_buf.find('\n') {
+            let line = line_buf[..nl].to_string();
+            line_buf.drain(..=nl);
+            push_output_line(&mut app, &line);
+        }
+        let vis = app.output.visible_lines().join("\n");
+        assert!(vis.contains("build solitaire"), "task missing:\n{vis}");
+        assert!(vis.contains("hello world"), "tokens missing:\n{vis}");
+        assert!(vis.contains("write_file ok"), "tool line missing:\n{vis}");
     }
 
     #[test]

@@ -33,6 +33,12 @@ pub enum UiEvent {
     System {
         text: String,
     },
+    User {
+        text: String,
+    },
+    Note {
+        text: String,
+    },
     ToolCall {
         summary: String,
     },
@@ -74,14 +80,48 @@ pub enum UiEvent {
     },
 }
 
-/// `RunnerCallbacks` that forwards everything to the UI over a channel.
+/// Appends categorized output to a run's `output.log` (JSONL `{"c":cat,"x":text}`)
+/// so a later `flows attach` can replay it. Same format the background worker
+/// writes, so both live-TUI and detached runs are replayable. `c`: n=normal,
+/// t=thinking, j=json, o=tool, s=system, u=user, m=meta; ctx/cost/cw are metrics.
+pub struct OutputLog {
+    path: std::path::PathBuf,
+}
+
+impl OutputLog {
+    pub fn new(path: std::path::PathBuf) -> Self {
+        Self { path }
+    }
+    pub fn emit(&self, cat: &str, text: &str) {
+        use std::io::Write;
+        let line = serde_json::json!({ "c": cat, "x": text }).to_string();
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
+/// `RunnerCallbacks` that forwards everything to the UI over a channel, and
+/// optionally tees it to `output.log` so the run is replayable on re-attach.
 pub struct ChannelCallbacks {
     pub tx: mpsc::UnboundedSender<UiEvent>,
+    pub log: Option<OutputLog>,
 }
 
 impl ChannelCallbacks {
     fn send(&self, ev: UiEvent) {
         let _ = self.tx.send(ev);
+    }
+
+    /// Tee a categorized line to `output.log` if persistence is enabled.
+    fn log(&self, cat: &str, text: &str) {
+        if let Some(l) = &self.log {
+            l.emit(cat, text);
+        }
     }
 
     async fn request_input(&self, prompt: String) -> String {
@@ -106,31 +146,49 @@ impl RunnerCallbacks for ChannelCallbacks {
         });
     }
     fn on_token(&self, _phase: &str, token: &str) {
+        self.log("n", token);
         self.send(UiEvent::Token { text: token.into() });
     }
     fn on_json(&self, _phase: &str, token: &str) {
+        self.log("j", token);
         self.send(UiEvent::Json { text: token.into() });
     }
     fn on_thinking(&self, _phase: &str, text: &str) {
+        self.log("t", text);
         self.send(UiEvent::Thinking { text: text.into() });
     }
     fn on_system(&self, _phase: &str, prompt: &str) {
+        self.log("s", prompt);
         self.send(UiEvent::System {
             text: prompt.into(),
         });
     }
-    fn on_tool_call(&self, _phase: &str, _name: &str, summary: &str) {
+    fn on_user(&self, _phase: &str, message: &str) {
+        self.log("u", message);
+        self.send(UiEvent::User {
+            text: message.into(),
+        });
+    }
+    fn on_note(&self, _phase: &str, text: &str) {
+        self.log("m", text);
+        self.send(UiEvent::Note { text: text.into() });
+    }
+    fn on_tool_call(&self, _phase: &str, name: &str, summary: &str) {
+        self.log("o", &format!("⚙ {name} {summary}"));
         self.send(UiEvent::ToolCall {
             summary: summary.into(),
         });
     }
-    fn on_tool_result(&self, _phase: &str, _name: &str, summary: &str, is_error: bool) {
+    fn on_tool_result(&self, _phase: &str, name: &str, summary: &str, is_error: bool) {
+        let glyph = if is_error { '✗' } else { '✓' };
+        self.log("o", &format!("{glyph} {name} {summary}"));
         self.send(UiEvent::ToolResult {
             summary: summary.into(),
             is_error,
         });
     }
     fn on_phase_start(&self, phase: &str, index: usize, total: usize) {
+        self.log("m", &format!("━━ phase {}/{}: {phase} ━━", index + 1, total));
         self.send(UiEvent::PhaseStart {
             name: phase.into(),
             index,
@@ -146,13 +204,16 @@ impl RunnerCallbacks for ChannelCallbacks {
             iteration,
         });
     }
-    fn on_script_result(&self, _phase: &str, exit_code: i32, _stdout: &str, _stderr: &str) {
+    fn on_script_result(&self, _phase: &str, exit_code: i32, stdout: &str, _stderr: &str) {
+        self.log("m", &format!("script → exit {exit_code}\n{stdout}"));
         self.send(UiEvent::ScriptResult { exit_code });
     }
     fn on_context(&self, input_tokens: u64) {
+        self.log("ctx", &input_tokens.to_string());
         self.send(UiEvent::Context { input_tokens });
     }
     fn on_cost(&self, total_usd: f64) {
+        self.log("cost", &total_usd.to_string());
         self.send(UiEvent::Cost { total_usd });
     }
     fn on_run_complete(&self, _run_id: &str, phases: &[String]) {
@@ -256,6 +317,14 @@ impl App {
                 self.output
                     .push_line(Category::System, "── end system prompt ──");
             }
+            UiEvent::User { text } => {
+                // The question — always visible (Meta), framed as a user turn.
+                self.output.push_line(Category::Meta, "── user ──");
+                for line in text.lines() {
+                    self.output.push_line(Category::Meta, line);
+                }
+            }
+            UiEvent::Note { text } => self.output.push_line(Category::Meta, text),
             UiEvent::ToolCall { summary } => self
                 .output
                 .push_line(Category::Tool, format!("⚙ {summary}")),
@@ -450,16 +519,28 @@ impl App {
         use ratatui::widgets::Paragraph;
 
         let size = f.area();
-        // main │ status │ help  (+ input line when awaiting an answer)
-        let mut constraints = vec![
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ];
-        if self.input.is_some() {
-            constraints.push(Constraint::Length(1));
+        // main │ [question panel] │ status │ help. The question panel only
+        // appears while awaiting an answer; it wraps a long question + the typed
+        // answer instead of letting them run off a single line.
+        let awaiting = self.input.is_some();
+        let max_panel = (size.height / 2).max(3);
+        let panel_h = if awaiting {
+            self.question_height(size.width, max_panel)
+        } else {
+            0
+        };
+        let mut constraints = vec![Constraint::Min(1)];
+        if awaiting {
+            constraints.push(Constraint::Length(panel_h));
         }
+        constraints.push(Constraint::Length(1)); // status
+        constraints.push(Constraint::Length(1)); // help
         let rows = Layout::vertical(constraints).split(size);
+        let (panel_idx, status_idx, help_idx) = if awaiting {
+            (Some(1usize), 2usize, 3usize)
+        } else {
+            (None, 1usize, 2usize)
+        };
         let cols = Layout::horizontal([Constraint::Length(28), Constraint::Min(10)]).split(rows[0]);
 
         // Each pane gets a titled border so the two are visually distinct.
@@ -490,11 +571,79 @@ impl App {
                 flows_core::pricing::format_cost(self.total_cost)
             ));
         }
-        f.render_widget(Paragraph::new(status_line), rows[1]);
-        f.render_widget(Paragraph::new(self.help_line()), rows[2]);
-        if let Some((prompt, buffer)) = self.input_prompt() {
-            f.render_widget(Paragraph::new(format!("{prompt}  > {buffer}")), rows[3]);
+        f.render_widget(Paragraph::new(status_line), rows[status_idx]);
+        f.render_widget(Paragraph::new(self.help_line()), rows[help_idx]);
+        if let Some(i) = panel_idx {
+            let title = if self.status.contains("approval") {
+                " approve (Enter=ok · type feedback) "
+            } else {
+                " answer "
+            };
+            let block = Block::bordered()
+                .title(title)
+                .border_style(Style::default().fg(Color::Cyan));
+            let inner = block.inner(rows[i]);
+            block.render(rows[i], f.buffer_mut());
+            let lines = self.question_lines(inner.width as usize, inner.height as usize);
+            f.render_widget(Paragraph::new(lines), inner);
         }
+    }
+
+    /// Total height (incl. borders) for the question panel: question + a blank
+    /// separator + answer, each wrapped to the inner width, capped at `max_h`.
+    fn question_height(&self, width: u16, max_h: u16) -> u16 {
+        let Some(inp) = self.input.as_ref() else {
+            return 0;
+        };
+        let inner_w = width.saturating_sub(2).max(1) as usize;
+        let mut q = 0usize;
+        for l in inp.prompt.lines() {
+            q += crate::output::wrap_line(l, inner_w).len();
+        }
+        let a = crate::output::wrap_line(&format!("> {}\u{2588}", inp.buffer), inner_w).len();
+        let inner = ((q + 1 + a) as u16).min(max_h).max(3);
+        inner + 2 // top/bottom borders
+    }
+
+    /// Styled panel body: the (possibly truncated) question, a blank line, then
+    /// the wrapped answer tail with a block cursor — so neither runs off-screen.
+    fn question_lines(&self, inner_w: usize, inner_h: usize) -> Vec<ratatui::text::Line<'static>> {
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::Line;
+        let Some(inp) = self.input.as_ref() else {
+            return vec![];
+        };
+        let mut qw: Vec<String> = Vec::new();
+        for l in inp.prompt.lines() {
+            qw.extend(crate::output::wrap_line(l, inner_w));
+        }
+        let aw = crate::output::wrap_line(&format!("> {}\u{2588}", inp.buffer), inner_w);
+        let sep = 1usize;
+        // Always keep the answer tail visible; the question takes what's left.
+        let a_show = aw.len().min(inner_h.saturating_sub(sep + 1)).max(1);
+        let a_lines = &aw[aw.len() - a_show..];
+        let q_budget = inner_h.saturating_sub(sep + a_show);
+
+        let q_style = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let a_style = Style::default().fg(Color::Yellow);
+        let mut lines: Vec<Line> = Vec::new();
+        if qw.len() > q_budget && q_budget > 0 {
+            for l in &qw[..q_budget - 1] {
+                lines.push(Line::styled(l.clone(), q_style));
+            }
+            lines.push(Line::styled("…", q_style));
+        } else {
+            for l in &qw {
+                lines.push(Line::styled(l.clone(), q_style));
+            }
+        }
+        lines.push(Line::from("")); // separator
+        for l in a_lines {
+            lines.push(Line::styled(l.clone(), a_style));
+        }
+        lines
     }
 
     /// The bottom help bar: toggle keys with their live on/off state, plus the

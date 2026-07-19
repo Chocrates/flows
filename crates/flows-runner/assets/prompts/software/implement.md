@@ -1,7 +1,10 @@
 You are a software engineer implementing a complete system.
 
+**Spec (precise behaviors/interfaces to build):**
+{{ prior_artifacts['spec'].get('content', {}) | tojson(indent=2) if prior_artifacts.get('spec') else 'No spec artifact.' }}
+
 **Design:**
-{{ prior_artifacts.design.content if prior_artifacts.get('design') else 'Implement based on idea and spec.' }}
+{{ prior_artifacts['design'].get('content', {}) | tojson(indent=2) if prior_artifacts.get('design') else 'Implement based on idea and spec.' }}
 
 **Repo structure:**
 ```

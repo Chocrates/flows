@@ -307,6 +307,52 @@ fn system_prompt_event_shows_when_toggled() {
 }
 
 #[test]
+fn user_prompt_event_always_visible() {
+    let mut a = app();
+    a.handle_ui_event(UiEvent::User {
+        text: "Idea: add a widget".into(),
+    });
+    // Visible without any toggle (it's the question).
+    let vis = a.output.visible_lines().join("\n");
+    assert!(vis.contains("Idea: add a widget"), "user turn hidden:\n{vis}");
+    assert!(vis.contains("── user ──"));
+    // Toggling system off must not hide the user turn.
+    a.handle_key(key(KeyCode::Char('s')));
+    let vis = a.output.visible_lines().join("\n");
+    assert!(vis.contains("Idea: add a widget"));
+}
+
+#[test]
+fn question_panel_wraps_long_question_and_answer() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app();
+    let (reply, _rx) = tokio::sync::oneshot::channel();
+    let long_q = "? Which persistence backend should the game state use, and should \
+                  autosave happen after every move or only on quit"
+        .to_string();
+    a.handle_ui_event(UiEvent::NeedInput {
+        prompt: long_q,
+        reply,
+    });
+    for c in "a very long answer that definitely exceeds the width of the terminal panel".chars() {
+        a.handle_key(key(KeyCode::Char(c)));
+    }
+
+    let w = 40u16;
+    let mut term = Terminal::new(TestBackend::new(w, 24)).unwrap();
+    term.draw(|f| a.render(f)).unwrap();
+    let buf = term.backend().buffer().clone();
+    // No row exceeds the width (nothing ran off): TestBackend guarantees width,
+    // but assert the question + answer text is actually present (wrapped in).
+    let full: String = buf.content.iter().map(|c| c.symbol()).collect();
+    assert!(full.contains("persistence backend"), "question missing");
+    assert!(full.contains("very long answer"), "answer missing");
+    // Panel is bordered/titled.
+    assert!(full.contains("answer"), "panel title missing");
+}
+
+#[test]
 fn status_shows_paused_while_awaiting_input_then_resumes() {
     let mut a = app();
     a.handle_ui_event(UiEvent::PhaseStart { name: "approve_plan".into(), index: 1, total: 3 });

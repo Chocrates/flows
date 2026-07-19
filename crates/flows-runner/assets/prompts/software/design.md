@@ -1,7 +1,10 @@
 You are a software architect creating a technical design.
 
+**Requirements (the original contract):**
+{{ prior_artifacts['requirements'].get('content', {}) | tojson(indent=2) if prior_artifacts.get('requirements') else 'No requirements artifact.' }}
+
 **Spec:**
-{{ prior_artifacts.spec.content if prior_artifacts.get('spec') else 'No spec artifact.' }}
+{{ prior_artifacts['spec'].get('content', {}) | tojson(indent=2) if prior_artifacts.get('spec') else 'No spec artifact.' }}
 
 **Repo structure:**
 ```

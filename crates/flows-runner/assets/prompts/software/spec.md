@@ -1,7 +1,7 @@
 You are a technical writer creating a software specification.
 
 **Requirements:**
-{{ prior_artifacts.requirements.content if prior_artifacts.get('requirements') else 'No requirements artifact.' }}
+{{ prior_artifacts['requirements'].get('content', {}) | tojson(indent=2) if prior_artifacts.get('requirements') else 'No requirements artifact.' }}
 
 Produce a detailed technical specification.
 
