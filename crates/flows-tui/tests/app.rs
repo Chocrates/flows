@@ -282,3 +282,26 @@ fn json_tokens_hidden_by_j_toggle() {
     assert!(!vis.contains("artifact"));
     assert!(vis.contains("prose")); // normal survives
 }
+
+#[test]
+fn system_prompt_event_shows_when_toggled() {
+    let mut a = app();
+    a.handle_ui_event(UiEvent::System {
+        text: "SYSTEM LINE ONE\nSYSTEM LINE TWO".into(),
+    });
+    // Hidden by default.
+    let vis = a.output.visible_lines().join("\n");
+    assert!(
+        !vis.contains("SYSTEM LINE ONE"),
+        "should be hidden by default"
+    );
+    // Toggle on → present.
+    a.handle_key(key(KeyCode::Char('s')));
+    let vis = a.output.visible_lines().join("\n");
+    assert!(
+        vis.contains("SYSTEM LINE ONE"),
+        "toggled on but empty:\n{vis}"
+    );
+    assert!(vis.contains("SYSTEM LINE TWO"));
+    assert!(vis.contains("system prompt"));
+}

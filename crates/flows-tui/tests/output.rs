@@ -222,7 +222,7 @@ fn partial_scroll_down_stays_unpinned() {
     assert_eq!(p.scroll_y(), 3);
 }
 
-// -- long-line wrapping (the "long responses" bug) ---------------------------
+// -- long-line wrapping + system category ------------------------------------
 
 #[test]
 fn long_line_wraps_to_width_not_truncated() {

@@ -522,7 +522,13 @@ impl App {
         let dim = Style::default().fg(Color::DarkGray);
         // While composing an answer, toggles move to Alt (plain letters type text).
         let awaiting = self.awaiting_input();
-        let tk = |k: &str| if awaiting { format!("⌥{k}") } else { k.to_string() };
+        let tk = |k: &str| {
+            if awaiting {
+                format!("⌥{k}")
+            } else {
+                k.to_string()
+            }
+        };
 
         Line::from(vec![
             key(&tk("t")),
