@@ -54,6 +54,8 @@ pub trait RunnerCallbacks: Send + Sync {
     /// A token belonging to a structured JSON artifact envelope.
     fn on_json(&self, _phase: &str, _token: &str) {}
     fn on_thinking(&self, _phase: &str, _text: &str) {}
+    /// The assembled system prompt for a phase (emitted once, at phase start).
+    fn on_system(&self, _phase: &str, _prompt: &str) {}
     /// Running total USD cost after a phase completes.
     fn on_cost(&self, _total_usd: f64) {}
     /// Input tokens of the latest request (current context-window usage).
@@ -94,6 +96,9 @@ impl AgentCallbacks for PhaseCb<'_> {
     }
     fn on_thinking(&self, t: &str) {
         self.cb.on_thinking(&self.phase, t);
+    }
+    fn on_system(&self, p: &str) {
+        self.cb.on_system(&self.phase, p);
     }
     fn on_tool_call(&self, n: &str, s: &str) {
         self.cb.on_tool_call(&self.phase, n, s);

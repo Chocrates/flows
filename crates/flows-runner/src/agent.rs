@@ -177,6 +177,8 @@ pub trait AgentCallbacks: Send + Sync {
     /// Input tokens of the latest request (current context-window usage).
     fn on_context(&self, _input_tokens: u64) {}
     fn on_thinking(&self, _text: &str) {}
+    /// The assembled system prompt for this phase (emitted once, at phase start).
+    fn on_system(&self, _prompt: &str) {}
     fn on_tool_call(&self, _name: &str, _summary: &str) {}
     fn on_tool_result(&self, _name: &str, _summary: &str, _is_error: bool) {}
     /// Return true to abort the tool loop mid-phase (user cancelled the run).
@@ -786,6 +788,9 @@ your context small.",
     let (thinking_enabled, thinking_budget) = resolve_thinking(phase, llm);
     let thinking_budget =
         (thinking_enabled && model_supports_thinking(&model)).then_some(thinking_budget);
+
+    // Surface the assembled system prompt once (the UI shows it under a toggle).
+    callbacks.on_system(&system_prompt);
 
     let mut messages: Vec<Message> = vec![Message::user(format!("Idea: {idea}"))];
     let max_tool_rounds = phase.max_tool_rounds.unwrap_or(MAX_TOOL_ROUNDS);

@@ -30,6 +30,9 @@ pub enum UiEvent {
     Thinking {
         text: String,
     },
+    System {
+        text: String,
+    },
     ToolCall {
         summary: String,
     },
@@ -110,6 +113,11 @@ impl RunnerCallbacks for ChannelCallbacks {
     }
     fn on_thinking(&self, _phase: &str, text: &str) {
         self.send(UiEvent::Thinking { text: text.into() });
+    }
+    fn on_system(&self, _phase: &str, prompt: &str) {
+        self.send(UiEvent::System {
+            text: prompt.into(),
+        });
     }
     fn on_tool_call(&self, _phase: &str, _name: &str, summary: &str) {
         self.send(UiEvent::ToolCall {
@@ -222,7 +230,8 @@ impl App {
 
     pub fn set_output_area(&mut self, area: Rect) {
         self.output_area = area;
-        self.output.set_viewport_height(area.height as usize);
+        self.output
+            .set_viewport(area.height as usize, area.width as usize);
     }
 
     // -- pipeline events -------------------------------------------------
@@ -237,6 +246,16 @@ impl App {
             UiEvent::Token { text } => self.output.push_token(Category::Normal, &text),
             UiEvent::Json { text } => self.output.push_token(Category::Json, &text),
             UiEvent::Thinking { text } => self.output.push_token(Category::Thinking, &text),
+            UiEvent::System { text } => {
+                // Multi-line — push each line (hidden by default; toggle `s`).
+                self.output
+                    .push_line(Category::System, "── system prompt ──");
+                for line in text.lines() {
+                    self.output.push_line(Category::System, line);
+                }
+                self.output
+                    .push_line(Category::System, "── end system prompt ──");
+            }
             UiEvent::ToolCall { summary } => self
                 .output
                 .push_line(Category::Tool, format!("⚙ {summary}")),
@@ -294,6 +313,7 @@ impl App {
             KeyCode::Char('y') => self.copy_all(),
             KeyCode::Char('t') => self.output.toggle_thinking(),
             KeyCode::Char('j') => self.output.toggle_json(),
+            KeyCode::Char('s') => self.output.toggle_system(),
             KeyCode::Up => self.output.scroll_up(1),
             KeyCode::Down => self.output.scroll_down(1),
             KeyCode::PageUp => self
@@ -309,6 +329,28 @@ impl App {
     }
 
     fn handle_input_key(&mut self, key: KeyEvent) {
+        // View controls stay live while composing an answer — scrolling and the
+        // output toggles must keep working when a question/gate is pending. Scroll
+        // keys don't insert text; toggles use Alt so plain t/j/s still type.
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Up => return self.output.scroll_up(1),
+            KeyCode::Down => return self.output.scroll_down(1),
+            KeyCode::PageUp => {
+                return self
+                    .output
+                    .scroll_up(self.output_area.height.max(1) as usize)
+            }
+            KeyCode::PageDown => {
+                return self
+                    .output
+                    .scroll_down(self.output_area.height.max(1) as usize)
+            }
+            KeyCode::Char('t') if alt => return self.output.toggle_thinking(),
+            KeyCode::Char('j') if alt => return self.output.toggle_json(),
+            KeyCode::Char('s') if alt => return self.output.toggle_system(),
+            _ => {}
+        }
         let Some(input) = self.input.as_mut() else {
             return;
         };
@@ -478,15 +520,28 @@ impl App {
             }
         };
         let dim = Style::default().fg(Color::DarkGray);
+        // While composing an answer, toggles move to Alt (plain letters type text).
+        let awaiting = self.awaiting_input();
+        let tk = |k: &str| {
+            if awaiting {
+                format!("⌥{k}")
+            } else {
+                k.to_string()
+            }
+        };
 
         Line::from(vec![
-            key("t"),
+            key(&tk("t")),
             Span::raw(" thinking "),
             state(self.output.show_thinking),
             Span::styled("   ", dim),
-            key("j"),
+            key(&tk("j")),
             Span::raw(" JSON "),
             state(self.output.show_json),
+            Span::styled("   ", dim),
+            key(&tk("s")),
+            Span::raw(" system "),
+            state(self.output.show_system),
             Span::styled("   ", dim),
             key("y"),
             Span::styled(" copy   ", dim),
