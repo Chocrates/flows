@@ -31,7 +31,7 @@ supervise. `flows` makes agent work **structured, safe, and observable**:
 
 ## Quickstart
 
-### 1. Install
+### 1. Install & set up
 
 Needs **Rust** and, on Linux, **bubblewrap** for the sandbox. macOS uses the
 built-in sandbox.
@@ -44,11 +44,18 @@ sudo apt install bubblewrap                # Linux only
 # build + install the `flows` binary to ~/.cargo/bin (must be on PATH)
 git clone <REPO_URL> flows && cd flows
 cargo install --path crates/flows-cli --locked
+
+# scaffold your local config + editable templates/prompts in ~/.flows/
+flows init --global
 ```
 
-Templates and prompts are baked into the binary — nothing else to copy.
+`flows init --global` writes a commented `~/.flows/config.yml` and copies the
+templates + agent prompts into `~/.flows/` so you can tweak them. (The binary also
+has them baked in, so flows works before you customize anything.)
 
 ### 2. Point it at a model
+
+Edit `~/.flows/config.yml`, or use `flows config set`:
 
 **Local (llama.cpp / vLLM / any OpenAI-compatible server) — no key, no cost:**
 
