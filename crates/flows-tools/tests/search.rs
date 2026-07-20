@@ -1,7 +1,7 @@
 //! web_search parser tests (pure — fixture HTML, no network).
 
 use flows_core::models::WebSearchConfig;
-use flows_tools::search::parse_ddg_html;
+use flows_tools::search::{parse_ddg_html, parse_searxng};
 
 const FIXTURE: &str = r##"
 <div class="result">
@@ -43,7 +43,7 @@ fn empty_html_yields_nothing() {
 }
 
 #[tokio::test]
-async fn non_duckduckgo_backend_errors() {
+async fn unknown_backend_errors() {
     let cfg = WebSearchConfig {
         backend: "brave".into(),
         ..Default::default()
@@ -52,4 +52,33 @@ async fn non_duckduckgo_backend_errors() {
         .await
         .unwrap_err();
     assert!(err.0.contains("not supported"));
+}
+
+#[tokio::test]
+async fn searxng_without_base_url_errors() {
+    let cfg = WebSearchConfig {
+        backend: "searxng".into(),
+        ..Default::default()
+    };
+    let err = flows_tools::search::web_search("rust", &cfg)
+        .await
+        .unwrap_err();
+    assert!(err.0.contains("base_url"), "{}", err.0);
+}
+
+#[test]
+fn parse_searxng_maps_results() {
+    let body = serde_json::json!({
+        "results": [
+            {"title": "Bevy", "url": "https://bevyengine.org", "content": "A game engine"},
+            {"title": "Docs", "url": "https://docs.rs/bevy", "content": "API"}
+        ]
+    });
+    let out = parse_searxng(&body, 5);
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0]["title"], "Bevy");
+    assert_eq!(out[0]["url"], "https://bevyengine.org");
+    assert_eq!(out[0]["snippet"], "A game engine"); // content → snippet
+    // respects max
+    assert_eq!(parse_searxng(&body, 1).len(), 1);
 }

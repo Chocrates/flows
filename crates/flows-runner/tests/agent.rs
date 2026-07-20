@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::Map;
 
-use flows_core::models::ContextConfig;
+use flows_core::models::{ContextConfig, WebSearchConfig};
 use flows_core::models::{BashConfig, LLMConfig, PhaseConfig, ToolsConfig};
 use flows_llm::types::{Completion, CompletionRequest, LlmError, ToolCall, Usage};
 use flows_llm::Provider;
@@ -99,6 +99,7 @@ async fn returns_artifact_from_json_response() {
         &NoopCallbacks,
         None,
         &ContextConfig::default(),
+        &WebSearchConfig::default(),
         0.0,
         0.0,
         None,
@@ -127,6 +128,7 @@ async fn dispatches_write_file_then_returns_artifact() {
         &NoopCallbacks,
         None,
         &ContextConfig::default(),
+        &WebSearchConfig::default(),
         0.0,
         0.0,
         None,
@@ -159,6 +161,7 @@ async fn reads_file_via_tool() {
         &NoopCallbacks,
         None,
         &ContextConfig::default(),
+        &WebSearchConfig::default(),
         0.0,
         0.0,
         None,
@@ -197,6 +200,7 @@ async fn asks_questions_then_proceeds() {
         &AnswerCb("blue"),
         None,
         &ContextConfig::default(),
+        &WebSearchConfig::default(),
         0.0,
         0.0,
         None,
@@ -229,6 +233,7 @@ async fn max_rounds_exceeded_returns_error() {
         &NoopCallbacks,
         None,
         &ContextConfig::default(),
+        &WebSearchConfig::default(),
         0.0,
         0.0,
         None,
@@ -260,6 +265,7 @@ async fn degenerate_tool_loop_aborts() {
         &NoopCallbacks,
         None,
         &ContextConfig::default(),
+        &WebSearchConfig::default(),
         0.0,
         0.0,
         None,
@@ -283,6 +289,7 @@ async fn cost_cap_aborts() {
         &NoopCallbacks,
         None,
         &ContextConfig::default(),
+        &WebSearchConfig::default(),
         1.0, // max_cost
         5.0, // prior_cost already over
         None,
@@ -348,6 +355,7 @@ async fn cancelled_aborts_before_calling_model() {
         &CancelledCb,
         None,
         &ContextConfig::default(),
+        &WebSearchConfig::default(),
         0.0,
         0.0,
         None,
@@ -402,6 +410,7 @@ async fn agents_md_is_appended_to_system_prompt() {
         &NoopCallbacks,
         Some(flows.path()),
         &ContextConfig::default(),
+        &WebSearchConfig::default(),
         0.0,
         0.0,
         None,

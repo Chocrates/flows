@@ -44,7 +44,7 @@ phases:
 
   - name: implement
     type: agent
-    tools: files_and_test
+    tools: research_and_code
     on_failure: stop
     max_tool_rounds: 200
     max_clarification_rounds: 0

@@ -25,7 +25,11 @@ mod bwrap;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 
-pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
+// Cold compiles are the long pole: a first Bevy build pulls a large dependency
+// tree and can run well past 120s. Default generously (15 min) so builds don't
+// spuriously time out; a hung command still eventually aborts. Overridable per
+// phase via `tools.bash.timeout_secs`.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 900;
 pub const DEFAULT_MAX_OUTPUT: usize = 20_000;
 
 /// A platform sandbox backend: builds the confined argv and reports whether it

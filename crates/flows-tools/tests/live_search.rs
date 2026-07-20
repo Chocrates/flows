@@ -6,6 +6,7 @@ async fn live_ddg_search() {
         backend: "duckduckgo".into(),
         max_results: 3,
         api_key: String::new(),
+        base_url: String::new(),
     };
     let res = flows_tools::search::web_search("rust programming language", &cfg)
         .await

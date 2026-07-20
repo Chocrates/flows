@@ -130,7 +130,21 @@ fn preset_research_enables_web() {
     let t = resolve_preset("research").unwrap();
     assert!(t.http_get);
     assert!(t.web_search);
+    assert!(t.lookup); // web_search phases also get the structured lookup tool
     assert!(t.bash.is_none());
+}
+
+#[test]
+fn every_web_search_preset_also_grants_lookup() {
+    // Invariant: any phase that can web_search must also have the structured
+    // `lookup` tool (crates.io/docs.rs/etc.) — the reliable doc source. web_search
+    // is only ever granted via a preset, so enforcing it here covers every phase.
+    for name in flows_core::models::TOOL_PRESET_NAMES {
+        let t = resolve_preset(name).unwrap();
+        if t.web_search {
+            assert!(t.lookup, "preset {name:?} has web_search but not lookup");
+        }
+    }
 }
 
 #[test]

@@ -257,6 +257,7 @@ async fn execute_phase(
                 &pcb,
                 ctx.flows_dir,
                 &ctx.context,
+                &ctx.global_cfg.tools.web_search,
                 ctx.global_cfg.max_cost_usd,
                 prior_cost,
                 Some(&ctx.logger),

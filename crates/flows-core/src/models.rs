@@ -26,6 +26,11 @@ pub struct BashConfig {
     pub allowed: Vec<String>,
     #[serde(default)]
     pub unrestricted: bool,
+    /// Per-command wall-clock timeout in seconds. `None` → the sandbox default.
+    /// Cold builds (e.g. a first Bevy compile) can take many minutes, so this is
+    /// overridable per phase/template via `tools.bash.timeout_secs`.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,6 +48,10 @@ pub struct ToolsConfig {
     pub http_get: bool,
     #[serde(default)]
     pub web_search: bool,
+    /// Structured lookups against source-specific JSON APIs (crates.io, docs.rs,
+    /// Stack Exchange, Wikipedia, GitHub) — reliable, unlike scraped web search.
+    #[serde(default)]
+    pub lookup: bool,
     #[serde(default)]
     pub plugins: Vec<String>,
 }
@@ -55,6 +64,7 @@ impl Default for ToolsConfig {
             bash: None,
             http_get: false,
             web_search: false,
+            lookup: false,
             plugins: Vec::new(),
         }
     }
@@ -74,8 +84,41 @@ fn bash_allow(patterns: &[&str]) -> Option<BashConfig> {
     Some(BashConfig {
         allowed: patterns.iter().map(|s| s.to_string()).collect(),
         unrestricted: false,
+        timeout_secs: None,
     })
 }
+
+/// Build / dependency / test commands for the common languages, shared by the
+/// build-capable presets. Covers a from-scratch build (e.g. `cargo add` +
+/// `cargo build` for a Rust/Bevy project), not only running tests. `make*` is
+/// first since projects often expose tooling via make (see AGENTS.md).
+const BUILD_TOOLS: &[&str] = &[
+    "make*",
+    // File ops (repo-confined by the sandbox; `rm -rf /` etc. still blocked by the
+    // safety policy) — deleting/moving/creating files is part of implementing.
+    "rm*",
+    "mkdir*",
+    "mv*",
+    "cp*",
+    "touch*",
+    // Rust
+    "cargo*",  // build / check / add / test / run / clippy / fmt
+    "rustup*", // toolchain/target management (e.g. add a target)
+    // Python
+    "pytest*",
+    "python*",
+    "pip install*",
+    "uv*",
+    "ruff*",
+    "mypy*",
+    // JS / TS
+    "npm*",
+    "pnpm*",
+    "yarn*",
+    // Go
+    "go*",
+    "gofmt*",
+];
 
 /// Look up a named tool preset, mirroring `TOOL_PRESETS` in models.py.
 pub fn resolve_preset(name: &str) -> Option<ToolsConfig> {
@@ -85,17 +128,8 @@ pub fn resolve_preset(name: &str) -> Option<ToolsConfig> {
     };
     Some(match name {
         "files" => ToolsConfig::default(),
-        "files_and_test" => t(bash_allow(&[
-            "make*", // preferred: projects expose tooling via make (see AGENTS.md)
-            "pytest*",
-            "python -m pytest*",
-            "npm test*",
-            "yarn test*",
-            "cargo test*",
-            "go test*",
-            "ruff check*",
-            "mypy*",
-        ])),
+        // Build + test across the common languages (no network).
+        "files_and_test" => t(bash_allow(BUILD_TOOLS)),
         "files_and_deps" => t(bash_allow(&[
             "pip install*",
             "uv add*",
@@ -109,6 +143,7 @@ pub fn resolve_preset(name: &str) -> Option<ToolsConfig> {
         "research" => ToolsConfig {
             http_get: true,
             web_search: true,
+            lookup: true,
             ..ToolsConfig::default()
         },
         // Read-only research: inspect files + research, but cannot write (for
@@ -116,21 +151,28 @@ pub fn resolve_preset(name: &str) -> Option<ToolsConfig> {
         "research_ro" => ToolsConfig {
             http_get: true,
             web_search: true,
+            lookup: true,
             read_only: true,
             ..ToolsConfig::default()
         },
+        // Implement preset: full build toolchain PLUS web_search + http_get +
+        // structured lookups, so it can check library/API docs (e.g. a new Bevy
+        // version) while coding.
         "research_and_code" => ToolsConfig {
             http_get: true,
             web_search: true,
-            bash: bash_allow(&["pytest*", "pip install*", "uv*", "make*", "npm*"]),
+            lookup: true,
+            bash: bash_allow(BUILD_TOOLS),
             ..ToolsConfig::default()
         },
         "all" => ToolsConfig {
             http_get: true,
             web_search: true,
+            lookup: true,
             bash: Some(BashConfig {
                 allowed: Vec::new(),
                 unrestricted: true,
+                timeout_secs: None,
             }),
             ..ToolsConfig::default()
         },
@@ -165,10 +207,12 @@ pub fn resolve_tools(raw: Option<&Value>) -> Result<ToolsConfig, ModelError> {
                 Some(Value::Bool(true)) => Some(BashConfig {
                     allowed: Vec::new(),
                     unrestricted: true,
+                    timeout_secs: None,
                 }),
                 Some(bm @ Value::Mapping(_)) => Some(BashConfig {
                     allowed: as_str_list(bm.get("allowed")),
                     unrestricted: as_bool(bm.get("unrestricted")).unwrap_or(false),
+                    timeout_secs: bm.get("timeout_secs").and_then(Value::as_u64),
                 }),
                 _ => None,
             };
@@ -178,6 +222,7 @@ pub fn resolve_tools(raw: Option<&Value>) -> Result<ToolsConfig, ModelError> {
                 bash,
                 http_get: as_bool(m.get("http_get")).unwrap_or(false),
                 web_search: as_bool(m.get("web_search")).unwrap_or(false),
+                lookup: as_bool(m.get("lookup")).unwrap_or(false),
                 plugins: as_str_list(m.get("plugins")),
             })
         }
@@ -484,6 +529,10 @@ pub struct WebSearchConfig {
     pub max_results: u32,
     #[serde(default)]
     pub api_key: String,
+    /// Base URL for the `searxng` backend, e.g. `http://192.168.50.147:8080`.
+    /// Ignored by other backends.
+    #[serde(default)]
+    pub base_url: String,
 }
 
 impl Default for WebSearchConfig {
@@ -492,6 +541,7 @@ impl Default for WebSearchConfig {
             backend: default_backend(),
             max_results: 5,
             api_key: String::new(),
+            base_url: String::new(),
         }
     }
 }

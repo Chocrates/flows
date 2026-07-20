@@ -102,20 +102,33 @@ fn extract_between(s: &str, open: &str, close: &str) -> Option<String> {
     Some(s[start..end].to_string())
 }
 
-/// Run a web search. DuckDuckGo only for now (brave/serper need API keys).
+/// Run a web search. Backends: `duckduckgo` (default, HTML scrape, no config) and
+/// `searxng` (a self-hosted/private SearXNG instance's JSON API, via `base_url`).
 pub async fn web_search(query: &str, config: &WebSearchConfig) -> ToolResult<Value> {
-    if config.backend != "duckduckgo" {
-        return Err(ToolError::new(format!(
-            "search backend {:?} not supported in this build (only 'duckduckgo')",
-            config.backend
-        )));
+    let max = if config.max_results == 0 {
+        5
+    } else {
+        config.max_results as usize
+    };
+    match config.backend.as_str() {
+        "duckduckgo" => duckduckgo(query, max).await,
+        "searxng" => searxng(query, max, config).await,
+        other => Err(ToolError::new(format!(
+            "search backend {other:?} not supported (use 'duckduckgo' or 'searxng')"
+        ))),
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+}
+
+fn client(timeout_secs: u64) -> ToolResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .user_agent("Mozilla/5.0 flows/0.2")
         .build()
-        .map_err(|e| ToolError::new(format!("client build failed: {e}")))?;
-    let resp = client
+        .map_err(|e| ToolError::new(format!("client build failed: {e}")))
+}
+
+async fn duckduckgo(query: &str, max: usize) -> ToolResult<Value> {
+    let resp = client(10)?
         .get("https://html.duckduckgo.com/html/")
         .query(&[("q", query)])
         .send()
@@ -125,10 +138,65 @@ pub async fn web_search(query: &str, config: &WebSearchConfig) -> ToolResult<Val
         .text()
         .await
         .map_err(|e| ToolError::new(format!("search read failed: {e}")))?;
-    let max = if config.max_results == 0 {
-        5
-    } else {
-        config.max_results as usize
-    };
     Ok(Value::Array(parse_ddg_html(&html, max)))
+}
+
+/// SearXNG JSON API: `GET {base_url}/search?q=..&format=json`. Requires an
+/// instance with the JSON output enabled (self-hosted or a private one) — public
+/// instances almost always disable it. Maps `results[].{title,url,content}` to
+/// our `{title,url,snippet}`.
+async fn searxng(query: &str, max: usize, config: &WebSearchConfig) -> ToolResult<Value> {
+    let base = config.base_url.trim_end_matches('/');
+    if base.is_empty() {
+        return Err(ToolError::new(
+            "searxng backend requires tools.web_search.base_url (e.g. http://host:8080)"
+                .to_string(),
+        ));
+    }
+    let url = format!("{base}/search");
+    let mut req = client(12)?
+        .get(&url)
+        .query(&[("q", query), ("format", "json")]);
+    if !config.api_key.is_empty() {
+        // Some instances gate the JSON API behind a token/basic auth header.
+        req = req.header("Authorization", format!("Bearer {}", config.api_key));
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| ToolError::new(format!("searxng request failed: {e}")))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| ToolError::new(format!("searxng read failed: {e}")))?;
+    if !status.is_success() {
+        let head: String = text.chars().take(200).collect();
+        return Err(ToolError::new(format!(
+            "searxng HTTP {status} (JSON API enabled on the instance?): {head}"
+        )));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|e| {
+        ToolError::new(format!(
+            "searxng returned non-JSON (is `format: json` enabled?): {e}"
+        ))
+    })?;
+    Ok(Value::Array(parse_searxng(&v, max)))
+}
+
+/// Map a SearXNG `{results: [{title,url,content}]}` body to our result shape.
+pub fn parse_searxng(v: &Value, max: usize) -> Vec<Value> {
+    v.get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(max)
+        .map(|r| {
+            json!({
+                "title": r.get("title").and_then(Value::as_str).unwrap_or(""),
+                "url": r.get("url").and_then(Value::as_str).unwrap_or(""),
+                "snippet": r.get("content").and_then(Value::as_str).unwrap_or(""),
+            })
+        })
+        .collect()
 }

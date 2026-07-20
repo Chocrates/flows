@@ -240,6 +240,7 @@ pub fn load_global_config(path: Option<&Path>) -> Result<GlobalConfig> {
         backend: get_str(&ws_raw, "backend").unwrap_or_else(|| "duckduckgo".to_string()),
         max_results: get_u32(&ws_raw, "max_results").unwrap_or(5),
         api_key: get_str(&ws_raw, "api_key").unwrap_or_default(),
+        base_url: get_str(&ws_raw, "base_url").unwrap_or_default(),
     };
 
     Ok(GlobalConfig {
@@ -578,6 +579,10 @@ pub fn apply_user_project_override(base: &GlobalConfig, override_val: &Value) ->
         api_key: or_str(
             &get_str(&ws_raw, "api_key").unwrap_or_default(),
             &base.tools.web_search.api_key,
+        ),
+        base_url: or_str(
+            &get_str(&ws_raw, "base_url").unwrap_or_default(),
+            &base.tools.web_search.base_url,
         ),
     };
 

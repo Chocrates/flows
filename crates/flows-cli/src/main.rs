@@ -25,6 +25,7 @@ use flows_runner::runner::{default_provider_factory, run_pipeline, RunnerCallbac
 mod eval;
 mod eval_store;
 mod eval_tui;
+mod searxng;
 
 #[derive(Parser)]
 #[command(
@@ -91,6 +92,13 @@ enum Command {
     Stop {
         /// Run id to stop (from `flows runs`; a unique prefix works).
         run_id: String,
+    },
+    /// Manage an optional self-hosted SearXNG container for the `searxng` search
+    /// backend (auto-detects docker / podman / nerdctl / finch).
+    Searxng {
+        /// up (start) | down (stop) | status. Defaults to status.
+        #[arg(default_value = "status")]
+        action: String,
     },
     /// Delete a single run by id (use --force to stop + delete a running one).
     Delete {
@@ -316,6 +324,7 @@ fn main() -> ExitCode {
         } => cmd_run(&idea.join(" "), template.as_deref(), tui, background),
         Command::Runs => cmd_runs(),
         Command::Stop { run_id } => cmd_stop(&run_id),
+        Command::Searxng { action } => searxng::cmd(&action),
         Command::Delete { run_id, force } => cmd_delete(&run_id, force),
         Command::Clean { all } => cmd_clean(all),
         Command::Eval { command } => match command {
@@ -559,21 +568,73 @@ fn cmd_doctor() -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 const STARTER_CONFIG: &str = r#"# ~/.flows/config.yml — global defaults (edit me, or use `flows config set`)
+
+# --- default model --------------------------------------------------------
 llm:
-  # Local llama.cpp (or any OpenAI-compatible server) — no API key needed:
+  # Local llama.cpp / vLLM / any OpenAI-compatible server — no API key needed:
   #   model: qwen2.5-coder
   #   api_base: http://localhost:8080/v1
+  #   api_key: local
   #
   # …or a cloud model:
   model: claude-sonnet-4-6
   # api_key: ${ANTHROPIC_API_KEY}    # else falls back to $ANTHROPIC_API_KEY / $OPENAI_API_KEY
-  thinking: false
+  thinking: false                    # extended thinking (if the model supports it)
+  # thinking_budget_tokens: 4000
 
-max_cost_usd: 0.0                    # 0 = no cap
+# --- named model profiles -------------------------------------------------
+# Route phases to different models: define a profile here, then set `model: <name>`
+# on a phase (in a template). `suites` tags it for the eval harness; set
+# `supports_tools: false` for models whose server can't emit OpenAI tool_calls.
+# models:
+#   coder:
+#     model: qwen2.5-coder
+#     api_base: http://localhost:8080/v1
+#     api_key: local
+#     suites: [coder]
+#   reasoner:
+#     model: deepseek-r1
+#     api_base: http://localhost:8080/v1
+#     supports_tools: false
+#     suites: [reasoner]
+
+max_cost_usd: 0.0                    # 0 = no cap (local models are free)
 
 notifications:
   enabled: true
   sound: false
+
+# --- tools ----------------------------------------------------------------
+tools:
+  web_search:
+    backend: duckduckgo              # 'duckduckgo' (default, no setup) or 'searxng'
+    max_results: 5
+    # For a self-hosted SearXNG (run `flows searxng up`), switch to:
+    #   backend: searxng
+    #   base_url: http://localhost:8888
+    #   api_key: ""                  # only if your instance gates the JSON API
+    #
+    # Besides web_search, agent phases with the research/implement presets also
+    # get `lookup` (crates.io, docs.rs, Stack Exchange, Wikipedia, GitHub) and
+    # `http_get` — structured, no setup required.
+
+# --- context delivery (advanced) ------------------------------------------
+# How much repo context is fed to the model. All default off (baseline). Turn on
+# per need; useful for smaller local models that can't pull context via tools.
+# context:
+#   exclude: []                      # extra glob(s) to keep out of the repo tree
+#   slim_tree: false                 # compact repo tree (fewer tokens)
+#   repo_map: false                  # inject a symbol map (tree-sitter) up front
+#   repo_map_max_tokens: 1500
+#   search_tool: false               # offer a `search_code` (ripgrep) tool
+#   range_reads: false               # allow reading line ranges of files
+#   retrieval: false                 # local embedding retrieval of relevant chunks
+#   retrieval_model: ""              # fastembed model (default all-MiniLM-L6-v2)
+#   retrieval_max_chunks: 12
+#   retrieval_reindex_threshold: 0.4 # repo churn fraction that forces a reindex
+#   budgeting: false                 # trim old tool results when near the window
+#   budget_fraction: 0.6
+#   unknown_window_tokens: 8000      # assumed window when a model's is unknown
 "#;
 
 fn cmd_init(global: bool, template: &str, force: bool) -> Result<(), String> {

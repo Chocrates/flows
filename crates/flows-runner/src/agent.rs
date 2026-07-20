@@ -161,6 +161,11 @@ const MAX_REPEATED_TOOL_ERRORS: u32 = 3;
 /// command different, so the identical-signature guard never trips) where the
 /// agent thrashes on builds/searches without making code progress.
 const MAX_ROUNDS_WITHOUT_PROGRESS: u32 = 30;
+/// After this many consecutive *unproductive* `web_search` calls (empty results
+/// or request failures), stop serving searches for the rest of the phase. The
+/// DuckDuckGo backend gets rate-limited and returns empty/errors, which don't
+/// count as tool *failures* — so a model hunting docs can otherwise spin forever.
+const MAX_DRY_SEARCHES: u32 = 6;
 /// Most-recent messages budgeting never trims (keeps the live turn coherent).
 const BUDGET_RECENT_KEEP: usize = 4;
 
@@ -332,6 +337,26 @@ root (your working directory) — use repo-relative paths and do NOT `cd` elsewh
             parameters: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
         });
     }
+    if tools.lookup {
+        let ids = flows_tools::lookup::source_ids();
+        defs.push(ToolDef {
+            name: "lookup".into(),
+            description: format!(
+                "Structured lookup against a specific source's JSON API — more \
+                 reliable than web_search for library/API details. Sources:\n{}",
+                flows_tools::lookup::source_catalog()
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "enum": ids, "description": "which source to query"},
+                    "query": {"type": "string"},
+                    "max": {"type": "integer", "description": "max results (default 5)"}
+                },
+                "required": ["source", "query"]
+            }),
+        });
+    }
     defs
 }
 
@@ -348,6 +373,7 @@ async fn dispatch_tool(
     args: &Value,
     tools: &ToolsConfig,
     ctx: &ContextConfig,
+    web_search_cfg: &flows_core::models::WebSearchConfig,
     repo_root: &Path,
     flows_dir: Option<&Path>,
 ) -> String {
@@ -434,9 +460,22 @@ async fn dispatch_tool(
             }
             match str_arg(args, "query") {
                 None => "Error: web_search requires a non-empty 'query' string argument".into(),
-                Some(q) => {
-                    let cfg = flows_core::models::WebSearchConfig::default();
-                    match flows_tools::search::web_search(q, &cfg).await {
+                Some(q) => match flows_tools::search::web_search(q, web_search_cfg).await {
+                    Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| v.to_string()),
+                    Err(e) => format!("Error: {}", e.0),
+                },
+            }
+        }
+        "lookup" => {
+            if !tools.lookup {
+                return "Error: lookup tool not enabled for this phase".into();
+            }
+            match (str_arg(args, "source"), str_arg(args, "query")) {
+                (None, _) => "Error: lookup requires a 'source' argument".into(),
+                (_, None) => "Error: lookup requires a non-empty 'query' argument".into(),
+                (Some(source), Some(q)) => {
+                    let max = args.get("max").and_then(Value::as_u64).unwrap_or(5) as usize;
+                    match flows_tools::lookup::lookup(source, q, max).await {
                         Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| v.to_string()),
                         Err(e) => format!("Error: {}", e.0),
                     }
@@ -475,6 +514,11 @@ fn summarize_tool_call(name: &str, args: &Value) -> String {
         "list_files" => format!(
             "list_files {:?}",
             args.get("path").and_then(Value::as_str).unwrap_or(".")
+        ),
+        "lookup" => format!(
+            "lookup {}: {:?}",
+            args.get("source").and_then(Value::as_str).unwrap_or("?"),
+            args.get("query").and_then(Value::as_str).unwrap_or("")
         ),
         "search_code" => format!(
             "search_code {:?}{}",
@@ -518,30 +562,83 @@ fn summarize_tool_result(result: &str) -> (String, bool) {
 /// `<tool_call>{…}</tool_call>` (or the declaration tag `<tools>{…}</tools>`)
 /// inside their content/reasoning, which the server never converts. Extract those
 /// blocks into real `ToolCall`s so the call still executes instead of stalling.
+/// Turn a `{name, arguments}` object (optionally wrapped as `{"function": {...}}`)
+/// into a `ToolCall`, appending it to `out`. Returns whether one was added.
+fn push_tool_call(v: &Value, out: &mut Vec<ToolCall>) -> bool {
+    // OpenAI-style `{"function": {"name":.., "arguments":..}}` nests the call.
+    let obj = v.get("function").unwrap_or(v);
+    let Some(name) = obj.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    let args = obj.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let arguments = match &args {
+        // `arguments` is sometimes a JSON string, sometimes an inline object.
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "{}".into()),
+    };
+    out.push(ToolCall {
+        id: format!("text-{}", out.len()),
+        name: name.to_string(),
+        arguments,
+    });
+    true
+}
+
 pub fn extract_text_tool_calls(text: &str) -> Vec<ToolCall> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         Regex::new(r"(?s)<(?:tool_call|tools)>(.*?)</(?:tool_call|tools)>").unwrap()
     });
     let mut out = Vec::new();
+
+    // 1. XML-tagged blocks: `<tool_call>{…}</tool_call>` / `<tools>{…}</tools>`.
     for cap in re.captures_iter(text) {
-        let inner = cap[1].trim();
-        let Ok(v) = serde_json::from_str::<Value>(inner) else {
+        if let Ok(v) = serde_json::from_str::<Value>(cap[1].trim()) {
+            push_tool_call(&v, &mut out);
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+
+    // 2. JSON-envelope tool calls: some thinking models emit the call as plain
+    //    JSON in their content instead of structured `tool_calls` —
+    //    `{"type":"tool_call","name":..,"arguments":..}`, an OpenAI `function`
+    //    wrapper, or a `{"tool_calls":[…]}` array. Without this they get captured
+    //    as an artifact and the phase ends prematurely (no exploration / no
+    //    clarifying questions).
+    let mut candidates = fenced_json(text);
+    if candidates.is_empty() {
+        if let (Some(s), Some(e)) = (text.find('{'), text.rfind('}')) {
+            if e >= s {
+                candidates.push(text[s..=e].to_string());
+            }
+        }
+    }
+    for c in candidates {
+        let Ok(v) = serde_json::from_str::<Value>(&c) else {
             continue;
         };
-        let Some(name) = v.get("name").and_then(Value::as_str) else {
+        let ty = v.get("type").and_then(Value::as_str);
+        // Artifact / questions envelopes are handled elsewhere — never treat them
+        // as tool calls.
+        if matches!(ty, Some("artifact") | Some("questions")) {
             continue;
-        };
-        let args = v.get("arguments").cloned().unwrap_or_else(|| json!({}));
-        let arguments = match &args {
-            Value::String(s) => s.clone(),
-            other => serde_json::to_string(other).unwrap_or_else(|_| "{}".into()),
-        };
-        out.push(ToolCall {
-            id: format!("text-{}", out.len()),
-            name: name.to_string(),
-            arguments,
-        });
+        }
+        if let Some(arr) = v.get("tool_calls").and_then(Value::as_array) {
+            for item in arr {
+                push_tool_call(item, &mut out);
+            }
+        } else {
+            // A single call: an explicit `type: tool_call|function`, or any object
+            // carrying both `name` and `arguments`.
+            let looks_like_call = matches!(ty, Some("tool_call") | Some("function"))
+                || (v.get("name").is_some() && v.get("arguments").is_some())
+                || v.get("function").is_some();
+            if looks_like_call {
+                push_tool_call(&v, &mut out);
+            }
+        }
     }
     out
 }
@@ -731,6 +828,7 @@ pub async fn run_agent_phase(
     callbacks: &dyn AgentCallbacks,
     flows_dir: Option<&Path>,
     context: &ContextConfig,
+    web_search_cfg: &flows_core::models::WebSearchConfig,
     max_cost_usd: f64,
     prior_cost_usd: f64,
     logger: Option<&flows_core::LlmLogger>,
@@ -852,6 +950,9 @@ your context small.",
     // so read-only research (tens of tool calls) doesn't starve the phase of its
     // chances to ask the human.
     let mut clarifications_asked = 0u32;
+    // Consecutive unproductive web searches (empty/errored); trips the search
+    // guard so a flaky backend can't drive an infinite doc-hunt loop.
+    let mut dry_searches = 0u32;
     // No-progress guard (write-capable phases only): once the agent has written
     // code, count rounds with no successful `write_file`; abort if it thrashes.
     let can_write = phase.tools.files && !phase.tools.read_only;
@@ -1022,11 +1123,48 @@ your context small.",
             for tc in &tool_calls {
                 let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
                 callbacks.on_tool_call(&tc.name, &summarize_tool_call(&tc.name, &args));
+
+                // Search guard: once too many searches have come back empty/failed,
+                // stop dispatching them — tell the model to proceed on its own
+                // knowledge instead of looping on a flaky backend.
+                if tc.name == "web_search" && dry_searches >= MAX_DRY_SEARCHES {
+                    callbacks.on_tool_result(
+                        &tc.name,
+                        "search disabled (too many empty/failed results)",
+                        true,
+                    );
+                    messages.push(Message::tool_result(
+                        tc.id.clone(),
+                        "web_search is unavailable (repeated empty/failed results). Stop \
+                         searching. Implement using your existing knowledge; if a specific API \
+                         detail is uncertain, make a reasonable assumption, note it, and continue."
+                            .to_string(),
+                    ));
+                    continue;
+                }
+
                 let result =
-                    dispatch_tool(&tc.name, &args, &phase.tools, context, repo_root, flows_dir)
+                    dispatch_tool(
+                        &tc.name,
+                        &args,
+                        &phase.tools,
+                        context,
+                        web_search_cfg,
+                        repo_root,
+                        flows_dir,
+                    )
                         .await;
                 let (summary, is_error) = summarize_tool_result(&result);
                 callbacks.on_tool_result(&tc.name, &summary, is_error);
+                // Track search productivity: a search with no result URL (empty or
+                // errored) is "dry"; a real hit resets the counter.
+                if tc.name == "web_search" {
+                    if !is_error && result.contains("\"url\"") {
+                        dry_searches = 0;
+                    } else {
+                        dry_searches += 1;
+                    }
+                }
                 if !is_error {
                     all_errored = false;
                     if tc.name == "write_file" {
@@ -1212,6 +1350,32 @@ mod tool_list_tests {
         assert_eq!(calls[0].name, "read_file");
         // No tool blocks → nothing.
         assert!(extract_text_tool_calls("just some prose, no tools").is_empty());
+    }
+
+    #[test]
+    fn extracts_json_envelope_tool_calls() {
+        // Reasoner emitted the call as bare JSON `{"type":"tool_call",...}` (not
+        // structured tool_calls, not an XML tag) — must still execute, else the
+        // phase ends prematurely with the JSON captured as its artifact.
+        let text = "First list the files.\n{\n  \"type\": \"tool_call\",\n  \"name\": \"list_files\",\n  \"arguments\": {\"path\": \"\"}\n}";
+        let calls = extract_text_tool_calls(text);
+        assert_eq!(calls.len(), 1, "envelope not parsed: {calls:?}");
+        assert_eq!(calls[0].name, "list_files");
+
+        // Fenced, OpenAI `function` wrapper.
+        let fenced = "```json\n{\"function\": {\"name\": \"read_file\", \"arguments\": {\"path\": \"a.rs\"}}}\n```";
+        assert_eq!(extract_text_tool_calls(fenced)[0].name, "read_file");
+
+        // A `tool_calls` array envelope.
+        let arr = "{\"tool_calls\": [{\"name\": \"list_files\", \"arguments\": {}}, {\"name\": \"read_file\", \"arguments\": {\"path\":\"x\"}}]}";
+        assert_eq!(extract_text_tool_calls(arr).len(), 2);
+
+        // An artifact envelope must NOT be mistaken for a tool call.
+        let artifact = "{\"type\": \"artifact\", \"content\": {\"summary\": \"done\"}}";
+        assert!(extract_text_tool_calls(artifact).is_empty());
+        // A questions envelope likewise.
+        let questions = "{\"type\": \"questions\", \"questions\": [\"a?\", \"b?\"]}";
+        assert!(extract_text_tool_calls(questions).is_empty());
     }
 
     #[test]

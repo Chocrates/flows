@@ -7,6 +7,7 @@ fn allowed(patterns: &[&str]) -> BashConfig {
     BashConfig {
         allowed: patterns.iter().map(|s| s.to_string()).collect(),
         unrestricted: false,
+        timeout_secs: None,
     }
 }
 
@@ -50,6 +51,7 @@ fn unrestricted_allows_anything() {
     let cfg = BashConfig {
         allowed: vec![],
         unrestricted: true,
+        timeout_secs: None,
     };
     assert!(check_allowlist("rm -rf /tmp/x", &cfg).is_ok());
 }

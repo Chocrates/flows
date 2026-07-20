@@ -29,6 +29,9 @@ phases:
     type: agent
     tools:
       files: true
+      http_get: true      # read docs pages
+      web_search: true    # backend from ~/.flows/config.yml
+      lookup: true         # crates.io / docs.rs / stackexchange / wikipedia / github
       bash:
         allowed:
           - "make*"
@@ -65,6 +68,9 @@ phases:
     max_clarification_rounds: 0
     tools:
       files: true
+      http_get: true      # read docs pages
+      web_search: true    # backend from ~/.flows/config.yml
+      lookup: true         # crates.io / docs.rs / stackexchange / wikipedia / github
       bash:
         allowed:
           - "make*"

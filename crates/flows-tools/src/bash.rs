@@ -145,7 +145,7 @@ pub fn run_bash(command: &str, repo_root: &Path, config: &BashConfig) -> ToolRes
         command,
         repo_root,
         config,
-        DEFAULT_TIMEOUT_SECS,
+        config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
         DEFAULT_MAX_OUTPUT,
     )
 }
