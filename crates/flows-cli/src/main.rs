@@ -1129,19 +1129,22 @@ fn cmd_run(idea: &str, template: Option<&str>, tui: bool, background: bool) -> R
     }
 
     if tui {
-        return flows_tui::run_tui(
-            run_id,
-            idea.to_string(),
-            cwd,
-            phases,
-            template_name,
-            global,
-            project,
-            Box::new(default_provider_factory),
-            store,
-            None,
-        )
-        .map_err(|e| e.to_string());
+        // Run as a detached background worker and attach the TUI to it — the same
+        // path the home screen uses. This way quitting the view (`q`) only detaches;
+        // the run keeps going and can be re-attached (`flows attach <id>`) or stopped
+        // (`flows stop <id>`). Quitting no longer kills the run.
+        spawn_background(&run_id, idea, &template_name, &cwd, &store, false)?;
+        flows_tui::attach_tui(store.clone(), run_id.clone()).map_err(|e| e.to_string())?;
+        // After detaching, tell the user how to get back / stop it (unless it
+        // already finished).
+        if let Ok(Some(st)) = store.read_state(&run_id) {
+            if !matches!(st.status.as_str(), "completed" | "failed" | "cancelled") {
+                println!("run {run_id} still running in the background");
+                println!("  reattach:  flows attach {run_id}");
+                println!("  stop:      flows stop {run_id}");
+            }
+        }
+        return Ok(());
     }
 
     println!("Run {run_id}  (template: {template_name})");
