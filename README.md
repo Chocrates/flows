@@ -2,64 +2,75 @@
 
 **A local-first, terminal workflow runner for LLM coding agents.**
 
-`flows` runs a multi-phase agent pipeline against your codebase — plan → implement → lint → test → review → commit — with every shell command confined to a sandbox, every file write scoped to the repo, and every run resumable from a TUI. It's built to run **fully offline against a local llama.cpp server** (no API key, no cloud, no cost), and also works with Anthropic or OpenAI models if you'd rather.
+`flows` runs a multi-phase agent pipeline over your codebase — plan → implement →
+lint → test → review → commit — in a sandbox, from a resumable full-screen TUI.
+It's built to run **fully offline against a local llama.cpp server** (no API key,
+no cloud, no cost), and also works with Anthropic or OpenAI models.
 
 ---
 
-## What problem does it solve?
+## Why
 
-Ad-hoc "chat with an AI and paste code" loops are hard to trust, hard to repeat, and hard to supervise. `flows` makes agent work **structured, safe, and observable**:
+Ad-hoc "chat with an AI and paste code" loops are hard to trust, repeat, and
+supervise. `flows` makes agent work **structured, safe, and observable**:
 
-- **Structured** — a run is a pipeline of named *phases* (agent / script / human), with conditional loop-backs, retries, and human gates. The same `feature` or `software` flow runs the same way every time; the lint/test commands adapt to your stack (cargo, pytest, npm, go).
-- **Safe** — the agent's shell commands run in a filesystem sandbox (bubblewrap on Linux, Seatbelt on macOS): read anything, **write only inside the repo**, host secrets scrubbed from the environment, fail-closed if no sandbox is available. File tools are path-scoped (no `../` escape, no symlink-follow); web fetches are SSRF-guarded.
-- **Observable** — live token streaming, per-phase token/cost accounting, a phase graph that shows loops, and full run state on disk. Start a run, walk away, and **reattach** to it later — running or finished — from the launcher.
-- **Local-first** — point it at a llama.cpp (or any OpenAI-compatible) endpoint and run with zero cloud dependency and zero cost.
+- **Structured** — a run is a pipeline of named *phases* (agent / script / human)
+  with loop-backs, retries, and human gates. The same `feature` or `software` flow
+  runs the same way every time; lint/test commands adapt to your stack (cargo,
+  pytest, npm, go).
+- **Safe** — the agent's shell runs in a filesystem sandbox (bubblewrap / Seatbelt):
+  read anything, **write only inside the repo**, host secrets scrubbed, fail-closed
+  if no sandbox. File tools can't escape the repo; web access is SSRF-guarded.
+- **Observable** — live token streaming, per-phase token/cost accounting, a phase
+  graph that shows loops, full run state on disk. Start a run, walk away, and
+  **reattach** later — running or finished.
+- **Local-first** — point it at a llama.cpp (or any OpenAI-compatible) endpoint and
+  run with zero cloud dependency and zero cost.
 
 ---
 
-## Getting started
-
-Follow these top to bottom — you'll have a run going in a couple of minutes.
+## Quickstart
 
 ### 1. Install
 
-You need **Rust** (`curl https://sh.rustup.rs -sSf | sh`) and, on Linux, **bubblewrap** for the shell sandbox (`sudo apt install bubblewrap`). macOS uses the built-in `sandbox-exec`.
+Needs **Rust** and, on Linux, **bubblewrap** for the sandbox. macOS uses the
+built-in sandbox.
 
 ```bash
+# prerequisites
+curl https://sh.rustup.rs -sSf | sh        # Rust
+sudo apt install bubblewrap                # Linux only
+
+# build + install the `flows` binary to ~/.cargo/bin (must be on PATH)
 git clone <REPO_URL> flows && cd flows
 cargo install --path crates/flows-cli --locked
 ```
 
-This builds and installs the `flows` binary to `~/.cargo/bin` (make sure that's on your `PATH`). Templates and prompts are baked into the binary — nothing else to copy.
+Templates and prompts are baked into the binary — nothing else to copy.
 
-> Prefer not to install? `cargo build --release` and use `./target/release/flows` in place of `flows` below.
+### 2. Point it at a model
 
-### 2. Point it at your local model (llama.cpp)
-
-`flows` runs fully offline against any OpenAI-compatible server — **no API key, no cloud, no cost.** Start a llama.cpp server exposing the OpenAI API:
+**Local (llama.cpp / vLLM / any OpenAI-compatible server) — no key, no cost:**
 
 ```bash
-# in your llama.cpp checkout — serve a model on :8080 with the OpenAI-compatible API
+# serve a model on :8080 (in your llama.cpp checkout)
 llama-server -m /path/to/qwen2.5-coder.gguf --host 0.0.0.0 --port 8080
-```
 
-Then point `flows` at it:
-
-```bash
-flows config set model qwen2.5-coder                 # any name — llama.cpp serves whatever's loaded
+flows config set model qwen2.5-coder                 # any name; serves what's loaded
 flows config set api-base http://localhost:8080/v1
 ```
 
-That's all — `flows` picks the OpenAI-compatible provider automatically because the model name isn't `claude*`, and no key is required when an `api_base` is set.
-
-<details><summary>Prefer a cloud model instead?</summary>
+**Or cloud:**
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...          # or OPENAI_API_KEY for gpt-* models
 flows config set model claude-sonnet-4-6
 flows config set api-base ""             # clear any local endpoint
 ```
-</details>
+
+> Pick a **capable coding model** — the agent loop uses tool-calling, so tiny
+> instruct models struggle with structured responses. Qwen2.5-Coder 14B/32B or a
+> cloud model works well.
 
 ### 3. Check your setup
 
@@ -67,518 +78,109 @@ flows config set api-base ""             # clear any local endpoint
 flows doctor
 ```
 
-It prints the resolved model + where it routes, and whether the sandbox works:
-
-```
-model:    qwen2.5-coder  →  openai-compatible (local/custom)  http://localhost:8080/v1  [no key]
-sandbox:  OK (bwrap)
-```
-
-If it says the sandbox probe **failed** (common on Ubuntu 23.10+, which blocks unprivileged user namespaces), `doctor` prints the exact fix — a one-line `sysctl`. Without it, `flows` still runs; only the `bash`/`plugin` tools fail closed.
-
-> Tip: pick a **capable coding model** — the agent loop uses tool-calling, so a small/instruct model may struggle with the structured JSON responses. A larger coder model (e.g. Qwen2.5-Coder 14B/32B) works best. If runs stall or produce malformed artifacts, that's usually the model, not `flows`.
+Prints the resolved model + routing and whether the sandbox works. If the sandbox
+probe **fails** (common on Ubuntu 23.10+, which blocks unprivileged user
+namespaces), `doctor` prints the one-line `sysctl` fix.
 
 ### 4. Run your first flow
 
-`cd` into a git project, then either preview + run:
-
 ```bash
-cd ~/some-project
-flows plan "add a --json flag to the export command"   # dry-run: plan + cost, no LLM
-flows run  "add a --json flag to the export command"   # actually run it
+cd ~/some-project                                    # a git repo
+flows plan "add a --json flag to the export command" # dry-run: plan + cost, no LLM
+flows run  "add a --json flag to the export command" --tui
 ```
 
-…or just launch the **interactive launcher** (no arguments):
+…or just launch the interactive picker with no arguments:
 
 ```bash
 flows
 ```
 
-The launcher shows recent runs and a **＋ New run** button. Type an idea, pick a template, and it starts the run in a live full-screen view.
+### 5. Watch, answer, detach
 
-### 5. Watch, answer, and reattach
+While a run is live in the TUI:
 
-While a run is live you can:
-- **scroll** the output (↑↓ / PgUp·PgDn / Home·End), **select + copy** (drag, then `Ctrl-C`; `y` copies all),
-- **toggle** thinking (`t`) and JSON (`j`),
-- **answer** a clarifying question or **approve** a human gate by typing in the bottom bar (Enter = approve),
-- **cancel** with `c`, **quit** the view with `q`.
+- **scroll** (↑↓ / PgUp·PgDn / Home·End), **select + copy** (drag then `Ctrl-C`; `y`
+  copies all),
+- **toggle** thinking (`t`), JSON (`j`), system prompt (`s`),
+- **answer** a question or **approve** a gate in the bottom bar (Enter = approve),
+- **`q`** detaches — *the run keeps going in the background*.
 
-Press `q` to step away — the run keeps going in the background. Back at the launcher, select it again (or `flows attach <id>`) to **reattach** to the same live view. `flows runs` lists them with status + cost; `flows usage <id>` shows the token/cost breakdown. In the launcher, `d` deletes a selected finished run (or `flows clean` prunes them all).
-
-That's it. Everything a run produces lives under `~/.flows/runs/<id>/`.
-
----
-
-## Install — extras
-
-Installation itself is step 1 of **Getting started** above. A few extras:
-
-**Shell completions**
-```bash
-flows completions bash > ~/.local/share/bash-completion/completions/flows   # or zsh/fish
-```
-
-**Update** — `git pull && cargo install --path crates/flows-cli --locked`.
-
-**Uninstall** — `cargo uninstall flows-cli`.
+Reattach with `flows attach <id>` (or pick it from `flows`). Stop a run with
+`flows stop <id>` (or `c` then `q` in the TUI). Everything a run produces lives under
+`~/.flows/runs/<id>/`.
 
 ---
 
-## Configuration
-
-Global config lives in `~/.flows/config.yml`; a per-project `.flows.yml` overrides it. Set values with `flows config set`, or edit the file. A **llama.cpp** setup:
-
-```yaml
-llm:
-  model: qwen2.5-coder                 # any name; llama.cpp serves whatever's loaded
-  api_base: http://localhost:8080/v1   # your llama.cpp (OpenAI-compatible) endpoint
-  thinking: false
-max_cost_usd: 0.0                      # 0 = no cap (local is free anyway)
-notifications:
-  enabled: true
-  sound: false
-```
-
-For a **cloud** model instead, drop `api_base` and set `model: claude-sonnet-4-6` (with `ANTHROPIC_API_KEY`) or a `gpt-*` model (with `OPENAI_API_KEY`).
-
-- **Provider is chosen by model name:** `claude*` → Anthropic; anything else → OpenAI Chat Completions (which is what llama.cpp speaks). An `api_base` routes to your local/self-hosted endpoint — **no key required**.
-- **API keys** (cloud only) come from `llm.api_key`, else `$ANTHROPIC_API_KEY`, else `$OPENAI_API_KEY`.
-
-### Per-phase models (model profiles)
-
-Different phases can run on different models — and different endpoints. Define
-named **profiles** under `models:`, then point a phase at one with `model:`:
-
-```yaml
-llm:
-  model: claude-sonnet-4-6             # the run default (also a profile name if you want)
-
-models:
-  reasoner:                            # a cloud reasoner for planning/design
-    model: claude-opus-4-8
-    thinking: true
-  coder:                               # a local llama.cpp coder for implementation
-    model: qwen2.5-coder
-    api_base: http://localhost:8080/v1
-
-phases:
-  - name: design
-    model: reasoner                    # routes to the reasoner profile
-  - name: implement
-    model: coder                       # routes to the local coder — different endpoint
-```
-
-- A profile carries its own `model` and optional `api_base`, `api_key`, and
-  `thinking`; a profile that omits `api_base` inherits the default endpoint
-  (so **two models on the same endpoint** just need a `model:`).
-- A `phase.model` (or `llm.model`) that **doesn't** name a profile is treated as a
-  literal model string on the default endpoint — existing configs keep working.
-- Each profile's key is its explicit `api_key`, else the dialect default
-  (`$ANTHROPIC_API_KEY` for `claude*`, else `$OPENAI_API_KEY`). `flows plan`
-  shows the model each phase resolves to; `flows doctor` lists every profile and
-  flags an unusable one before you run.
-
-**Models that can't call tools.** Some models (many reasoning models) don't do
-function calling. Mark such a profile `supports_tools: false`:
-
-```yaml
-models:
-  reasoner:
-    model: deepseek-r1
-    supports_tools: false      # no function calling
-```
-
-flows then sends **no tool schemas** to that model and instead instructs it to
-emit any file writes inline in its artifact — `content.files` as a map of
-repo-relative path → full contents — which flows writes to disk after the
-response. A planning/analysis phase just emits its plan (no files). *Caveat:* a
-no-tools model can't read the repo, so it only sees the task + repo tree in the
-prompt; tasks that require reading existing file contents need those inlined into
-the prompt (a planned context-preload feature). Prefer a tool-capable model where
-the task depends on reading code.
-
-Generate a project config tailored to your stack:
-```bash
-flows init            # writes .flows.yml (detects Python / Rust / Node / Go)
-flows init --global   # scaffold ~/.flows/config.yml + sync templates + prompts for customizing
-```
-
----
-
-## Commands
+## Everyday commands
 
 | Command | Description |
 |---|---|
 | `flows` | Interactive launcher — recent runs + new run, live attach |
-| `flows run "<idea>"` | Run a pipeline (foreground). `--tui` full-screen, `--background` detached |
-| `flows attach <id>` | Reattach to a run: phases, live output/artifacts, cost, answer prompts |
-| `flows plan "<idea>"` | Validate config; show the execution plan + cost estimate (no LLM calls) |
+| `flows run "<idea>" [--tui] [--background]` | Run a pipeline. `--tui` = live view (detaches on `q`) |
+| `flows attach <id>` | Reattach to a run: phases, live output, cost, answer prompts |
+| `flows stop <id>` | Cancel a run and kill its worker (keeps the run + output) |
+| `flows plan "<idea>"` | Validate config; show the execution plan + cost estimate (no LLM) |
 | `flows runs` | List recent runs with status + cost |
-| `flows delete <id> [--force]` | Delete one run by id (`--force` stops + deletes a running one) |
-| `flows clean [--all]` | Delete finished runs from `~/.flows/runs` (`--all` also removes running ones) |
-| `flows eval run \| list \| review \| report \| clean` | Benchmark models on task fixtures — matrix of model × context-config × suite × size, stored + compared |
+| `flows delete <id> [--force]` | Delete one run (`--force` stops + deletes a running one) |
+| `flows clean [--all]` | Delete finished runs (`--all` also removes running ones) |
 | `flows usage <id>` | Per-phase token usage + cost for a run |
 | `flows doctor` | Check config, model routing, sandbox, templates |
-| `flows config show \| set <key> <value>` | View / edit config (`model`, `api-base`, `api-key`, `max-cost`) |
-| `flows templates list \| sync` | List templates; write templates + prompts to `~/.flows` |
-| `flows init [--global]` | Generate `.flows.yml`, or sync global templates |
+| `flows config show \| set <key> <value>` | View / edit config |
+| `flows init [--global]` | Generate `.flows.yml`, or scaffold global config + templates |
+| `flows templates list \| sync \| new <name>` | List templates; copy builtins to `~/.flows` to edit; scaffold a commented new one |
+| `flows searxng up \| down \| status` | Manage an optional self-hosted SearXNG for web search |
+| `flows eval …` | Benchmark models on task fixtures — see [docs/eval.md](./docs/eval.md) |
 | `flows completions <shell>` | Print a shell completion script |
 
----
-
-## Context delivery for small models
-
-Small local models have narrow context windows but real repos are large. These
-features give a model the *right* code without blowing the window — some **pull**
-(the model calls a tool), some **push** (injected up front, so they help even
-models that can't function-call, like many reasoning models). All live under a
-`context:` block and **default off** (baseline behavior); enable per feature:
-
-```yaml
-context:
-  search_tool: true          # `search_code` tool: repo-scoped ripgrep-style search
-  range_reads: true          # read_file(path, start_line, end_line) — read slices
-  slim_tree: true            # bounded, gitignore-aware repo tree (vs the flat dump)
-  repo_map: true             # tree-sitter symbol map, ranked by the task (push)
-  budgeting: true            # trim old tool results as the window fills
-  retrieval: true            # local embedding retrieval of relevant chunks (push)
-  # tuning:
-  retrieval_model: minilm            # local embed model (empty → all-MiniLM-L6-v2)
-  retrieval_max_chunks: 8
-  retrieval_reindex_threshold: 0.4   # ≥40% files changed → rebuild the index
-  budget_fraction: 0.6               # trim when est. tokens exceed this × window
-  unknown_window_tokens: 8000        # assumed window when the model's is unknown
-  repo_map_max_tokens: 1500
-```
-
-- **Push vs pull.** `search_tool` / `range_reads` are tools (pull). `slim_tree`,
-  `repo_map`, and `retrieval` are injected (push). A model configured with
-  `supports_tools: false` gets **no** tool schemas and no tool sections in its
-  prompt — only push context — so it never wastes turns trying to call tools.
-- **Retrieval is fully local.** Embeddings run in-process (`fastembed`/ONNX, a
-  small model downloaded once) — no embeddings server, no cloud, no API key. The
-  index is built once per flow, persisted under `~/.flows/index/`, and rebuilt
-  only when enough files change (`retrieval_reindex_threshold`).
-- **Measure before enabling.** Use `flows eval` (below) to A/B a config against
-  baseline on your model, and `flows eval retrieval` to check ranking quality
-  deterministically. "Useful" is a measured delta, not an assumption.
-
-## Benchmarking your model (`flows eval`)
-
-Small local models vary a lot in how well they drive an agent loop. `flows eval`
-measures it as a **matrix**: pick models, context configurations, and fixtures;
-each `(model × config × fixture × trial)` cell runs headless, and every result is
-stored so you can compare models over time.
-
-```bash
-# Run a matrix and store the results:
-flows eval run --models reasoner,coder --configs baseline,+search --suite coder
-flows eval run --models qwen2.5-coder --size small --trials 3   # 3 trials/cell
-flows eval run --fixtures ./my-fx                               # your own fixtures
-
-flows eval list                     # show discovered fixtures (filter --suite/--size)
-flows eval review                   # grade ungraded trials (reasoner pass signal)
-flows eval report                   # comparison table (filter --model/--config/--suite)
-flows eval clean                    # delete stored results (no filters = wipe all)
-flows eval retrieval                # deterministic recall@k / MRR of the rankers (no LLM)
-```
-
-`flows eval clean` removes trials from the store — filter with `--model`,
-`--fixture`, `--suite`, `--granularity` (no filters wipes everything). It prompts
-for confirmation unless `--yes`. Handy for a clean batch after a fix that changes
-model behavior (old and new trials would otherwise average together in `report`).
-
-- **`--models`** — CSV of model-profile names (from your `models:` map) or literal
-  model strings. Each model is forced across the whole pipeline. Omit → your
-  configured default. Models failing preflight are skipped, not fatal.
-- **Pairing models to suites** — a model runs only its suites' fixtures when
-  restricted. Tag the profile once in config so it auto-pairs:
-  ```yaml
-  models:
-    coder:    { model: coder,    api_base: …, suites: [coder] }
-    reasoner: { model: reasoner, api_base: …, suites: [reasoner] }
-  ```
-  Then `flows eval run --models coder,reasoner` runs coder on coder fixtures and
-  reasoner on reasoner fixtures — not the full cross-product. Override for one run
-  by appending `:coder` / `:reasoner` to a model (`--models coder:reasoner`); an
-  untagged model with no override runs all suites.
-- **`--configs`** — CSV of context configurations: `baseline` (all off), `all`, or
-  combined feature tokens joined with `+`: `search`, `range`, `slim`, `map`,
-  `budget`, `rag` (e.g. `search+map`), plus the eval-only `oracle` (injects a
-  fixture's labeled `relevant` files as an upper-bound reference). A fixture can
-  declare its own `configs:` axis to A/B automatically. See
-  [Context delivery](#context-delivery-for-small-models) for what each does.
-- **`flows eval retrieval`** — a **deterministic** ranking eval (no model call):
-  for every fixture with labeled `relevant` files, it ranks files by the repo map
-  and by embedding retrieval and reports recall@1/3/5 + MRR (with a MEAN row), so
-  you can tune retrieval quality without spending model time.
-
-```
-model            config     suite    size        pass    in_tok      peak_ctx     cost  rounds   n
-qwen2.5-coder    baseline   coder    small   100% 3/3      3.1k        3.4k±0.2k  $0.00     3.0   3
-qwen2.5-coder    +search    coder    small   100% 3/3      2.4k        2.6k±0.1k  $0.00     2.3   3
-claude-opus-4-8  baseline   coder    medium  100% 3/3     12.0k       13.1k±0.4k  $0.14     5.0   3
-```
-
-**Fixtures.** A fixture is a folder with `fixture.yml` and a `repo/` subtree:
-
-```yaml
-suite: coder            # coder | reasoner
-size:  small            # small | medium | large
-granularity: phase      # flow | phase | turn
-task:  "…"
-template: blank
-verify: "cargo test"    # required for coder: exit 0 == success
-rubric: |               # required for reasoner: shown during `eval review`
-  - correct root cause?
-  - fix actionable / idiomatic?
-relevant:               # labels the files/symbols a good run should surface
-  - src/calc.sh
-timeout_secs: 600
-```
-
-**`relevant:`** labels the files/symbols a good run should surface — the target
-for the (upcoming) context-delivery + retrieval evals. It is **not** injected: eval
-trials run the real flow prompts unmodified, so a read-incapable model's failure
-to ground is a genuine **negative baseline** to measure a context feature against.
-
-**Granularity** picks how much of the pipeline a fixture exercises — and the report
-groups by it so levels are never compared:
-
-- `flow` — the whole pipeline (a multi-phase `template` like `feature`). Realistic
-  end-to-end success, but high variance: a context feature's effect is confounded
-  by planning, loops, and test phases.
-- `phase` — a **single agent phase** (a one-agent-phase `template` like `blank`).
-  This is where context delivery lives (the agent tool loop), so it's the clean
-  A/B unit for context features — one implement phase, toggle `+search`, measure
-  the delta. A `phase` fixture whose template has more than one agent phase is
-  rejected.
-- `turn` — a **single model turn**: one prompt → one completion, no tool loop, no
-  repo. The cheapest, lowest-variance probe. Coder turns auto-grade by `expect`
-  (substrings the completion must contain); reasoner turns are graded manually.
-  Turn fixtures carry their own eval-specific prompt (`system` + `task`).
-
-Phase and flow fixtures run the **real default prompts** so the eval measures the
-actual pipeline: coder phase fixtures use the `implement` template (the real
-`feature/implement.md` prompt + tools), reasoner phase fixtures use the `plan`
-template (the real read-only `feature/plan.md` prompt), and flow fixtures use the
-full `feature` pipeline. Only `turn` uses a bespoke prompt.
-
-Filter any command with `--granularity flow|phase|turn|all`.
-
-A `turn` fixture is just a prompt + expectations (no `repo/`, no `verify`):
-
-```yaml
-suite: coder
-granularity: turn
-system: "You are a terse coding assistant. Output only code."   # optional
-task: "Write a Rust fn `is_prime(n: u64) -> bool`."
-expect: ["fn is_prime", "u64"]     # completion must contain all of these
-max_tokens: 512                    # optional (default 2048)
-```
-
-- **coder** fixtures are scored by the shell `verify` command (exit 0 = pass).
-- **reasoner** fixtures have no meaningful shell check — success is a **manual
-  grade** entered via `flows eval review`. Ungraded reasoner trials show as
-  `ungraded` in the report rather than pass/fail.
-
-`flows eval review` opens a **full-screen TUI**: the trial's **transcript** (the
-context the model saw + its response) scrolls in the top pane while you enter the
-ratings in the bottom pane — so the output stays visible the whole time. Scroll
-with ↑/↓, PgUp/PgDn, `g`/`G`, or the mouse wheel; press `1`–`5` to rate the current
-dimension (auto-advances), `Tab`/←/→ to move between dimensions, `n` for a note,
-`Enter` to save and go to the next trial, `q` to quit. (In a non-terminal — piped
-or CI — it falls back to line prompts.) Every trial is rated **1–5 on five
-dimensions** (no skipping):
-
-| dimension | question |
-|---|---|
-| **Correctness** | is the output actually right? (pass/fail derives from this, ≥3 = pass) |
-| **Efficiency** | did it get there without wasted rounds/tokens? |
-| **Tool use** | right tools, valid args, recovers from errors? (`n/a` for `turn`) |
-| **Grounding** | used the real repo/context vs hallucinating? (moves when context features work) |
-| **Instruction following** | obeyed task constraints + output format? |
-
-`flows eval report` shows per-dimension means as a `C/E/T/G/I` column.
-
-Results persist under `~/.flows/eval/` (an append-only `results.jsonl` plus a
-`trials/<id>/` dir per trial). `flows eval report` reads that store — no model
-calls — so comparison is offline and accumulates across runs. Each trial dir holds:
-
-- `output.md` — the response (turn) or the produced artifacts + repo diff (phase/flow),
-- `transcript.txt` — the exact context the model saw **and** its response. For a
-  **turn**, the system + prompt + completion. For **phase/flow**, the assembled
-  prompt every round (system, tools, the new input + tool results, and each
-  response) — so you can see how context grows and which tools the model picked.
-  `flows eval review` prints it,
-- `run-log.jsonl` — for phase/flow, the run's per-round token/cost/latency trace.
-
-The phase/flow transcript is written by the agent loop when `FLOWS_TRANSCRIPT` is
-set (the eval harness sets it automatically); normal `flows run` invocations are
-unaffected. You can set `FLOWS_TRANSCRIPT=1` yourself to capture any run's prompts
-to `~/.flows/runs/<id>/transcript.txt`. This is the yardstick the
-upcoming context-delivery features (search, repo map, retrieval) will be measured
-against, so you can decide what actually helps *your* model on *your* code.
+**Update:** `git pull && cargo install --path crates/flows-cli --locked`.
+**Uninstall:** `cargo uninstall flows-cli`.
 
 ---
 
-## How it works
+## Configure
 
-A **template** defines a pipeline of **phases**:
+Global config lives in `~/.flows/config.yml`; a per-project `.flows.yml` overrides
+it. A minimal local setup:
 
-- **agent** — an LLM tool loop. Tools are opt-in per phase: `files` (read/write/list/make_dir, repo-scoped), `bash` (sandboxed, allowlisted), `http_get` (SSRF-guarded), `web_search` (DuckDuckGo), and `plugin` commands. The agent sees a gitignore-aware repo tree and can ask clarifying questions.
-- **script** — a trusted shell command (e.g. `lint`, `test`). Runs directly (no LLM), captures output. Supports the `@auto:*` resolvers below.
-- **human** — a review gate; approve or send feedback. Supports `auto_advance`.
+```yaml
+llm:
+  model: qwen2.5-coder
+  api_base: http://localhost:8080/v1
+max_cost_usd: 0.0        # 0 = no cap (local is free)
+```
 
-Phases can **loop back** on a condition (bounded by `max_loop_iterations`), **retry** on failure, and run as a **DAG** via `depends_on`. Shipped templates: `feature`, `software`, `research`, `review`, `blank`. Copy any to `.flows.yml` (or `~/.flows/templates/`) and customize; edit the synced prompts in `~/.flows/prompts/` to change agent instructions.
-
-Every run writes to `~/.flows/runs/<id>/`: `state.json`, `meta.json`, `artifacts/*.yml`, `llm.jsonl` (usage/cost), and `output.log` (the live token stream).
+The provider is chosen by model name (`claude*` → Anthropic; else OpenAI-compatible,
+which llama.cpp speaks). See **[docs/configuration.md](./docs/configuration.md)** for
+per-phase model profiles, no-tool models, the `web_search` / `searxng` / `lookup`
+tools, and context-delivery features for small models.
 
 ---
 
-## Template & configuration reference
+## Documentation
 
-A template (`.flows.yml`, or a file in `~/.flows/templates/`) is YAML with an
-optional `llm:` block and a list of `phases:`.
-
-```yaml
-template: feature          # optional label
-llm:                       # optional per-template model override
-  model: claude-sonnet-4-6
-phases:
-  - name: plan
-    type: agent
-    ...
-```
-
-### Common phase fields (all types)
-
-| field | default | meaning |
-|---|---|---|
-| `name` | *(required)* | phase id (used by `loop_back_to`, `depends_on`, `retry:`) |
-| `type` | `agent` | `agent` \| `script` \| `human` |
-| `on_failure` | `stop` | `stop` · `continue` · `retry:<phase>` (jump back to `<phase>`) |
-| `depends_on` | `[]` | phases that must finish first — presence of any turns the pipeline into a **DAG** (parallel) |
-| `loop_back_to` | — | phase to jump back to when `loop_condition` is true |
-| `loop_condition` | — | MiniJinja expression over `content` (the phase's artifact); loop while true |
-| `max_loop_iterations` | `3` | cap on `loop_back_to` iterations |
-
-### `agent` phase
-
-| field | default | meaning |
-|---|---|---|
-| `tools` | `files` | tool set — a preset name or an inline map (below) |
-| `model` | *(from llm)* | override the model for this phase |
-| `thinking` | *(from llm)* | enable extended thinking/reasoning |
-| `prompt` | *(builtin)* | prompt override: a repo-relative `.md` path or a builtin key |
-| `max_clarification_rounds` | `3` | rounds allowed for asking questions |
-| `max_tool_rounds` | `20` | rounds allowed for tool use |
-
-**Tool presets:** `files` · `files_and_test` · `files_and_deps` · `research` (http+search) · `research_ro` (read-only research) · `research_and_code` · `all`. Or configure inline:
-
-```yaml
-tools:
-  files: true              # read_file / write_file / list_files / make_dir (repo-scoped)
-  # read_only: true          # withhold write_file / make_dir (plan/review phases)
-  bash:                    # sandboxed shell (bwrap/seatbelt)
-    allowed: ["make*", "cargo*"]   # fnmatch allowlist
-    # unrestricted: true            # allow any command (still sandboxed)
-  http_get: true           # GET public URLs (SSRF-guarded)
-  web_search: true         # DuckDuckGo
-  plugins: ["my_tool"]     # custom plugin tools from ~/.flows/plugins
-```
-
-### `script` phase
-
-| field | meaning |
-|---|---|
-| `command` | shell command; `{{ idea }}` is substituted (MiniJinja). Runs directly, not via the LLM. |
-
-**`@auto` resolvers** — resolved in Rust at run time (no tokens): prefer a `make`
-target, else the language's tool; **the run stops if no tool is detectable**.
-
-```yaml
-- name: test
-  type: script
-  command: "@auto:test"        # make test → cargo test / pytest / npm run test / go test / …
-  on_failure: retry:implement  # a real test failure loops back; an unresolvable tool stops the run
-- name: lint
-  type: script
-  command: "@auto:lint"        # make lint → cargo clippy / ruff / npm run lint / go vet / …
-```
-
-### `human` phase
-
-| field | default | meaning |
-|---|---|---|
-| `instructions` | *(generic)* | text shown at the gate |
-| `auto_advance` | `false` | skip the interactive gate (proceed automatically) |
-
-At a human gate you press **Enter** to approve or type feedback; feedback is
-available to a `loop_condition` (e.g. `content.get('answer','').strip() not in ('','yes','approved')`).
-
-### Loop conditions & the `{{ idea }}` var
-
-- `loop_condition` and `script` commands are **MiniJinja** (Jinja-compatible). Python idioms resolve natively: `.get('k')`, `.get('k', default)`, `.strip()`, `.startswith(...)`, `x in (...)`, and the `tojson` filter.
-- `content` in a `loop_condition` is the phase's artifact content (a map).
-- `{{ idea }}` (the run's idea text) is available in `script` commands.
-
----
-
-## Agent prompt templates
-
-An agent's system prompt is a MiniJinja template. Lookup order (first match wins):
-`<repo>/.flows/prompts/<template>/<phase>.md` → `~/.flows/prompts/<template>/<phase>.md`
-→ builtin. `flows templates sync` writes the builtins to `~/.flows/prompts/` so you can edit them.
-
-**Variables available in a prompt:**
-
-| variable | value |
-|---|---|
-| `idea` | the run's idea / task text |
-| `repo_tree` | gitignore-aware file tree of the repo (vendor dirs skipped) |
-| `phase_name` | the current phase's name |
-| `prior_artifacts` | map of `{phase_name: artifact}` for all completed phases |
-| `<phase_name>` | each prior artifact is also exposed by its own name (e.g. `{{ plan.content.summary }}`) |
-
-Same MiniJinja idioms as above (`.get`, `.strip`, `tojson`, …).
-
-**`AGENTS.md`** — the cross-tool convention for repo instructions. If present,
-`~/.flows/AGENTS.md` (global) and `<repo>/AGENTS.md` (project, wins) are appended
-to **every** agent's system prompt. Use it for house rules like *"run all tooling
-through `make`."*
-
----
-
-## Security model
-
-- **Shell sandbox** (`bash`, `plugin`): whole filesystem read-only, repo + a private `/tmp` writable, host environment cleared (no API keys leak into agent commands), namespaces isolated. **Fail-closed** — if no sandbox is available, these tools error rather than run unconfined. Backends: bubblewrap (Linux), Seatbelt (macOS).
-- **File tools**: resolved and confined under the repo root; `../` traversal, absolute paths, and symlink escapes are rejected, and the target is opened `O_NOFOLLOW` to defeat symlink races.
-- **Network**: `http_get`/`web_search` block private, loopback, link-local, CGNAT, and IPv4-mapped-IPv6 addresses (cloud metadata endpoints included), re-validating on every redirect hop.
-- **Shell network**: the `bash` tool rejects ad-hoc network — raw clients (`curl`/`wget`/`nc`/`ssh`/…) and inline interpreter eval (`python -c`, `node -e`, piping/heredoc into an interpreter) — so an agent command can't bypass the SSRF-guarded tools. Dependency managers (`pip`/`cargo`/`npm`/`go`) still fetch deps; a trusted `script` phase (not gated) can run a raw network command if you truly need one.
-- **Cost**: `max_cost_usd` caps spend; the run stops when exceeded.
-
-> Note: the sandbox itself keeps network up (so builds can fetch dependencies), so the shell-network *denylist* above is a defense-in-depth speed-bump, not an airtight boundary — a `make` recipe or a malicious dependency can still reach the network transitively. Host-level egress filtering (allowlist package registries only) is a planned follow-up; disable the `bash` tool for a phase if you need hard isolation today.
+- **[Configuration](./docs/configuration.md)** — models, per-phase profiles, search
+  & lookup tools, SearXNG, context delivery.
+- **[Templates, phases & prompts](./docs/templates.md)** — the pipeline format,
+  phase fields, tool presets, prompt variables.
+- **[Benchmarking (`flows eval`)](./docs/eval.md)** — measure how well a model
+  drives the agent loop.
+- **[Architecture & security](./docs/architecture.md)** — how a run works, crate
+  layout, the sandbox + network model.
 
 ---
 
 ## Development
 
-```
-crates/
-  flows-core     config, state store, templates, pricing, usage, detection
-  flows-tools    files, sandbox (bwrap/seatbelt), bash, plugin, http, search
-  flows-llm      provider trait + Anthropic / OpenAI translation & streaming
-  flows-runner   phases, agent tool loop, prompts, pipeline (linear + DAG)
-  flows-tui      ratatui launcher, run view, attach view
-  flows-cli      the `flows` binary
-```
+Use the `make` targets (the agent flows + `AGENTS.md` expect `make`, not bare cargo):
 
 ```bash
-cargo test               # full suite
-cargo clippy --all-targets -- -D warnings
-cargo fmt --all --check
+make check     # fmt-check + lint + test (the full gate)
+make test      # cargo test --workspace
+make lint      # clippy, warnings denied
+make fmt       # format
+make build     # build the workspace
+make install   # install the flows CLI to ~/.cargo/bin
 ```
 
-CI runs fmt + clippy (deny warnings) + tests on every push.
+Crate layout and internals: **[docs/architecture.md](./docs/architecture.md)**.

@@ -29,8 +29,12 @@ pub trait Source: Send + Sync {
     /// One-line description for the tool schema / `tools_list`.
     fn describe(&self) -> &'static str;
     /// Run the query, returning normalized hits (most-relevant first).
-    async fn search(&self, client: &reqwest::Client, query: &str, max: usize)
-        -> ToolResult<Vec<Hit>>;
+    async fn search(
+        &self,
+        client: &reqwest::Client,
+        query: &str,
+        max: usize,
+    ) -> ToolResult<Vec<Hit>>;
 }
 
 /// The registered sources. **Add a provider here** to extend the tool.
@@ -157,7 +161,12 @@ impl Source for CratesIo {
         )
         .await?;
         let mut hits = Vec::new();
-        for cr in v.get("crates").and_then(Value::as_array).into_iter().flatten() {
+        for cr in v
+            .get("crates")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let name = s(cr, "name");
             let ver = cr
                 .get("max_stable_version")
@@ -203,7 +212,12 @@ impl Source for DocsRs {
         )
         .await?;
         let mut hits = Vec::new();
-        for cr in v.get("crates").and_then(Value::as_array).into_iter().flatten() {
+        for cr in v
+            .get("crates")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let name = s(cr, "name");
             if name.is_empty() {
                 continue;
@@ -248,9 +262,17 @@ impl Source for StackExchange {
         )
         .await?;
         let mut hits = Vec::new();
-        for it in v.get("items").and_then(Value::as_array).into_iter().flatten() {
+        for it in v
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             let score = it.get("score").and_then(Value::as_i64).unwrap_or(0);
-            let answered = it.get("is_answered").and_then(Value::as_bool).unwrap_or(false);
+            let answered = it
+                .get("is_answered")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let tags = it
                 .get("tags")
                 .and_then(Value::as_array)
@@ -306,45 +328,12 @@ impl Source for Wikipedia {
         for it in arr.into_iter().flatten() {
             let title = s(it, "title");
             hits.push(Hit {
-                url: format!(
-                    "https://en.wikipedia.org/wiki/{}",
-                    title.replace(' ', "_")
-                ),
+                url: format!("https://en.wikipedia.org/wiki/{}", title.replace(' ', "_")),
                 snippet: strip_html(&s(it, "snippet")),
                 title,
             });
         }
         Ok(hits)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn registry_exposes_every_source() {
-        let ids = source_ids();
-        for expected in ["crates_io", "docs_rs", "stackexchange", "wikipedia", "github"] {
-            assert!(ids.contains(&expected), "missing source {expected}");
-        }
-        // Catalog lists each id.
-        let cat = source_catalog();
-        for id in &ids {
-            assert!(cat.contains(id), "catalog missing {id}");
-        }
-    }
-
-    #[tokio::test]
-    async fn unknown_source_errors_without_network() {
-        let err = lookup("nope", "q", 5).await.unwrap_err();
-        assert!(err.0.contains("unknown source"), "{}", err.0);
-        assert!(err.0.contains("crates_io"), "should list options: {}", err.0);
-    }
-
-    #[test]
-    fn strip_html_decodes_entities() {
-        assert_eq!(strip_html("<b>Bevy</b> &amp; ECS"), "Bevy & ECS");
     }
 }
 
@@ -386,8 +375,16 @@ impl Source for GitHub {
         let v: Value =
             serde_json::from_str(&text).map_err(|e| ToolError::new(format!("bad JSON: {e}")))?;
         let mut hits = Vec::new();
-        for it in v.get("items").and_then(Value::as_array).into_iter().flatten() {
-            let stars = it.get("stargazers_count").and_then(Value::as_i64).unwrap_or(0);
+        for it in v
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let stars = it
+                .get("stargazers_count")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
             hits.push(Hit {
                 title: s(it, "full_name"),
                 url: s(it, "html_url"),
@@ -395,5 +392,44 @@ impl Source for GitHub {
             });
         }
         Ok(hits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_exposes_every_source() {
+        let ids = source_ids();
+        for expected in [
+            "crates_io",
+            "docs_rs",
+            "stackexchange",
+            "wikipedia",
+            "github",
+        ] {
+            assert!(ids.contains(&expected), "missing source {expected}");
+        }
+        let cat = source_catalog();
+        for id in &ids {
+            assert!(cat.contains(id), "catalog missing {id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_source_errors_without_network() {
+        let err = lookup("nope", "q", 5).await.unwrap_err();
+        assert!(err.0.contains("unknown source"), "{}", err.0);
+        assert!(
+            err.0.contains("crates_io"),
+            "should list options: {}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn strip_html_decodes_entities() {
+        assert_eq!(strip_html("<b>Bevy</b> &amp; ECS"), "Bevy & ECS");
     }
 }

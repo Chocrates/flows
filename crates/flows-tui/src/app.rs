@@ -188,7 +188,10 @@ impl RunnerCallbacks for ChannelCallbacks {
         });
     }
     fn on_phase_start(&self, phase: &str, index: usize, total: usize) {
-        self.log("m", &format!("━━ phase {}/{}: {phase} ━━", index + 1, total));
+        self.log(
+            "m",
+            &format!("━━ phase {}/{}: {phase} ━━", index + 1, total),
+        );
         self.send(UiEvent::PhaseStart {
             name: phase.into(),
             index,

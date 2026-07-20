@@ -79,6 +79,6 @@ fn parse_searxng_maps_results() {
     assert_eq!(out[0]["title"], "Bevy");
     assert_eq!(out[0]["url"], "https://bevyengine.org");
     assert_eq!(out[0]["snippet"], "A game engine"); // content → snippet
-    // respects max
+                                                    // respects max
     assert_eq!(parse_searxng(&body, 1).len(), 1);
 }

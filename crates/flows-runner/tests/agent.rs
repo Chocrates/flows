@@ -7,8 +7,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::Map;
 
-use flows_core::models::{ContextConfig, WebSearchConfig};
 use flows_core::models::{BashConfig, LLMConfig, PhaseConfig, ToolsConfig};
+use flows_core::models::{ContextConfig, WebSearchConfig};
 use flows_llm::types::{Completion, CompletionRequest, LlmError, ToolCall, Usage};
 use flows_llm::Provider;
 use flows_runner::agent::{parse_response, run_agent_phase, AgentCallbacks, NoopCallbacks};

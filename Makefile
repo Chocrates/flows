@@ -1,6 +1,6 @@
 # Standard tooling entrypoints for this Rust workspace. Agent flows (and the
 # AGENTS.md policy) expect `make <target>` rather than bare cargo invocations.
-.PHONY: test lint fmt fmt-check build check dev install
+.PHONY: test lint fmt fmt-check build check install
 
 # Build + install the `flows` CLI to ~/.cargo/bin (quiet).
 install:
@@ -23,6 +23,3 @@ build:
 
 # Full gate: format, lint, test.
 check: fmt-check lint test
-
-dev:
-	@echo "No dev server for this workspace."

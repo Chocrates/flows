@@ -100,7 +100,8 @@ fn push_output_line(app: &mut App, line: &str) {
                 "s" => app.output.push_line(Category::System, x.to_string()),
                 "m" => app.output.push_line(Category::Meta, x.to_string()),
                 "u" => {
-                    app.output.push_line(Category::Meta, "── user ──".to_string());
+                    app.output
+                        .push_line(Category::Meta, "── user ──".to_string());
                     for line in x.lines() {
                         app.output.push_line(Category::Meta, line.to_string());
                     }

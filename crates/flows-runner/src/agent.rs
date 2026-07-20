@@ -937,9 +937,7 @@ your context small.",
     // Show an up-front context-size estimate so the token count isn't blank while
     // the first (often largest) request is in flight. Replaced by the provider's
     // exact `usage.input_tokens` once the response lands.
-    callbacks.on_context(
-        crate::budget::estimate_request_tokens(&system_prompt, &messages) as u64,
-    );
+    callbacks.on_context(crate::budget::estimate_request_tokens(&system_prompt, &messages) as u64);
     let max_tool_rounds = phase.max_tool_rounds.unwrap_or(MAX_TOOL_ROUNDS);
     let total_rounds = phase.max_clarification_rounds + max_tool_rounds;
 
@@ -1143,17 +1141,16 @@ your context small.",
                     continue;
                 }
 
-                let result =
-                    dispatch_tool(
-                        &tc.name,
-                        &args,
-                        &phase.tools,
-                        context,
-                        web_search_cfg,
-                        repo_root,
-                        flows_dir,
-                    )
-                        .await;
+                let result = dispatch_tool(
+                    &tc.name,
+                    &args,
+                    &phase.tools,
+                    context,
+                    web_search_cfg,
+                    repo_root,
+                    flows_dir,
+                )
+                .await;
                 let (summary, is_error) = summarize_tool_result(&result);
                 callbacks.on_tool_result(&tc.name, &summary, is_error);
                 // Track search productivity: a search with no result URL (empty or

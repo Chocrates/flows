@@ -146,7 +146,9 @@ fn up() -> Result<(), String> {
     if !status.success() {
         return Err(format!("{engine} run exited {status}"));
     }
-    println!("SearXNG up at http://localhost:{HOST_PORT}  (first start pulls the image + warms up)");
+    println!(
+        "SearXNG up at http://localhost:{HOST_PORT}  (first start pulls the image + warms up)"
+    );
     print_config_hint()
 }
 

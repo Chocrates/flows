@@ -256,6 +256,11 @@ enum TemplatesCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Scaffold a new, heavily-commented template in ~/.flows/templates.
+    New {
+        /// Template name (alphanumeric, dashes/underscores ok).
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -310,6 +315,7 @@ fn main() -> ExitCode {
         Command::Templates { command } => match command {
             TemplatesCmd::List => cmd_templates_list(),
             TemplatesCmd::Sync { force } => cmd_templates_sync(force),
+            TemplatesCmd::New { name } => cmd_templates_new(&name),
         },
         Command::Config { command } => match command {
             ConfigCmd::Show => cmd_config_show(),
@@ -723,6 +729,93 @@ fn cmd_templates_sync(force: bool) -> Result<(), String> {
     if (skipped > 0 || ps > 0) && !force {
         println!("  (some already present — use --force to overwrite)");
     }
+    Ok(())
+}
+
+/// A heavily-commented starter template — one of each phase type, every common
+/// field annotated, so a new author can learn the format by editing it.
+const SKELETON_TEMPLATE: &str = r#"# ~/.flows/templates/__NAME__.yml — a flows template.
+#
+# A template is a pipeline of phases, run top to bottom. Run this one with:
+#   flows run "your idea here" --template __NAME__
+# Preview it first (no LLM calls):
+#   flows plan "your idea here" --template __NAME__
+#
+# Full reference: docs/templates.md. Delete the phases you don't want.
+template: __NAME__
+
+# Optional: pin a model for this whole template. Omit to use ~/.flows/config.yml.
+# llm:
+#   model: qwen3-coder
+
+phases:
+  # --- agent: an LLM tool loop over your repo --------------------------------
+  - name: plan
+    type: agent
+    tools: research_ro            # read-only: read_file/list_files + web + lookup, no writes
+    max_clarification_rounds: 3   # questions it may ask YOU (0 = never ask; hands-off)
+    # model: reasoner             # per-phase model override (a profile from `models:`)
+    # prompt: __NAME__/plan.md    # custom prompt file (else a sensible builtin is used)
+
+  # --- human: a review gate; Enter approves, or type feedback ----------------
+  - name: approve_plan
+    type: human
+    instructions: "Review the plan. Press Enter to approve, or type feedback to revise."
+    loop_back_to: plan            # feedback jumps back to `plan`
+    loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'yes', 'approve', 'approved')"
+    max_loop_iterations: 5
+
+  # --- agent that writes code -------------------------------------------------
+  - name: implement
+    type: agent
+    tools: research_and_code      # write files + build/test bash + web_search + lookup
+    max_clarification_rounds: 0   # hands-off: don't ask, just build
+    max_tool_rounds: 200          # room for a long build/edit/fix loop
+    on_failure: stop              # stop | continue | retry:<phase>
+
+  # --- script: a trusted shell command (no LLM, output captured) -------------
+  - name: test
+    type: script
+    command: "@auto:test"         # auto-detects: make test / cargo test / pytest / npm / go
+    on_failure: retry:implement   # a real failure loops back to implement
+
+  # --- final human gate -------------------------------------------------------
+  - name: approve
+    type: human
+    instructions: "Review the result. Press Enter to accept, or type feedback."
+    loop_back_to: implement
+    loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'yes', 'approve', 'approved')"
+    max_loop_iterations: 5
+
+  # --- commit: {{ idea }} is the run's idea text -----------------------------
+  - name: commit
+    type: script
+    command: "git add -A && git commit -m 'feat: {{ idea[:60] }}'"
+    on_failure: continue
+"#;
+
+fn cmd_templates_new(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("template name must be alphanumeric (dashes/underscores allowed)".into());
+    }
+    let dir = flows_dir().join("templates");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{name}.yml"));
+    if path.exists() {
+        return Err(format!(
+            "{} already exists — pick another name or edit it directly",
+            path.display()
+        ));
+    }
+    std::fs::write(&path, SKELETON_TEMPLATE.replace("__NAME__", name))
+        .map_err(|e| e.to_string())?;
+    println!("Wrote {}", path.display());
+    println!("Edit it, then:  flows run \"your idea\" --template {name}");
     Ok(())
 }
 
