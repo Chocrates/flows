@@ -66,6 +66,14 @@ CI runs fmt + clippy (deny warnings) + tests on every push.
   commands), namespaces isolated. **Fail-closed** — if no sandbox is available,
   these tools error rather than run unconfined. Backends: bubblewrap (Linux),
   Seatbelt (macOS).
+- **Toolchains** work inside the sandbox without leaking secrets: `HOME=/tmp` hides
+  credential-bearing dotfiles (`~/.npmrc`, `~/.netrc`, cloud creds), so instead
+  flows passes through only *locator* env vars (where a toolchain / version manager
+  is installed — `RUSTUP_HOME`, `GOROOT`/`GOPATH`, `JAVA_HOME`, `NVM_DIR`,
+  `PYENV_ROOT`, `SDKMAN_DIR`, …) and redirects each ecosystem's cache
+  (cargo/go/npm/pip/gradle/maven) to a persistent writable dir
+  (`~/.cache/flows/toolcache`) bound into the sandbox. Builds resolve their
+  compiler and reuse downloaded dependencies across calls.
 - **File tools**: resolved and confined under the repo root; `../` traversal,
   absolute paths, and symlink escapes are rejected, and the target is opened
   `O_NOFOLLOW` to defeat symlink races.

@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use super::{minimal_env, which, Sandbox};
+use super::{minimal_env, tool_cache_dir, which, Sandbox};
 
 pub struct BwrapSandbox;
 
@@ -57,6 +57,14 @@ impl Sandbox for BwrapSandbox {
         .iter()
         .map(|s| s.to_string())
         .collect();
+
+        // Persistent, writable toolchain cache (cargo registry, go/npm/pip/gradle/…
+        // caches) so sandboxed builds survive the fresh-`/tmp`-per-call reset. Bound
+        // read-write over the read-only root bind (later binds win).
+        let cache = tool_cache_dir().to_string_lossy().into_owned();
+        argv.push("--bind".into());
+        argv.push(cache.clone());
+        argv.push(cache);
 
         for (k, v) in minimal_env() {
             argv.push("--setenv".into());
