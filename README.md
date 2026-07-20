@@ -124,7 +124,7 @@ Reattach with `flows attach <id>` (or pick it from `flows`). Stop a run with
 | Command | Description |
 |---|---|
 | `flows` | Interactive launcher — recent runs + new run, live attach |
-| `flows run "<idea>" [--tui] [--background]` | Run a pipeline. `--tui` = live view (detaches on `q`) |
+| `flows run "<idea>" [--tui] [--background] [-C DIR]` | Run a pipeline. `--tui` = live view (detaches on `q`); `-C/--directory DIR` targets another project (like `git -C`) |
 | `flows attach <id>` | Reattach to a run: phases, live output, cost, answer prompts |
 | `flows stop <id>` | Cancel a run and kill its worker (keeps the run + output) |
 | `flows plan "<idea>"` | Validate config; show the execution plan + cost estimate (no LLM) |

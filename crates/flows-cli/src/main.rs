@@ -71,6 +71,9 @@ enum Command {
         /// Template to use (defaults to project config or `feature`).
         #[arg(long)]
         template: Option<String>,
+        /// Change to this directory first (default: current directory).
+        #[arg(long = "directory", short = 'C', value_name = "DIR")]
+        directory: Option<String>,
     },
     /// Run a pipeline against the configured model.
     Run {
@@ -79,6 +82,10 @@ enum Command {
         /// Template to use (defaults to project config or `feature`).
         #[arg(long)]
         template: Option<String>,
+        /// Change to this directory first, like `git -C` (default: current
+        /// directory) — launch from anywhere but operate on another project.
+        #[arg(long = "directory", short = 'C', value_name = "DIR")]
+        directory: Option<String>,
         /// Run in the full-screen TUI instead of plain foreground output.
         #[arg(long)]
         tui: bool,
@@ -321,13 +328,24 @@ fn main() -> ExitCode {
             ConfigCmd::Show => cmd_config_show(),
             ConfigCmd::Set { key, value } => cmd_config_set(&key, &value),
         },
-        Command::Plan { idea, template } => cmd_plan(&idea.join(" "), template.as_deref()),
+        Command::Plan {
+            idea,
+            template,
+            directory,
+        } => cmd_plan(&idea.join(" "), template.as_deref(), directory.as_deref()),
         Command::Run {
             idea,
             template,
+            directory,
             tui,
             background,
-        } => cmd_run(&idea.join(" "), template.as_deref(), tui, background),
+        } => cmd_run(
+            &idea.join(" "),
+            template.as_deref(),
+            directory.as_deref(),
+            tui,
+            background,
+        ),
         Command::Runs => cmd_runs(),
         Command::Stop { run_id } => cmd_stop(&run_id),
         Command::Searxng { action } => searxng::cmd(&action),
@@ -912,11 +930,26 @@ fn default_project() -> ProjectConfig {
     }
 }
 
-fn cmd_plan(idea: &str, template: Option<&str>) -> Result<(), String> {
+/// Resolve the target directory: `-C/--directory` if given (canonicalized, must be
+/// an existing directory), else the current working directory.
+fn resolve_repo_dir(dir: Option<&str>) -> Result<PathBuf, String> {
+    match dir {
+        None => std::env::current_dir().map_err(|e| e.to_string()),
+        Some(p) => {
+            let path = std::fs::canonicalize(p).map_err(|e| format!("-C {p:?}: {e}"))?;
+            if !path.is_dir() {
+                return Err(format!("-C {p:?} is not a directory"));
+            }
+            Ok(path)
+        }
+    }
+}
+
+fn cmd_plan(idea: &str, template: Option<&str>, repo: Option<&str>) -> Result<(), String> {
     if idea.trim().is_empty() {
         return Err("provide an idea, e.g. `flows plan \"add a feature\"`".into());
     }
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = resolve_repo_dir(repo)?;
     let (phases, global, project, template_name) = resolve(&cwd, template)?;
 
     let report = dry_run(idea, &phases, &template_name, &global, &project, &cwd);
@@ -1204,11 +1237,17 @@ fn cmd_home() -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_run(idea: &str, template: Option<&str>, tui: bool, background: bool) -> Result<(), String> {
+fn cmd_run(
+    idea: &str,
+    template: Option<&str>,
+    repo: Option<&str>,
+    tui: bool,
+    background: bool,
+) -> Result<(), String> {
     if idea.trim().is_empty() {
         return Err("provide an idea, e.g. `flows run \"add a feature\"`".into());
     }
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let cwd = resolve_repo_dir(repo)?;
     let (phases, global, project, template_name) = resolve(&cwd, template)?;
 
     let llm = merge_llm(&global, &project);
