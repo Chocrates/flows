@@ -276,6 +276,49 @@ async fn degenerate_tool_loop_aborts() {
 }
 
 #[tokio::test]
+async fn noop_write_loop_aborts() {
+    // Model writes the same file with identical content every round. The first
+    // write lands new content; every write after is a byte-for-byte no-op — the
+    // error/no-write guards can't see it (the write "succeeds"), so the no-op
+    // guard must catch it and abort with a loop-detected error.
+    let d = tempfile::tempdir().unwrap();
+    let w = tool("write_file", r#"{"path": "Cargo.toml", "content": "[workspace]"}"#);
+    let provider = Mock::new(vec![
+        w.clone(),
+        w.clone(),
+        w.clone(),
+        w.clone(),
+        w.clone(),
+        w.clone(),
+        w.clone(),
+        w.clone(),
+        w.clone(),
+        w,
+    ]);
+    let art = run_agent_phase(
+        &files_phase(),
+        "idea",
+        d.path(),
+        &empty_artifacts(),
+        "feature",
+        &LLMConfig::default(),
+        &provider,
+        &NoopCallbacks,
+        None,
+        &ContextConfig::default(),
+        &WebSearchConfig::default(),
+        0.0,
+        0.0,
+        None,
+    )
+    .await
+    .artifact;
+    let err = art.content["error"].as_str().unwrap();
+    assert!(err.contains("aborted"), "unexpected error: {err}");
+    assert!(err.contains("loop detected"), "unexpected error: {err}");
+}
+
+#[tokio::test]
 async fn cost_cap_aborts() {
     let provider = Mock::new(vec![artifact_json(r#"{"x": 1}"#)]);
     let art = run_agent_phase(

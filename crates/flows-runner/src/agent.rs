@@ -166,6 +166,14 @@ const MAX_ROUNDS_WITHOUT_PROGRESS: u32 = 30;
 /// DuckDuckGo backend gets rate-limited and returns empty/errors, which don't
 /// count as tool *failures* — so a model hunting docs can otherwise spin forever.
 const MAX_DRY_SEARCHES: u32 = 6;
+/// Consecutive rounds whose only `write_file` was a *no-op* (content byte-for-byte
+/// identical to what's already on disk) before we nudge the model to move on. A
+/// stuck model rewriting an unchanged file writes "successfully" every round, so
+/// the error/no-write guards never trip — this catches it.
+const NUDGE_AFTER_NOOP_WRITES: u32 = 3;
+/// If no-op writes keep coming after the nudge, abort the phase once the streak
+/// reaches this — the model is wedged in a rewrite loop and won't recover.
+const ABORT_AFTER_NOOP_WRITES: u32 = 6;
 /// Most-recent messages budgeting never trims (keeps the live turn coherent).
 const BUDGET_RECENT_KEEP: usize = 4;
 
@@ -956,6 +964,9 @@ your context small.",
     let can_write = phase.tools.files && !phase.tools.read_only;
     let mut has_written = false;
     let mut rounds_without_write = 0u32;
+    // Consecutive rounds whose only write was a no-op (unchanged bytes); drives the
+    // nudge/abort loop guard below.
+    let mut noop_write_streak = 0u32;
 
     // Optional full-prompt transcript (what the model actually saw each round),
     // gated by `FLOWS_TRANSCRIPT` so normal runs aren't bloated. The eval harness
@@ -1118,9 +1129,25 @@ your context small.",
 
             let mut all_errored = true;
             let mut wrote_this_round = false;
+            let mut noop_write_this_round = false;
             for tc in &tool_calls {
                 let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
                 callbacks.on_tool_call(&tc.name, &summarize_tool_call(&tc.name, &args));
+
+                // Detect a no-op write up front: content byte-for-byte identical to
+                // what's already on disk. Such a write "succeeds" but makes no
+                // progress — don't let it reset the no-progress counter, and feed
+                // the loop guard below.
+                let noop_write = tc.name == "write_file"
+                    && match (
+                        args.get("path").and_then(Value::as_str),
+                        args.get("content").and_then(Value::as_str),
+                    ) {
+                        (Some(p), Some(c)) => {
+                            files::read_file(repo_root, p).map(|cur| cur == c).unwrap_or(false)
+                        }
+                        _ => false,
+                    };
 
                 // Search guard: once too many searches have come back empty/failed,
                 // stop dispatching them — tell the model to proceed on its own
@@ -1165,7 +1192,11 @@ your context small.",
                 if !is_error {
                     all_errored = false;
                     if tc.name == "write_file" {
-                        wrote_this_round = true;
+                        if noop_write {
+                            noop_write_this_round = true;
+                        } else {
+                            wrote_this_round = true;
+                        }
                     }
                 }
                 messages.push(Message::tool_result(tc.id.clone(), result));
@@ -1180,15 +1211,46 @@ your context small.",
                 rounds_without_write += 1;
             }
             if can_write && has_written && rounds_without_write >= MAX_ROUNDS_WITHOUT_PROGRESS {
+                let msg = format!(
+                    "aborted: no code written in {MAX_ROUNDS_WITHOUT_PROGRESS} tool rounds after \
+starting — likely stuck in a build/search loop"
+                );
+                callbacks.on_note(&format!("⛔ loop guard: {msg}"));
                 return AgentResult {
-                    artifact: error_artifact(
-                        &phase.name,
-                        idea,
-                        format!(
-                            "aborted: no code written in {MAX_ROUNDS_WITHOUT_PROGRESS} tool rounds \
-after starting — likely stuck in a build/search loop"
-                        ),
-                    ),
+                    artifact: error_artifact(&phase.name, idea, msg),
+                    cost_usd: phase_cost,
+                };
+            }
+
+            // No-op-write loop guard: a model rewriting a file whose bytes never
+            // change is wedged. Count consecutive rounds whose only write was a
+            // no-op; nudge the model once, then abort if it keeps spinning.
+            if wrote_this_round {
+                noop_write_streak = 0;
+            } else if noop_write_this_round {
+                noop_write_streak += 1;
+            } else {
+                noop_write_streak = 0;
+            }
+            if noop_write_streak == NUDGE_AFTER_NOOP_WRITES {
+                callbacks.on_note(
+                    "⚠ loop guard: same file rewritten unchanged repeatedly — nudging the model to move on",
+                );
+                messages.push(Message::user(
+                    "You have written the same file with identical content several rounds in a row; \
+                     it is unchanged on disk. Stop rewriting it. If your work for this phase is \
+                     complete, emit the final artifact now. Otherwise take a different action: build \
+                     or test the code, edit a different file, or write genuinely new content.",
+                ));
+            }
+            if noop_write_streak >= ABORT_AFTER_NOOP_WRITES {
+                let msg = format!(
+                    "aborted: stuck rewriting an unchanged file for {ABORT_AFTER_NOOP_WRITES} rounds \
+— loop detected"
+                );
+                callbacks.on_note(&format!("⛔ loop guard: {msg}"));
+                return AgentResult {
+                    artifact: error_artifact(&phase.name, idea, msg),
                     cost_usd: phase_cost,
                 };
             }
@@ -1210,15 +1272,13 @@ after starting — likely stuck in a build/search loop"
                 let names: BTreeMap<&str, ()> =
                     tool_calls.iter().map(|tc| (tc.name.as_str(), ())).collect();
                 let names: Vec<&str> = names.into_keys().collect();
+                let msg = format!(
+                    "aborted: tool call(s) [{}] failed identically {repeated_errors} rounds in a row without progress",
+                    names.join(", ")
+                );
+                callbacks.on_note(&format!("⛔ loop guard: {msg}"));
                 return AgentResult {
-                    artifact: error_artifact(
-                        &phase.name,
-                        idea,
-                        format!(
-                            "aborted: tool call(s) [{}] failed identically {repeated_errors} rounds in a row without progress",
-                            names.join(", ")
-                        ),
-                    ),
+                    artifact: error_artifact(&phase.name, idea, msg),
                     cost_usd: phase_cost,
                 };
             }
