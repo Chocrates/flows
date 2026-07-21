@@ -140,6 +140,32 @@ fn s(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
+/// crates.io `q=` is a full-text search, so a version baked into the query
+/// (`bevy 0.19.0`) drags in crates whose *description* mentions that version
+/// (e.g. `dear-imgui-bevy`) ahead of the crate itself. Keep the leading
+/// name tokens and drop the first version-like token and everything after it.
+fn crate_name_query(q: &str) -> String {
+    let is_versionish = |tok: &str| {
+        let t = tok.strip_prefix('v').unwrap_or(tok);
+        tok.eq_ignore_ascii_case("version")
+            || t.chars().next().is_some_and(|c| c.is_ascii_digit())
+    };
+    let kept: Vec<&str> = q.split_whitespace().take_while(|t| !is_versionish(t)).collect();
+    if kept.is_empty() {
+        q.trim().to_string()
+    } else {
+        kept.join(" ")
+    }
+}
+
+/// Stable-reorder so a crate whose name exactly matches `wanted` (case-insensitive)
+/// comes first — crates.io usually ranks it top once the version is stripped, but
+/// this guarantees the intended crate wins even on a fuzzy full-text response.
+fn exact_name_first(mut named: Vec<(String, Hit)>, wanted: &str) -> Vec<Hit> {
+    named.sort_by_key(|(name, _)| !name.eq_ignore_ascii_case(wanted));
+    named.into_iter().map(|(_, h)| h).collect()
+}
+
 // -- sources -----------------------------------------------------------------
 
 /// crates.io — Rust crate search (name, description, version, docs link).
@@ -154,13 +180,14 @@ impl Source for CratesIo {
     }
     async fn search(&self, c: &reqwest::Client, q: &str, max: usize) -> ToolResult<Vec<Hit>> {
         let per = max.to_string();
+        let wanted = crate_name_query(q);
         let v = get_json(
             c,
             "https://crates.io/api/v1/crates",
-            &[("q", q), ("per_page", &per)],
+            &[("q", &wanted), ("per_page", &per)],
         )
         .await?;
-        let mut hits = Vec::new();
+        let mut named = Vec::new();
         for cr in v
             .get("crates")
             .and_then(Value::as_array)
@@ -181,13 +208,16 @@ impl Source for CratesIo {
                 .filter(|x| !x.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("https://docs.rs/{name}/latest/{name}/"));
-            hits.push(Hit {
-                title: format!("{name} {ver}"),
-                url,
-                snippet: s(cr, "description"),
-            });
+            named.push((
+                name.clone(),
+                Hit {
+                    title: format!("{name} {ver}"),
+                    url,
+                    snippet: s(cr, "description"),
+                },
+            ));
         }
-        Ok(hits)
+        Ok(exact_name_first(named, &wanted))
     }
 }
 
@@ -205,13 +235,14 @@ impl Source for DocsRs {
     }
     async fn search(&self, c: &reqwest::Client, q: &str, max: usize) -> ToolResult<Vec<Hit>> {
         let per = max.min(5).to_string();
+        let wanted = crate_name_query(q);
         let v = get_json(
             c,
             "https://crates.io/api/v1/crates",
-            &[("q", q), ("per_page", &per)],
+            &[("q", &wanted), ("per_page", &per)],
         )
         .await?;
-        let mut hits = Vec::new();
+        let mut named = Vec::new();
         for cr in v
             .get("crates")
             .and_then(Value::as_array)
@@ -222,17 +253,20 @@ impl Source for DocsRs {
             if name.is_empty() {
                 continue;
             }
-            hits.push(Hit {
-                title: format!("{name} — docs.rs"),
-                url: format!("https://docs.rs/{name}/latest/{name}/"),
-                snippet: format!(
-                    "Rust API docs for `{name}`. Fetch this URL with http_get to read item \
-                     signatures for the current version. {}",
-                    s(cr, "description")
-                ),
-            });
+            named.push((
+                name.clone(),
+                Hit {
+                    title: format!("{name} — docs.rs"),
+                    url: format!("https://docs.rs/{name}/latest/{name}/"),
+                    snippet: format!(
+                        "Rust API docs for `{name}`. Fetch this URL with http_get to read item \
+                         signatures for the current version. {}",
+                        s(cr, "description")
+                    ),
+                },
+            ));
         }
-        Ok(hits)
+        Ok(exact_name_first(named, &wanted))
     }
 }
 
@@ -431,5 +465,33 @@ mod tests {
     #[test]
     fn strip_html_decodes_entities() {
         assert_eq!(strip_html("<b>Bevy</b> &amp; ECS"), "Bevy & ECS");
+    }
+
+    #[test]
+    fn crate_name_query_strips_version() {
+        assert_eq!(crate_name_query("bevy 0.19.0"), "bevy");
+        assert_eq!(crate_name_query("bevy v0.19"), "bevy");
+        assert_eq!(crate_name_query("serde version 1.0"), "serde");
+        assert_eq!(crate_name_query("tokio"), "tokio");
+        // Multi-word names (before any version) are preserved.
+        assert_eq!(crate_name_query("async trait 0.1"), "async trait");
+        // A bare version query degrades to itself rather than empty.
+        assert_eq!(crate_name_query("0.19.0"), "0.19.0");
+    }
+
+    #[test]
+    fn exact_name_first_floats_match() {
+        let mk = |n: &str| {
+            (
+                n.to_string(),
+                Hit {
+                    title: n.into(),
+                    url: String::new(),
+                    snippet: String::new(),
+                },
+            )
+        };
+        let out = exact_name_first(vec![mk("dear-imgui-bevy"), mk("bevy")], "bevy");
+        assert_eq!(out[0].title, "bevy");
     }
 }

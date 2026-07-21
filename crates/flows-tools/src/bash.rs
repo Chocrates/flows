@@ -129,6 +129,21 @@ pub fn check_allowlist(command: &str, config: &BashConfig) -> ToolResult<()> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| executable.clone());
 
+    // `cd` is a shell builtin (never an executable on PATH), so the pattern
+    // allowlist can't match it — yet the agent needs it to build projects nested
+    // in a subdirectory (`cd sub && cargo build`). Permit it only with a relative
+    // target: an absolute path or `~` would point outside the sandboxed repo. A
+    // bare `cd` (→ $HOME) is likewise rejected.
+    if exe_name == "cd" {
+        let target = tokens.get(1).map(String::as_str).unwrap_or("");
+        if target.is_empty() || target.starts_with('/') || target.starts_with('~') {
+            return Err(ToolError::new(format!(
+                "cd is only allowed with a relative path inside the repo (got {target:?})"
+            )));
+        }
+        return Ok(());
+    }
+
     for pattern in &config.allowed {
         if fnmatch(command, pattern) || fnmatch(&exe_name, pattern) {
             return Ok(());

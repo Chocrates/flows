@@ -189,6 +189,8 @@ pub trait AgentCallbacks: Send + Sync {
     fn on_json(&self, _token: &str) {}
     /// Input tokens of the latest request (current context-window usage).
     fn on_context(&self, _input_tokens: u64) {}
+    /// Current tool-loop round and the phase's cap (for a `round N/T` readout).
+    fn on_round(&self, _round: u32, _total: u32) {}
     fn on_thinking(&self, _text: &str) {}
     /// The assembled system prompt for this phase (emitted once, at phase start).
     fn on_system(&self, _prompt: &str) {}
@@ -1028,6 +1030,8 @@ your context small.",
             messages.len(),
             crate::budget::estimate_request_tokens(&system_prompt, &messages),
         ));
+        // Persistent round readout for the status bar (round N / cap).
+        callbacks.on_round(round_num + 1, total_rounds);
         // Stream content tokens live, but suppress questions-envelope JSON via a
         // buffering filter. Reasoning is emitted once after the round (below), so
         // the thinking sink here is a no-op.
@@ -1381,6 +1385,12 @@ starting — likely stuck in a build/search loop"
         }
     }
 
+    // Exhausted the round budget without emitting an artifact — surface it in the
+    // output pane (the loop-guard aborts do the same) so a killed run isn't silent.
+    callbacks.on_note(&format!(
+        "⛔ max rounds exceeded: hit the {total_rounds}-round cap without finishing — \
+         raise max_tool_rounds or simplify the task"
+    ));
     AgentResult {
         artifact: error_artifact(&phase.name, idea, "max rounds exceeded"),
         cost_usd: phase_cost,

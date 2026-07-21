@@ -575,6 +575,8 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
+    check_web_search(&global);
+
     let info = detect_stack(&cwd);
     println!(
         "  project:   {} ({})",
@@ -585,6 +587,38 @@ fn cmd_doctor() -> Result<(), String> {
     let templates = list_templates(Some(&flows_dir().join("templates")), Some(&cwd));
     println!("  templates: {}", templates.join(", "));
     Ok(())
+}
+
+/// Doctor check for the web_search backend. Only `searxng` points at a
+/// self-hosted endpoint that can be down — `duckduckgo` (default) hits the public
+/// web and needs no local service — so we probe connectivity **only** when
+/// searxng is configured, using the same code path a run would.
+fn check_web_search(global: &GlobalConfig) {
+    let ws = &global.tools.web_search;
+    if ws.backend != "searxng" {
+        println!("  search:    {} (no connectivity check needed)", ws.backend);
+        return;
+    }
+    let base = ws.base_url.trim_end_matches('/');
+    if base.is_empty() {
+        println!("  search:    searxng  ⚠ no tools.web_search.base_url configured");
+        return;
+    }
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            println!("  search:    searxng {base}  ⚠ {e}");
+            return;
+        }
+    };
+    match rt.block_on(flows_tools::web_search("ping", ws)) {
+        Ok(_) => println!("  search:    searxng {base}  (reachable)"),
+        Err(e) => println!(
+            "  search:    searxng {base}  ⚠ {e}\n             \
+             start it (`flows searxng up`), or set \
+             tools.web_search.backend: duckduckgo in config.yml"
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,6 +1199,9 @@ impl RunnerCallbacks for Waiting {
     }
     fn on_context(&self, input_tokens: u64) {
         self.emit("ctx", &input_tokens.to_string());
+    }
+    fn on_round(&self, round: u32, total: u32) {
+        self.emit("round", &format!("{round}/{total}"));
     }
     fn on_cost(&self, total_usd: f64) {
         self.emit("cost", &total_usd.to_string());

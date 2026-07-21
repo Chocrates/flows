@@ -100,6 +100,23 @@ fn question_mark_wildcard() {
 }
 
 #[test]
+fn cd_relative_allowed() {
+    // `cd` is a builtin (never in the pattern list); a relative target is allowed
+    // so the agent can build a project nested in a subdirectory.
+    assert!(check_allowlist("cd freecell-rust", &allowed(&["cargo*"])).is_ok());
+    assert!(check_allowlist("cd freecell-rust && cargo build", &allowed(&["cargo*"])).is_ok());
+    assert!(check_allowlist("cd ../sibling", &allowed(&["cargo*"])).is_ok());
+}
+
+#[test]
+fn cd_absolute_or_bare_rejected() {
+    for cmd in ["cd /etc", "cd ~", "cd ~/secrets", "cd"] {
+        let err = check_allowlist(cmd, &allowed(&["cargo*"])).unwrap_err();
+        assert!(err.0.contains("relative path"), "should reject: {cmd}");
+    }
+}
+
+#[test]
 fn network_denylist_blocks_adhoc_network() {
     use flows_tools::bash::check_network;
     // raw clients

@@ -25,13 +25,24 @@ Tools: `read_file`, `write_file`, `list_files`, `make_dir`; `bash` (build/test);
 library APIs: **`lookup`**, `http_get`, `web_search`.
 
 **Before writing code against any external library, first verify its current API — do not code from
-memory, since versions drift.** Run `lookup(source="crates_io", query="<lib>")` to confirm the latest
-version, then `lookup(source="docs_rs", query="<lib>")` and `http_get` the returned docs.rs URL to read
-real signatures. Use `lookup(source="stackexchange")` or `lookup(source="github")` for usage examples,
-and `web_search` only as a fallback.
+memory, since versions drift.** Query by **crate name only — never include a version number** (search
+`query="bevy"`, not `query="bevy 0.19.0"`; a version in the query returns the wrong crate). Steps:
+1. `lookup(source="crates_io", query="<crate>")` to confirm the crate exists and see its latest version.
+2. `lookup(source="docs_rs", query="<crate>")` to get the docs.rs URL, then **`http_get` that URL** and
+   read the real signatures — do not skip this step, it is how you get the correct API.
+3. If a result looks wrong (an unrelated crate), retry with just the bare crate name before giving up.
+
+Use `lookup(source="stackexchange")` or `lookup(source="github")` for usage examples, and `web_search`
+only as a fallback. If you cannot verify an API, state the assumption in a comment rather than guessing
+silently — but exhaust `lookup`/`http_get` first.
 
 Implement all files in the design.
 Follow existing conventions. Implement completely — no stubs or TODOs.
+
+**Create files at the repo root shown above — do not nest the project in a new
+subdirectory.** The build, lint, and test steps run from the repo root, so a
+`Cargo.toml` (or equivalent manifest) placed in a subfolder won't be found and the
+build will fail.
 
 When done, finish the phase by **returning this JSON as your reply message** — the
 plain text of your response, with no tool call. Do **not** write it to a file (no

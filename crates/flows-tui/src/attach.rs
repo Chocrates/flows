@@ -110,6 +110,7 @@ fn push_output_line(app: &mut App, line: &str) {
                 "ctx" => app.context_tokens = x.parse().unwrap_or(0),
                 "cost" => app.total_cost = x.parse().unwrap_or(0.0),
                 "cw" => app.context_window = x.parse().ok(),
+                "round" => app.round = x.to_string(),
                 _ => app.output.push_token(Category::Normal, x),
             }
         }

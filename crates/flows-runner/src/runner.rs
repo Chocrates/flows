@@ -64,6 +64,8 @@ pub trait RunnerCallbacks: Send + Sync {
     fn on_cost(&self, _total_usd: f64) {}
     /// Input tokens of the latest request (current context-window usage).
     fn on_context(&self, _input_tokens: u64) {}
+    /// Current tool-loop round and the phase's cap (for a `round N/T` readout).
+    fn on_round(&self, _round: u32, _total: u32) {}
     fn on_tool_call(&self, _phase: &str, _name: &str, _summary: &str) {}
     fn on_tool_result(&self, _phase: &str, _name: &str, _summary: &str, _is_error: bool) {}
     fn on_phase_start(&self, _phase: &str, _index: usize, _total: usize) {}
@@ -97,6 +99,9 @@ impl AgentCallbacks for PhaseCb<'_> {
     }
     fn on_context(&self, input_tokens: u64) {
         self.cb.on_context(input_tokens);
+    }
+    fn on_round(&self, round: u32, total: u32) {
+        self.cb.on_round(round, total);
     }
     fn on_thinking(&self, t: &str) {
         self.cb.on_thinking(&self.phase, t);

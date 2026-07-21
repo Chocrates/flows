@@ -59,6 +59,10 @@ pub enum UiEvent {
     Context {
         input_tokens: u64,
     },
+    /// Current tool-loop round / cap, pre-formatted as `N/T`.
+    Round {
+        text: String,
+    },
     PhaseEnd {
         name: String,
     },
@@ -215,6 +219,11 @@ impl RunnerCallbacks for ChannelCallbacks {
         self.log("ctx", &input_tokens.to_string());
         self.send(UiEvent::Context { input_tokens });
     }
+    fn on_round(&self, round: u32, total: u32) {
+        let text = format!("{round}/{total}");
+        self.log("round", &text);
+        self.send(UiEvent::Round { text });
+    }
     fn on_cost(&self, total_usd: f64) {
         self.log("cost", &total_usd.to_string());
         self.send(UiEvent::Cost { total_usd });
@@ -250,6 +259,8 @@ pub struct App {
     pub context_tokens: u64,
     /// Model context window, if known (for a `12k/200k` display).
     pub context_window: Option<u64>,
+    /// Current tool-loop round / cap (`N/T`), empty until the first round.
+    pub round: String,
     output_area: Rect,
     dragging: bool,
     input: Option<InputState>,
@@ -269,6 +280,7 @@ impl App {
             total_cost: 0.0,
             context_tokens: 0,
             context_window: None,
+            round: String::new(),
             output_area: Rect::default(),
             dragging: false,
             input: None,
@@ -306,6 +318,7 @@ impl App {
                 self.phases.set_status(&name, PhaseStatus::Running);
                 self.output.push_line(Category::Meta, format!("▶ {name}"));
                 self.status = format!("running {name}");
+                self.round.clear();
             }
             UiEvent::Token { text } => self.output.push_token(Category::Normal, &text),
             UiEvent::Json { text } => self.output.push_token(Category::Json, &text),
@@ -339,6 +352,7 @@ impl App {
             UiEvent::Status { message } => self.status = message,
             UiEvent::Cost { total_usd } => self.total_cost = total_usd,
             UiEvent::Context { input_tokens } => self.context_tokens = input_tokens,
+            UiEvent::Round { text } => self.round = text,
             UiEvent::ScriptResult { exit_code } => self
                 .output
                 .push_line(Category::Meta, format!("script exited {exit_code}")),
@@ -565,6 +579,9 @@ impl App {
         crate::render::draw_output(f.buffer_mut(), output_inner, &self.output);
 
         let mut status_line = self.status.clone();
+        if !self.round.is_empty() {
+            status_line.push_str(&format!("   ·   round {}", self.round));
+        }
         if self.context_tokens > 0 {
             status_line.push_str(&format!("   ·   ctx {}", self.context_readout()));
         }
