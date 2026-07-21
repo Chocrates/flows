@@ -33,7 +33,10 @@ and `web_search` only as a fallback.
 Implement all files in the design.
 Follow existing conventions. Implement completely — no stubs or TODOs.
 
-When done:
+When done, finish the phase by **returning this JSON as your reply message** — the
+plain text of your response, with no tool call. Do **not** write it to a file (no
+`write_file` to `artifact.json` or similar): a file write is not how the phase
+ends, and repeating it will loop until the run is killed. Emit it once, as text:
 ```json
 {
   "type": "artifact",
