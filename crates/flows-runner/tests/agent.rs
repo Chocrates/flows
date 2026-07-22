@@ -319,6 +319,96 @@ async fn noop_write_loop_aborts() {
 }
 
 #[tokio::test]
+async fn write_file_artifact_envelope_is_accepted() {
+    // Model "emits" its artifact by write_file-ing the envelope to a file instead
+    // of returning it as a reply. The recovery path should accept it and finish the
+    // phase with that content — not loop.
+    let d = tempfile::tempdir().unwrap();
+    let provider = Mock::new(vec![tool(
+        "write_file",
+        r#"{"path": "artifact.json", "content": "{\"type\": \"artifact\", \"content\": {\"summary\": \"done via file\"}}"}"#,
+    )]);
+    let art = run_agent_phase(
+        &files_phase(),
+        "idea",
+        d.path(),
+        &empty_artifacts(),
+        "feature",
+        &LLMConfig::default(),
+        &provider,
+        &NoopCallbacks,
+        None,
+        &ContextConfig::default(),
+        &WebSearchConfig::default(),
+        0.0,
+        0.0,
+        None,
+    )
+    .await
+    .artifact;
+    assert_eq!(art.content["summary"], "done via file");
+}
+
+#[tokio::test]
+async fn artifact_claiming_files_without_writing_fails() {
+    // Write-capable phase emits an artifact reporting files_written but never called
+    // write_file — the model inlined code instead. Must fail, not "succeed" empty.
+    let d = tempfile::tempdir().unwrap();
+    let provider = Mock::new(vec![artifact_json(
+        r#"{"files_written": ["src/main.rs", "Cargo.toml"], "summary": "done"}"#,
+    )]);
+    let art = run_agent_phase(
+        &files_phase(),
+        "idea",
+        d.path(),
+        &empty_artifacts(),
+        "feature",
+        &LLMConfig::default(),
+        &provider,
+        &NoopCallbacks,
+        None,
+        &ContextConfig::default(),
+        &WebSearchConfig::default(),
+        0.0,
+        0.0,
+        None,
+    )
+    .await
+    .artifact;
+    let err = art.content["error"].as_str().unwrap();
+    assert!(err.contains("no file was actually written"), "{err}");
+}
+
+#[tokio::test]
+async fn artifact_with_real_writes_succeeds() {
+    // Same shape, but the model actually wrote a file first — must NOT trip the guard.
+    let d = tempfile::tempdir().unwrap();
+    let provider = Mock::new(vec![
+        tool("write_file", r#"{"path": "src/main.rs", "content": "fn main(){}"}"#),
+        artifact_json(r#"{"files_written": ["src/main.rs"], "summary": "done"}"#),
+    ]);
+    let art = run_agent_phase(
+        &files_phase(),
+        "idea",
+        d.path(),
+        &empty_artifacts(),
+        "feature",
+        &LLMConfig::default(),
+        &provider,
+        &NoopCallbacks,
+        None,
+        &ContextConfig::default(),
+        &WebSearchConfig::default(),
+        0.0,
+        0.0,
+        None,
+    )
+    .await
+    .artifact;
+    assert_eq!(art.content["summary"], "done");
+}
+
+#[tokio::test]
 async fn cost_cap_aborts() {
     let provider = Mock::new(vec![artifact_json(r#"{"x": 1}"#)]);
     let art = run_agent_phase(

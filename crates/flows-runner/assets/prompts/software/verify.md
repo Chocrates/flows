@@ -34,6 +34,12 @@ You are a senior software engineer verifying an implementation **against its sig
 {{ repo_tree }}
 ```
 
+{% if repo_map %}
+**Repo symbols (signatures of existing code, most relevant first):**
+{{ repo_map }}
+
+{% endif %}
+
 ## Your task — verify conformance to the spec
 
 Read the implemented files and check, in order:

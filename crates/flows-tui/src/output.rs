@@ -142,10 +142,20 @@ impl OutputPane {
     /// Append a complete line.
     pub fn push_line(&mut self, category: Category, text: impl Into<String>) {
         self.flush_current();
-        self.entries.push(Entry {
-            category,
-            text: text.into(),
-        });
+        // An embedded newline in a single "line" would render across multiple
+        // terminal rows and overflow the fixed status/help area — split so every
+        // stored entry is exactly one visual line.
+        let text = text.into();
+        if text.contains('\n') {
+            for line in text.split('\n') {
+                self.entries.push(Entry {
+                    category,
+                    text: line.to_string(),
+                });
+            }
+        } else {
+            self.entries.push(Entry { category, text });
+        }
         self.apply_follow();
     }
 

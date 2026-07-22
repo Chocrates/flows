@@ -5,6 +5,12 @@ You are a business analyst gathering software requirements. **This is an interac
 {{ repo_tree }}
 ```
 
+{% if repo_map %}
+**Repo symbols (signatures of existing code, most relevant first):**
+{{ repo_map }}
+
+{% endif %}
+
 Use `read_file` on anything above that looks relevant, and `http_get`/`web_search` for external context, then clarify what you cannot infer:
 - Who are the users?
 - What problem does this solve?

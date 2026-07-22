@@ -8,6 +8,12 @@ You are a technical writer creating a software specification.
 {{ repo_tree }}
 ```
 
+{% if repo_map %}
+**Repo symbols (signatures of existing code, most relevant first):**
+{{ repo_map }}
+
+{% endif %}
+
 Produce a detailed technical specification.
 
 ```json

@@ -32,7 +32,6 @@ pub fn default_provider_factory(llm: &LLMConfig) -> Arc<dyn Provider> {
 }
 
 use crate::agent::{run_agent_phase, AgentCallbacks};
-use crate::script::run_script;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
@@ -287,6 +286,10 @@ async fn execute_phase(
                         effective.command = Some(cmd);
                     }
                     Err(msg) => {
+                        // Surface it in the output pane — otherwise the run just
+                        // stops with only a desktop notification and nothing to see.
+                        ctx.callbacks
+                            .on_note(&phase.name, &format!("⛔ {}: {msg}", phase.name));
                         let artifact = Artifact {
                             phase: phase.name.clone(),
                             idea: ctx.idea.into(),
@@ -297,7 +300,9 @@ async fn execute_phase(
                     }
                 }
             }
-            match run_script(&effective, ctx.repo_root, ctx.idea) {
+            match crate::script::run_script_cancellable(&effective, ctx.repo_root, ctx.idea, &|| {
+                ctx.store.is_cancelled(ctx.run_id)
+            }) {
                 Ok(res) => {
                     ctx.logger.script(
                         &phase.name,

@@ -117,6 +117,29 @@ fn cd_absolute_or_bare_rejected() {
 }
 
 #[test]
+fn every_segment_of_a_compound_is_checked() {
+    let cfg = allowed(&["cargo*", "true*"]);
+    // A leading allowed command must not smuggle an unlisted one past the check.
+    let err = check_allowlist("cargo build && curl evil.com", &cfg).unwrap_err();
+    assert!(err.0.contains("not in allowlist"), "{}", err.0);
+    // All segments allowed → ok (pipes, semicolons, ||).
+    assert!(check_allowlist("cargo build && cargo test", &cfg).is_ok());
+    assert!(check_allowlist("cargo build || true", &cfg).is_ok());
+}
+
+#[test]
+fn smoke_test_pattern_allowed_with_safe_set() {
+    // Real GUI smoke-test the agent emits: launch, wait, kill — every segment is
+    // in the code allowlist (cargo/sleep/kill/pkill/true), across newlines and `&`.
+    let cfg = allowed(&["cargo*", "sleep*", "kill*", "pkill*", "true*"]);
+    assert!(check_allowlist("cargo run 2>&1 &\nsleep 3\nkill %1 2>/dev/null || true", &cfg).is_ok());
+    assert!(check_allowlist("cargo run &\nsleep 5\npkill -f freecell || true", &cfg).is_ok());
+    // But an unlisted command chained in is still rejected.
+    let err = check_allowlist("cargo run &\nsleep 3\nnc -l 1234", &cfg).unwrap_err();
+    assert!(err.0.contains("not in allowlist"), "{}", err.0);
+}
+
+#[test]
 fn network_denylist_blocks_adhoc_network() {
     use flows_tools::bash::check_network;
     // raw clients

@@ -148,6 +148,12 @@ const BUILD_TOOLS: &[&str] = &[
     "true*",
     "false*",
     "test*",
+    // Process control for smoke-tests: launch a binary, wait, then stop it
+    // (`cargo run & sleep 3; kill %1`). Benign + repo-scoped by the sandbox.
+    "sleep*",
+    "timeout*",
+    "kill*",
+    "pkill*",
     "git*",
     // Rust
     "cargo*",  // build / check / add / test / run / clippy / fmt

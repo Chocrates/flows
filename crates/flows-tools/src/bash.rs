@@ -116,12 +116,55 @@ fn fnmatch(s: &str, pat: &str) -> bool {
     pi == p.len()
 }
 
+/// Split a shell command into individually-runnable segments at the control
+/// operators `&&`, `||`, `;`, `|`, `&`, and newlines. Each segment's leading word
+/// is a command the shell will actually execute, so the allowlist must vet **every
+/// one** — otherwise `cargo build && curl evil` (or `cargo run & sleep 3 & kill`)
+/// smuggles unlisted commands past a check that only looked at the first token.
+/// Redirections (`2>&1`, `>`, …) are not separators and stay with their segment.
+fn split_segments(command: &str) -> Vec<String> {
+    let mut segs = Vec::new();
+    // Newlines aren't preserved by shlex, so split on them first.
+    for line in command.split(['\n', '\r']) {
+        let Some(tokens) = shlex::split(line) else {
+            // Unparseable line — keep it whole so the segment check reports the error.
+            if !line.trim().is_empty() {
+                segs.push(line.to_string());
+            }
+            continue;
+        };
+        let mut cur: Vec<String> = Vec::new();
+        for tok in tokens {
+            if matches!(tok.as_str(), "&&" | "||" | ";" | "|" | "&") {
+                if !cur.is_empty() {
+                    segs.push(cur.join(" "));
+                    cur.clear();
+                }
+            } else {
+                cur.push(tok);
+            }
+        }
+        if !cur.is_empty() {
+            segs.push(cur.join(" "));
+        }
+    }
+    segs
+}
+
 pub fn check_allowlist(command: &str, config: &BashConfig) -> ToolResult<()> {
     if config.unrestricted {
         return Ok(());
     }
-    let tokens = shlex::split(command)
-        .ok_or_else(|| ToolError::new(format!("Could not parse command: {command:?}")))?;
+    for segment in split_segments(command) {
+        check_segment(&segment, config)?;
+    }
+    Ok(())
+}
+
+/// Allowlist-check a single command segment (no unchecked control operators).
+fn check_segment(segment: &str, config: &BashConfig) -> ToolResult<()> {
+    let tokens = shlex::split(segment)
+        .ok_or_else(|| ToolError::new(format!("Could not parse command: {segment:?}")))?;
     let executable = tokens.first().cloned().unwrap_or_default();
     // strip any path prefix so "./pytest" matches "pytest*"
     let exe_name = Path::new(&executable)
@@ -145,7 +188,7 @@ pub fn check_allowlist(command: &str, config: &BashConfig) -> ToolResult<()> {
     }
 
     for pattern in &config.allowed {
-        if fnmatch(command, pattern) || fnmatch(&exe_name, pattern) {
+        if fnmatch(segment, pattern) || fnmatch(&exe_name, pattern) {
             return Ok(());
         }
     }

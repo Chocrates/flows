@@ -6,8 +6,11 @@
 //! target, else a hardcoded command for the common languages. Resolution
 //! happens at execute time, when the repo is actually populated.
 
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use minijinja::{context, Environment};
 
@@ -157,10 +160,26 @@ command in .flows.yml."
     })
 }
 
+/// Sentinel returned when a running script is killed by a cancel request. The
+/// runner recognises it and ends the run cleanly instead of retrying the phase.
+pub const SCRIPT_CANCELLED: &str = "script cancelled";
+
 pub fn run_script(
     phase: &PhaseConfig,
     repo_root: &Path,
     idea: &str,
+) -> Result<ScriptResult, String> {
+    run_script_cancellable(phase, repo_root, idea, &|| false)
+}
+
+/// Like [`run_script`], but polls `cancel` while the child runs and kills it
+/// promptly when cancellation is requested — otherwise a long `cargo build` in a
+/// lint/test phase would ignore `c` until it finished.
+pub fn run_script_cancellable(
+    phase: &PhaseConfig,
+    repo_root: &Path,
+    idea: &str,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<ScriptResult, String> {
     let command = phase
         .command
@@ -173,17 +192,49 @@ pub fn run_script(
         .render_str(command, context! { idea => idea })
         .map_err(|e| format!("command render failed: {e}"))?;
 
-    let output = Command::new("/bin/sh")
+    let mut child = Command::new("/bin/sh")
         .arg("-c")
         .arg(&rendered)
         .current_dir(repo_root)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
 
+    // Drain both pipes on threads so a chatty child can't deadlock on a full pipe
+    // while we poll.
+    let mut out_pipe = child.stdout.take().unwrap();
+    let mut err_pipe = child.stderr.take().unwrap();
+    let out_h = thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = out_pipe.read_to_end(&mut b);
+        b
+    });
+    let err_h = thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = err_pipe.read_to_end(&mut b);
+        b
+    });
+
+    // Poll for exit, checking the cancel signal between polls.
+    let status = loop {
+        if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
+            break s;
+        }
+        if cancel() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(SCRIPT_CANCELLED.to_string());
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+
+    let stdout = String::from_utf8_lossy(&out_h.join().unwrap_or_default()).into_owned();
+    let stderr = String::from_utf8_lossy(&err_h.join().unwrap_or_default()).into_owned();
     Ok(ScriptResult {
         command: rendered,
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: status.code().unwrap_or(-1),
+        stdout,
+        stderr,
     })
 }

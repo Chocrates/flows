@@ -113,6 +113,22 @@ fn tokens_assemble_into_lines() {
 }
 
 #[test]
+fn push_line_splits_embedded_newlines() {
+    // A multi-line tool summary (e.g. a `cargo run &\nsleep 3\nkill` command) must
+    // become separate one-line entries, not a single entry that overflows rows.
+    let mut p = pane(24);
+    p.push_line(Category::Tool, "⚙ bash: cargo run &\nsleep 3\nkill %1");
+    assert_eq!(
+        p.visible_lines(),
+        vec![
+            "⚙ bash: cargo run &".to_string(),
+            "sleep 3".to_string(),
+            "kill %1".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn partial_token_line_is_visible() {
     let mut p = pane(24);
     p.push_token(Category::Normal, "in progress");

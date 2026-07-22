@@ -17,6 +17,12 @@ You are a software architect creating a technical design.
 {{ repo_tree }}
 ```
 
+{% if repo_map %}
+**Repo symbols (signatures of existing code, most relevant first):**
+{{ repo_map }}
+
+{% endif %}
+
 Design the implementation architecture.
 
 ```json

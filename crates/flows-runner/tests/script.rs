@@ -1,7 +1,7 @@
 //! Script-phase tests. Port of `tests/test_phases_script.py`.
 
 use flows_core::models::PhaseConfig;
-use flows_runner::script::run_script;
+use flows_runner::script::{run_script, run_script_cancellable, SCRIPT_CANCELLED};
 use tempfile::tempdir;
 
 fn script_phase(name: &str, command: &str) -> PhaseConfig {
@@ -18,6 +18,25 @@ fn runs_command_and_captures_stdout() {
     assert_eq!(r.exit_code, 0);
     assert!(r.stdout.contains("hello"));
     assert!(r.success());
+}
+
+#[test]
+fn cancel_kills_a_long_running_script() {
+    let d = tempdir().unwrap();
+    // A script that would run for 30s must be killed promptly when cancel fires.
+    let start = std::time::Instant::now();
+    let err = run_script_cancellable(&script_phase("slow", "sleep 30"), d.path(), "", &|| true)
+        .unwrap_err();
+    assert_eq!(err, SCRIPT_CANCELLED);
+    assert!(start.elapsed().as_secs() < 5, "should have been killed fast");
+}
+
+#[test]
+fn no_cancel_runs_to_completion() {
+    let d = tempdir().unwrap();
+    let r = run_script_cancellable(&script_phase("echo", "echo hi"), d.path(), "", &|| false).unwrap();
+    assert_eq!(r.exit_code, 0);
+    assert!(r.stdout.contains("hi"));
 }
 
 #[test]

@@ -229,6 +229,27 @@ fn error_artifact(phase: &str, idea: &str, msg: impl Into<String>) -> Artifact {
     }
 }
 
+/// Fold a parsed `{"type":"artifact", ...}` envelope into the artifact content.
+/// Compliant `{type, content:{...}}` → the `content`. Flattened envelopes (a bare
+/// `content` string with sibling fields) keep the siblings, renaming `content` to
+/// `answer`. Shared by the normal text-emission path and the write_file recovery.
+fn artifact_content(parsed: Option<Value>) -> Value {
+    parsed
+        .and_then(|mut p| p.as_object_mut().map(std::mem::take))
+        .map(|mut o| {
+            o.remove("type");
+            if o.len() == 1 && o.contains_key("content") {
+                o.remove("content").unwrap()
+            } else {
+                if let Some(c) = o.remove("content") {
+                    o.insert("answer".into(), c);
+                }
+                Value::Object(o)
+            }
+        })
+        .unwrap_or(json!({}))
+}
+
 // ---------------------------------------------------------------------------
 // Tool definitions + dispatch
 // ---------------------------------------------------------------------------
@@ -541,10 +562,15 @@ fn summarize_tool_call(name: &str, args: &Value) -> String {
         ),
         "bash" => {
             let c = args.get("command").and_then(Value::as_str).unwrap_or("");
-            let short = if c.len() > 70 {
-                format!("{}...", &c[..67])
+            // Collapse newlines/runs of whitespace so a multi-line command renders
+            // as a single status line — embedded newlines corrupt the fixed TUI
+            // bottom rows. Truncate by chars (not bytes) to avoid a UTF-8 panic.
+            let one_line = c.split_whitespace().collect::<Vec<_>>().join(" ");
+            let short = if one_line.chars().count() > 70 {
+                let head: String = one_line.chars().take(67).collect();
+                format!("{head}...")
             } else {
-                c.to_string()
+                one_line
             };
             format!("bash: {short}")
         }
@@ -1049,10 +1075,17 @@ your context small.",
         {
             Ok(c) => c,
             Err(e) => {
+                // Surface the failure in the output pane — otherwise a dropped LLM
+                // connection just makes the stream stop dead with no explanation.
+                callbacks.on_note(&format!(
+                    "⛔ LLM request failed (round {}): {e} — the model server may be \
+                     down or unreachable; check `flows doctor`",
+                    round_num + 1
+                ));
                 return AgentResult {
                     artifact: error_artifact(&phase.name, idea, format!("llm error: {e}")),
                     cost_usd: phase_cost,
-                }
+                };
             }
         };
         filter.lock().unwrap().finish(&emit);
@@ -1099,15 +1132,13 @@ your context small.",
 
         // Mid-phase cost ceiling.
         if max_cost_usd > 0.0 && prior_cost_usd + phase_cost >= max_cost_usd {
+            let msg = format!(
+                "Cost limit ${max_cost_usd:.2} reached (${:.4} spent so far)",
+                prior_cost_usd + phase_cost
+            );
+            callbacks.on_note(&format!("⛔ {msg} — stopping the phase"));
             return AgentResult {
-                artifact: error_artifact(
-                    &phase.name,
-                    idea,
-                    format!(
-                        "Cost limit ${max_cost_usd:.2} reached (${:.4} spent so far)",
-                        prior_cost_usd + phase_cost
-                    ),
-                ),
+                artifact: error_artifact(&phase.name, idea, msg),
                 cost_usd: phase_cost,
             };
         }
@@ -1137,6 +1168,34 @@ your context small.",
             for tc in &tool_calls {
                 let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
                 callbacks.on_tool_call(&tc.name, &summarize_tool_call(&tc.name, &args));
+
+                // Recovery: some models "emit" their artifact by write_file-ing the
+                // envelope to a file (e.g. artifact.json) instead of returning it as
+                // a reply — which never ends the phase and loops until a guard kills
+                // it. If a write's content parses as a valid artifact envelope,
+                // accept it as the emission and finish the phase successfully.
+                if tc.name == "write_file" {
+                    if let Some(parsed) = args
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .and_then(parse_response)
+                        .filter(|p| p.get("type").and_then(Value::as_str) == Some("artifact"))
+                    {
+                        callbacks.on_note(
+                            "✓ accepted artifact from a write_file (model wrote the \
+                             envelope to a file instead of replying) — finishing phase",
+                        );
+                        return AgentResult {
+                            artifact: Artifact {
+                                phase: phase.name.clone(),
+                                idea: idea.to_string(),
+                                content: artifact_content(Some(parsed)),
+                                ..Artifact::default()
+                            },
+                            cost_usd: phase_cost,
+                        };
+                    }
+                }
 
                 // Detect a no-op write up front: content byte-for-byte identical to
                 // what's already on disk. Such a write "succeeds" but makes no
@@ -1243,8 +1302,10 @@ starting — likely stuck in a build/search loop"
                 messages.push(Message::user(
                     "You have written the same file with identical content several rounds in a row; \
                      it is unchanged on disk. Stop rewriting it. If your work for this phase is \
-                     complete, emit the final artifact now. Otherwise take a different action: build \
-                     or test the code, edit a different file, or write genuinely new content.",
+                     complete, return the final artifact JSON as your plain reply message with no \
+                     tool call — do NOT write it to a file (a `write_file` to artifact.json is not \
+                     how the phase ends). Otherwise take a different action: build or test the code, \
+                     edit a different file, or write genuinely new content.",
                 ));
             }
             if noop_write_streak >= ABORT_AFTER_NOOP_WRITES {
@@ -1318,38 +1379,23 @@ starting — likely stuck in a build/search loop"
                 continue;
             }
             Some("artifact") => {
-                // Extract the artifact body. Compliant: `{type, content: {...}}` →
-                // use `content`. But models often flatten, emitting the answer as a
-                // bare `content` string with sibling fields (`references`, …) — keep
-                // those instead of silently dropping them: fold everything (minus
-                // `type`) into the content, renaming a bare `content` value to
-                // `answer` so it reads as a field.
-                let content = parsed
-                    .and_then(|mut p| p.as_object_mut().map(std::mem::take))
-                    .map(|mut o| {
-                        o.remove("type");
-                        if o.len() == 1 && o.contains_key("content") {
-                            o.remove("content").unwrap()
-                        } else {
-                            if let Some(c) = o.remove("content") {
-                                o.insert("answer".into(), c);
-                            }
-                            Value::Object(o)
-                        }
-                    })
-                    .unwrap_or(json!({}));
+                let content = artifact_content(parsed);
                 // No-tools models can't call write_file, so they inline files in
                 // `content.files` (path → contents); write them here.
+                let mut inline_wrote = false;
                 if !tools_enabled {
                     if let Some(files) = content.get("files").and_then(Value::as_object) {
                         for (path, body) in files {
                             if let Some(text) = body.as_str() {
                                 match files::write_file(repo_root, path, text) {
-                                    Ok(_) => callbacks.on_tool_result(
-                                        "write_file",
-                                        &format!("wrote {path}"),
-                                        false,
-                                    ),
+                                    Ok(_) => {
+                                        inline_wrote = true;
+                                        callbacks.on_tool_result(
+                                            "write_file",
+                                            &format!("wrote {path}"),
+                                            false,
+                                        )
+                                    }
                                     Err(e) => callbacks.on_tool_result(
                                         "write_file",
                                         &format!("{path}: {e}"),
@@ -1359,6 +1405,28 @@ starting — likely stuck in a build/search loop"
                             }
                         }
                     }
+                }
+                // Empty-output guard: a write-capable phase that reports files but
+                // never actually wrote any (via write_file or inline) — the model
+                // inlined code in its response instead of writing it. The phase
+                // would otherwise "succeed" with an empty repo, only to fail
+                // confusingly downstream (lint can't find a project). Fail here with
+                // an actionable message instead.
+                let claimed_files = content
+                    .get("files_written")
+                    .and_then(Value::as_array)
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                if can_write && claimed_files && !has_written && !inline_wrote {
+                    let msg = "artifact reports files_written but no file was actually \
+                               written — call write_file for each file; do not inline code \
+                               in the response"
+                        .to_string();
+                    callbacks.on_note(&format!("⛔ {msg}"));
+                    return AgentResult {
+                        artifact: error_artifact(&phase.name, idea, msg),
+                        cost_usd: phase_cost,
+                    };
                 }
                 return AgentResult {
                     artifact: Artifact {
