@@ -197,7 +197,20 @@ fn attach_loop<B: ratatui::backend::Backend>(
                         .set_status(&st.current_phase, PhaseStatus::Running);
                     if !prompting {
                         let prompt = if st.status == "waiting_input" {
-                            format!("? {}", st.questions.join("  /  "))
+                            // One question per line (numbered when several) — matches
+                            // the live-run panel formatting.
+                            match st.questions.as_slice() {
+                                [only] => format!("? {only}"),
+                                many => {
+                                    let list = many
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, q)| format!("{}. {q}", i + 1))
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    format!("?\n{list}")
+                                }
+                            }
                         } else {
                             format!(
                                 "⏸ {}  (Enter to approve, or type feedback)",

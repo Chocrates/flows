@@ -573,6 +573,14 @@ async fn run_linear(
                         phase.max_loop_iterations,
                     );
                     if let Some(t) = index_of(phases, target) {
+                        // The phases in [target..=current] are about to re-run — drop
+                        // them from completed_phases so the UI doesn't show a stale ✓
+                        // (e.g. a rejected design must un-check as it loops back).
+                        let redo: std::collections::HashSet<&str> =
+                            phases[t..=idx].iter().map(|p| p.name.as_str()).collect();
+                        completed.retain(|n| !redo.contains(n.as_str()));
+                        state.completed_phases = completed.clone();
+                        let _ = ctx.store.write_state(state);
                         idx = t;
                         continue;
                     }

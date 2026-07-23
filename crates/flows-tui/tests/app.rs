@@ -12,6 +12,13 @@ fn app() -> App {
     a
 }
 
+fn app_with(phases: &[&str]) -> App {
+    let names: Vec<String> = phases.iter().map(|s| s.to_string()).collect();
+    let mut a = App::new(&names);
+    a.set_output_area(Rect::new(0, 0, 40, 10));
+    a
+}
+
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -70,9 +77,32 @@ fn loop_back_sets_iteration() {
     let mut a = app();
     a.handle_ui_event(UiEvent::LoopBack {
         from: "implement".into(),
+        to: "implement".into(),
         iteration: 2,
     });
     assert_eq!(a.phases.status_of("implement"), Some(PhaseStatus::Looping));
+}
+
+#[test]
+fn loop_back_unchecks_the_redone_range() {
+    // design was ✓; rejecting it (loop approve_design → design) must clear the ✓
+    // on design and mark the source as looping — not leave it reading "done".
+    let mut a = app_with(&["requirements", "design", "approve_design", "implement"]);
+    a.phases.set_status("requirements", PhaseStatus::Done);
+    a.phases.set_status("design", PhaseStatus::Done);
+    a.phases.set_status("approve_design", PhaseStatus::Done);
+    a.handle_ui_event(UiEvent::LoopBack {
+        from: "approve_design".into(),
+        to: "design".into(),
+        iteration: 1,
+    });
+    assert_eq!(a.phases.status_of("design"), Some(PhaseStatus::Pending));
+    assert_eq!(
+        a.phases.status_of("approve_design"),
+        Some(PhaseStatus::Looping)
+    );
+    // Phases before the loop target keep their ✓.
+    assert_eq!(a.phases.status_of("requirements"), Some(PhaseStatus::Done));
 }
 
 #[test]

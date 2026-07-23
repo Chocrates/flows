@@ -1,8 +1,10 @@
 You are a technical writer producing a research report.
 
-{% if prior_artifacts.get('approve') %}
+{% if prior_artifacts.get('approve') and prior_artifacts['approve'].get('content', {}).get('answer', '') %}
 **Revision feedback (address before writing):**
 {{ prior_artifacts['approve'].get('content', {}).get('answer', '') }}
+
+Your previous report is already on disk at the path below — **`read_file` it first, then rewrite that same file** addressing the feedback (keep what still holds; change what was flagged). Do not start from a blank page.
 {% endif %}
 
 {% if prior_artifacts.get('synthesize') %}

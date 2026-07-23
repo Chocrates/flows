@@ -68,6 +68,7 @@ pub enum UiEvent {
     },
     LoopBack {
         from: String,
+        to: String,
         iteration: u32,
     },
     Complete {
@@ -138,8 +139,21 @@ impl ChannelCallbacks {
 #[async_trait]
 impl RunnerCallbacks for ChannelCallbacks {
     async fn on_questions(&self, _phase: &str, questions: &[String]) -> String {
-        self.request_input(format!("? {}", questions.join(" / ")))
-            .await
+        // One question per line (numbered when there are several) so a multi-part
+        // clarification is readable instead of run together on one line.
+        let prompt = match questions {
+            [only] => format!("? {only}"),
+            many => {
+                let list = many
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| format!("{}. {q}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("?\n{list}")
+            }
+        };
+        self.request_input(prompt).await
     }
     async fn on_human_gate(&self, _phase: &str, instructions: &str) -> String {
         self.request_input(format!("⏸ {instructions}")).await
@@ -205,9 +219,10 @@ impl RunnerCallbacks for ChannelCallbacks {
     fn on_phase_end(&self, phase: &str, _artifact: Option<&Artifact>) {
         self.send(UiEvent::PhaseEnd { name: phase.into() });
     }
-    fn on_loop_back(&self, from: &str, _to: &str, iteration: u32, _max: u32) {
+    fn on_loop_back(&self, from: &str, to: &str, iteration: u32, _max: u32) {
         self.send(UiEvent::LoopBack {
             from: from.into(),
+            to: to.into(),
             iteration,
         });
     }
@@ -361,7 +376,10 @@ impl App {
                     self.phases.set_status(&name, PhaseStatus::Done);
                 }
             }
-            UiEvent::LoopBack { from, iteration } => {
+            UiEvent::LoopBack { from, to, iteration } => {
+                // Clear stale ✓ on the phases about to re-run, then mark the source
+                // as looping (↻) — a rejected design shouldn't read as "done".
+                self.phases.restart_range(&to, &from);
                 self.phases.set_loop_iteration(&from, iteration);
             }
             UiEvent::Complete { phases } => {

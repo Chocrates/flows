@@ -68,6 +68,20 @@ impl PhasePanel {
         self.set_status(name, PhaseStatus::Looping);
     }
 
+    /// Reset the phases in the loop range `[to..=from]` back to Pending so a
+    /// loop-back doesn't leave stale `✓` marks on phases that are about to re-run
+    /// (e.g. rejecting a design must un-check `design` as it goes back). The caller
+    /// then marks the source phase as Looping. Order-agnostic on `to`/`from`.
+    pub fn restart_range(&mut self, to: &str, from: &str) {
+        let (Some(a), Some(b)) = (self.row_of(to), self.row_of(from)) else {
+            return;
+        };
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        for (_, status) in self.phases[lo..=hi].iter_mut() {
+            *status = PhaseStatus::Pending;
+        }
+    }
+
     /// Register the loop-back edges (persistent — shown even before looping).
     pub fn set_loops(&mut self, edges: Vec<LoopEdge>) {
         self.loops = edges;
