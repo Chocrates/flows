@@ -13,7 +13,8 @@ use serde_json::{json, Map, Value};
 
 use flows_core::config::{merge_llm, merge_profiles, resolve_llm};
 use flows_core::models::{
-    Artifact, GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig, RunMeta, RunState,
+    Artifact, GlobalConfig, LLMConfig, OnFailure, PhaseConfig, PhaseType, ProjectConfig, RunMeta,
+    RunState, RunStatus,
 };
 use flows_core::pipeline::{is_dag, validate_pipeline};
 use flows_core::state::Store;
@@ -214,14 +215,6 @@ fn index_of(phases: &[PhaseConfig], name: &str) -> Option<usize> {
     phases.iter().position(|p| p.name == name)
 }
 
-fn on_failure_of(phase: &PhaseConfig) -> &str {
-    if phase.on_failure.is_empty() {
-        "stop"
-    } else {
-        &phase.on_failure
-    }
-}
-
 fn write_artifact_file(store: &Store, run_id: &str, phase_name: &str, artifact: &Artifact) {
     let path = store.artifact_path(run_id, phase_name);
     if let Ok(yaml) = serde_yaml_ng::to_string(artifact) {
@@ -418,7 +411,7 @@ pub async fn run_pipeline(
 
     let mut state = RunState {
         run_id: run_id.into(),
-        status: "running".into(),
+        status: RunStatus::Running,
         current_phase: String::new(),
         current_phase_index: 0,
         round: 0,
@@ -486,11 +479,11 @@ async fn run_linear(
         ctx.callbacks.on_phase_start(&phase.name, idx, total);
         state.current_phase = phase.name.clone();
         state.current_phase_index = idx as i64;
-        state.status = "running".into();
+        state.status = RunStatus::Running;
         let _ = ctx.store.write_state(state);
 
         if ctx.store.poll_cancel(ctx.run_id) {
-            state.status = "cancelled".into();
+            state.status = RunStatus::Cancelled;
             let _ = ctx.store.write_state(state);
             return Ok(completed);
         }
@@ -524,7 +517,7 @@ async fn run_linear(
         // Mid-phase cancellation: the phase bailed early; stop without persisting
         // the partial artifact as a failure.
         if ctx.store.poll_cancel(ctx.run_id) {
-            state.status = "cancelled".into();
+            state.status = RunStatus::Cancelled;
             let _ = ctx.store.write_state(state);
             return Ok(completed);
         }
@@ -537,27 +530,23 @@ async fn run_linear(
         let _ = ctx.store.write_state(state);
 
         if let Some(error) = failed_error {
-            match on_failure_of(phase) {
-                "stop" => return fail_run(ctx, state, &phase.name, error),
-                "continue" => {
+            match &phase.on_failure {
+                OnFailure::Stop => return fail_run(ctx, state, &phase.name, error),
+                OnFailure::Continue => {
                     idx += 1;
                     continue;
                 }
-                retry if retry.starts_with("retry:") => {
-                    let target = &retry["retry:".len()..];
-                    match index_of(phases, target) {
-                        Some(t) => {
-                            idx = t;
-                            continue;
-                        }
-                        None => {
-                            return Err(RunError::Other(format!(
-                                "retry target {target:?} not found"
-                            )))
-                        }
+                OnFailure::Retry(target) => match index_of(phases, target) {
+                    Some(t) => {
+                        idx = t;
+                        continue;
                     }
-                }
-                other => return Err(RunError::Other(format!("Unknown on_failure: {other:?}"))),
+                    None => {
+                        return Err(RunError::Other(format!(
+                            "retry target {target:?} not found"
+                        )))
+                    }
+                },
             }
         }
 
@@ -591,7 +580,7 @@ async fn run_linear(
         idx += 1;
     }
 
-    state.status = "completed".into();
+    state.status = RunStatus::Completed;
     let _ = ctx.store.write_state(state);
     ctx.callbacks.on_run_complete(ctx.run_id, &completed);
     Ok(completed)
@@ -603,7 +592,7 @@ fn fail_run(
     phase: &str,
     error: String,
 ) -> Result<Vec<String>, RunError> {
-    state.status = "failed".into();
+    state.status = RunStatus::Failed;
     state.error = Some(error.clone());
     let _ = ctx.store.write_state(state);
     ctx.callbacks.on_run_failed(ctx.run_id, phase, &error);
@@ -711,7 +700,7 @@ async fn run_dag(
 
         // Mid-phase cancellation: stop, drop in-flight tasks, don't persist.
         if ctx.store.poll_cancel(ctx.run_id) {
-            state.status = "cancelled".into();
+            state.status = RunStatus::Cancelled;
             let _ = ctx.store.write_state(state);
             return Ok(completed_order);
         }
@@ -719,7 +708,7 @@ async fn run_dag(
         persist(ctx, &mut artifacts, &artifact);
 
         if let Some(error) = failed_error {
-            if on_failure_of(&phases[index_of(phases, &name).unwrap()]) == "continue" {
+            if phases[index_of(phases, &name).unwrap()].on_failure == OnFailure::Continue {
                 completed.insert(name.clone());
                 completed_order.push(name.clone());
             } else {
@@ -734,13 +723,13 @@ async fn run_dag(
         let _ = ctx.store.write_state(state);
 
         if ctx.store.poll_cancel(ctx.run_id) {
-            state.status = "cancelled".into();
+            state.status = RunStatus::Cancelled;
             let _ = ctx.store.write_state(state);
             return Ok(completed_order);
         }
     }
 
-    state.status = "completed".into();
+    state.status = RunStatus::Completed;
     let _ = ctx.store.write_state(state);
     ctx.callbacks.on_run_complete(ctx.run_id, &completed_order);
     Ok(completed_order)

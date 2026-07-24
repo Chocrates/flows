@@ -18,6 +18,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::oneshot;
 
+use flows_core::models::RunStatus;
 use flows_core::state::Store;
 
 use crate::app::{App, UiEvent};
@@ -176,27 +177,27 @@ fn attach_loop<B: ratatui::backend::Backend>(
             for done in &st.completed_phases {
                 app.phases.set_status(done, PhaseStatus::Done);
             }
-            match st.status.as_str() {
-                "failed" => {
+            match st.status {
+                RunStatus::Failed => {
                     app.phases
                         .set_status(&st.current_phase, PhaseStatus::Failed);
                     app.finished = true;
                     app.status = format!("✗ failed at {}", st.current_phase);
                 }
-                "completed" => {
+                RunStatus::Completed => {
                     app.finished = true;
                     app.status = "✓ complete".into();
                 }
-                "cancelled" => {
+                RunStatus::Cancelled => {
                     app.finished = true;
                     app.status = "✗ cancelled".into();
                 }
                 // Only a genuinely-running run (not one already finished) prompts.
-                "waiting_input" | "waiting_approval" if !app.finished => {
+                RunStatus::WaitingInput | RunStatus::WaitingApproval if !app.finished => {
                     app.phases
                         .set_status(&st.current_phase, PhaseStatus::Running);
                     if !prompting {
-                        let prompt = if st.status == "waiting_input" {
+                        let prompt = if st.status == RunStatus::WaitingInput {
                             crate::app::format_questions(&st.questions)
                         } else {
                             format!(

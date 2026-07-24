@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::models::{RunMeta, RunState};
+use crate::models::{RunMeta, RunState, RunStatus};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -134,6 +134,11 @@ impl Store {
             return Ok(None);
         }
         self.read_json(&path).map(Some)
+    }
+
+    /// The run's current lifecycle status, or `None` if its state can't be read.
+    pub fn run_status(&self, run_id: &str) -> Option<RunStatus> {
+        self.read_state(run_id).ok().flatten().map(|s| s.status)
     }
 
     // -- signals ---------------------------------------------------------

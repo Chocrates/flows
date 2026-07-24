@@ -323,8 +323,8 @@ pub struct PhaseConfig {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub auto_advance: bool,
-    #[serde(default = "default_on_failure")]
-    pub on_failure: String,
+    #[serde(default)]
+    pub on_failure: OnFailure,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -359,7 +359,7 @@ impl PhaseConfig {
             prompt: None,
             tools: ToolsConfig::default(),
             auto_advance: false,
-            on_failure: default_on_failure(),
+            on_failure: OnFailure::Stop,
             command: None,
             instructions: None,
             max_clarification_rounds: 3,
@@ -664,10 +664,60 @@ pub struct RunMeta {
     pub pid: Option<i32>,
 }
 
+/// The finite lifecycle state of a run, persisted in `state.json`. Serializes as
+/// snake_case (`"running"`, `"waiting_input"`, …) so on-disk state stays readable
+/// and compatible with the previous string field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    #[default]
+    Running,
+    WaitingInput,
+    WaitingApproval,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl RunStatus {
+    /// In progress or awaiting a human — not yet terminal.
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Running | Self::WaitingInput | Self::WaitingApproval
+        )
+    }
+    /// Reached a terminal state.
+    pub fn is_finished(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+    /// Paused at a human gate (question or approval).
+    pub fn is_waiting(self) -> bool {
+        matches!(self, Self::WaitingInput | Self::WaitingApproval)
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::WaitingInput => "waiting_input",
+            Self::WaitingApproval => "waiting_approval",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl std::fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunState {
     pub run_id: String,
-    pub status: String,
+    #[serde(default)]
+    pub status: RunStatus,
     pub current_phase: String,
     pub current_phase_index: i64,
     #[serde(default)]
@@ -745,8 +795,61 @@ fn default_three() -> u32 {
 fn default_five() -> u32 {
     5
 }
-fn default_on_failure() -> String {
-    "stop".to_string()
+/// What to do when a phase fails. Parsed at config-load time (via `FromStr`), so
+/// an unknown value is rejected up front instead of mid-run. Serializes to the
+/// same strings as before (`"stop"`, `"continue"`, `"retry:<phase>"`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum OnFailure {
+    #[default]
+    Stop,
+    Continue,
+    /// Loop back to the named phase and re-run from there.
+    Retry(String),
+}
+
+impl std::str::FromStr for OnFailure {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s.trim() {
+            "" | "stop" => Ok(Self::Stop),
+            "continue" => Ok(Self::Continue),
+            other if other.starts_with("retry:") => {
+                let target = other["retry:".len()..].trim();
+                if target.is_empty() {
+                    Err("on_failure 'retry:' needs a target phase".to_string())
+                } else {
+                    Ok(Self::Retry(target.to_string()))
+                }
+            }
+            other => Err(format!(
+                "unknown on_failure {other:?} (expected 'stop', 'continue', or 'retry:<phase>')"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for OnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stop => f.write_str("stop"),
+            Self::Continue => f.write_str("continue"),
+            Self::Retry(t) => write!(f, "retry:{t}"),
+        }
+    }
+}
+
+impl TryFrom<String> for OnFailure {
+    type Error = String;
+    fn try_from(s: String) -> std::result::Result<Self, String> {
+        s.parse()
+    }
+}
+
+impl From<OnFailure> for String {
+    fn from(v: OnFailure) -> String {
+        v.to_string()
+    }
 }
 fn default_model() -> String {
     "claude-sonnet-4-6".to_string()

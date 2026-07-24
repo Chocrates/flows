@@ -15,7 +15,7 @@ use flows_core::config::{
 use flows_core::detect::{detect_stack, generate_config};
 use flows_core::dryrun::dry_run;
 use flows_core::models::{
-    Artifact, GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig,
+    Artifact, GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig, RunStatus,
 };
 use flows_core::pricing::format_cost;
 use flows_core::state::Store;
@@ -1100,16 +1100,16 @@ struct Waiting {
 
 impl Waiting {
     /// Publish a pause into the run state so `attach` can display + answer it.
-    fn publish(&self, status: &str, prompts: Vec<String>) {
+    fn publish(&self, status: RunStatus, prompts: Vec<String>) {
         if let Ok(Some(mut st)) = self.store.read_state(&self.run_id) {
-            st.status = status.into();
+            st.status = status;
             st.questions = prompts;
             let _ = self.store.write_state(&st);
         }
     }
     fn resume_running(&self) {
         if let Ok(Some(mut st)) = self.store.read_state(&self.run_id) {
-            st.status = "running".into();
+            st.status = RunStatus::Running;
             st.questions = vec![];
             let _ = self.store.write_state(&st);
         }
@@ -1170,14 +1170,14 @@ impl Waiting {
 #[async_trait]
 impl RunnerCallbacks for Waiting {
     async fn on_questions(&self, _p: &str, q: &[String]) -> String {
-        self.publish("waiting_input", q.to_vec());
+        self.publish(RunStatus::WaitingInput, q.to_vec());
         self.ping("flows: needs input", &q.join("  •  "));
         // A question needs a typed answer; a bare advance is not an accept here.
         self.wait_for_reply(false, |answer| answer).await
     }
 
     async fn on_human_gate(&self, _p: &str, instructions: &str) -> String {
-        self.publish("waiting_approval", vec![instructions.to_string()]);
+        self.publish(RunStatus::WaitingApproval, vec![instructions.to_string()]);
         self.ping("flows: approval needed", instructions);
         // A bare advance approves; typed feedback is captured so the gate's loop
         // condition sees it; empty answer means approve.
@@ -1379,7 +1379,7 @@ fn spawn_background(
     let _ = store.write_meta(&meta);
     let _ = store.write_state(&flows_core::models::RunState {
         run_id: run_id.into(),
-        status: "running".into(),
+        status: RunStatus::Running,
         current_phase: phases.first().map(|p| p.name.clone()).unwrap_or_default(),
         current_phase_index: 0,
         round: 0,
@@ -1649,20 +1649,14 @@ fn resolve_run_id(store: &Store, partial: &str) -> Result<String, String> {
 fn cmd_delete(run_id: &str, force: bool) -> Result<(), String> {
     let store = Store::new(flows_dir());
     let run_id = &resolve_run_id(&store, run_id)?;
-    let status = store
-        .read_state(run_id)
-        .ok()
-        .flatten()
-        .map(|s| s.status)
-        .unwrap_or_default();
-    let active = matches!(
-        status.as_str(),
-        "running" | "waiting_input" | "waiting_approval" | ""
-    );
+    // Unreadable state → treat as active (don't skip stopping it).
+    let status = store.run_status(run_id);
+    let active = status.map_or(true, |s| s.is_active());
 
     if active && !force {
+        let label = status.map_or_else(|| "unknown".to_string(), |s| s.to_string());
         return Err(format!(
-            "run {run_id} is still active ({status}) — use `flows delete {run_id} --force` to stop and delete it"
+            "run {run_id} is still active ({label}) — use `flows delete {run_id} --force` to stop and delete it"
         ));
     }
     if active && force {
@@ -1679,16 +1673,8 @@ fn cmd_delete(run_id: &str, force: bool) -> Result<(), String> {
 /// fallback) the worker pid if we recorded one — a worker mid-LLM-call may not poll
 /// the cancel promptly. Returns whether the run was active.
 fn stop_active_run(store: &Store, run_id: &str) -> bool {
-    let status = store
-        .read_state(run_id)
-        .ok()
-        .flatten()
-        .map(|s| s.status)
-        .unwrap_or_default();
-    let active = matches!(
-        status.as_str(),
-        "running" | "waiting_input" | "waiting_approval" | ""
-    );
+    // Unreadable state → treat as active (don't skip stopping it).
+    let active = store.run_status(run_id).map_or(true, |s| s.is_active());
     if !active {
         return false;
     }
@@ -1726,7 +1712,7 @@ fn cmd_stop(run_id: &str) -> Result<(), String> {
     // Reflect the stop in state so listings/attach show it (the worker may have been
     // killed before it could update its own status).
     if let Ok(Some(mut st)) = store.read_state(run_id) {
-        st.status = "cancelled".into();
+        st.status = RunStatus::Cancelled;
         st.questions = vec![];
         let _ = store.write_state(&st);
     }
@@ -1738,13 +1724,7 @@ fn cmd_clean(all: bool) -> Result<(), String> {
     let store = Store::new(flows_dir());
     let (mut removed, mut kept) = (0usize, 0usize);
     for m in store.list_runs() {
-        let status = store
-            .read_state(&m.run_id)
-            .ok()
-            .flatten()
-            .map(|s| s.status)
-            .unwrap_or_default();
-        let finished = matches!(status.as_str(), "completed" | "failed" | "cancelled");
+        let finished = store.run_status(&m.run_id).is_some_and(|s| s.is_finished());
         if all || finished {
             let _ = store.delete_run(&m.run_id);
             removed += 1;
@@ -1772,11 +1752,8 @@ fn cmd_runs() -> Result<(), String> {
     println!("{:<8}  {:<16}  {:>9}  idea", "id", "status", "cost");
     for meta in runs {
         let status = store
-            .read_state(&meta.run_id)
-            .ok()
-            .flatten()
-            .map(|s| s.status)
-            .unwrap_or_else(|| "?".into());
+            .run_status(&meta.run_id)
+            .map_or_else(|| "?".to_string(), |s| s.to_string());
         let log = flows_core::llm_log::log_path(&store.run_dir(&meta.run_id));
         let cost = flows_core::usage::parse_usage(&log, &meta.run_id, "").total_cost();
         let cost_s = if cost > 0.0 {
@@ -1847,7 +1824,7 @@ mod waiting_tests {
         store
             .write_state(&RunState {
                 run_id: run_id.into(),
-                status: "running".into(),
+                status: RunStatus::Running,
                 current_phase: "plan".into(),
                 current_phase_index: 0,
                 round: 0,
@@ -1875,7 +1852,7 @@ mod waiting_tests {
             // wait until the run publishes the question, then answer it
             loop {
                 if let Ok(Some(st)) = s2.read_state("r1") {
-                    if st.status == "waiting_input" && st.questions == vec!["color?".to_string()] {
+                    if st.status == RunStatus::WaitingInput && st.questions == vec!["color?".to_string()] {
                         break;
                     }
                 }
@@ -1888,7 +1865,7 @@ mod waiting_tests {
         assert_eq!(answer, "blue");
         sender.await.unwrap();
         // status restored to running after answering
-        assert_eq!(store.read_state("r1").unwrap().unwrap().status, "running");
+        assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Running);
     }
 
     #[tokio::test]

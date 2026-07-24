@@ -21,6 +21,8 @@ pub enum ConfigError {
     MissingName,
     #[error("Phase {name:?}: max_loop_iterations must be an integer, got {got}")]
     BadMaxLoop { name: String, got: String },
+    #[error("Phase {name:?}: {reason}")]
+    BadOnFailure { name: String, reason: String },
     #[error(transparent)]
     Model(#[from] ModelError),
     #[error("failed reading {path}: {source}")]
@@ -303,13 +305,21 @@ fn parse_phase(p: &Value) -> Result<PhaseConfig> {
 
     let tools = resolve_tools(p.get("tools"))?;
 
+    let on_failure = match get_str(p, "on_failure") {
+        Some(s) => s.parse().map_err(|reason| ConfigError::BadOnFailure {
+            name: name.clone(),
+            reason,
+        })?,
+        None => crate::models::OnFailure::Stop,
+    };
+
     Ok(PhaseConfig {
         name,
         phase_type,
         prompt: get_str(p, "prompt"),
         tools,
         auto_advance: get_bool(p, "auto_advance").unwrap_or(false),
-        on_failure: get_str(p, "on_failure").unwrap_or_else(|| "stop".to_string()),
+        on_failure,
         command: get_str(p, "command"),
         instructions: get_str(p, "instructions"),
         max_clarification_rounds: get_u32(p, "max_clarification_rounds").unwrap_or(3),

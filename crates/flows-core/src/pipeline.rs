@@ -27,7 +27,7 @@ pub fn validate_pipeline(phases: &[PhaseConfig]) -> Result<(), String> {
                     p.name
                 ));
             }
-            if p.on_failure.starts_with("retry:") {
+            if matches!(p.on_failure, crate::models::OnFailure::Retry(_)) {
                 return Err(format!(
                     "Phase {:?}: retry:X on_failure not supported in DAG mode. \
                      Use 'stop' or 'continue'.",

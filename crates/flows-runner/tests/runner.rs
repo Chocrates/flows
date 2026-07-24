@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use flows_core::models::{GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig};
+use flows_core::models::{GlobalConfig, LLMConfig, OnFailure, PhaseConfig, PhaseType, ProjectConfig, RunStatus};
 use flows_core::state::Store;
 use flows_llm::types::{Completion, CompletionRequest, LlmError, Usage};
 use flows_llm::Provider;
@@ -224,7 +224,7 @@ async fn linear_agent_script_human_completes() {
     let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
     assert_eq!(completed, vec!["plan", "lint", "approve"]);
     // state + artifacts persisted
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, "completed");
+    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Completed);
     assert!(store.artifact_path("r1", "plan").exists());
     assert!(store.artifact_path("r1", "lint").exists());
 }
@@ -234,7 +234,7 @@ async fn script_failure_stops_run() {
     let d = tempdir().unwrap();
     let store = Store::new(d.path().join(".flows"));
     let mut lint = script("lint", "exit 1");
-    lint.on_failure = "stop".into();
+    lint.on_failure = OnFailure::Stop;
     let phases = vec![agent("plan"), lint, agent("after")];
     let provider = Mock::new(vec![artifact("{}")]); // only plan runs
     let cb = Cb::default();
@@ -243,7 +243,7 @@ async fn script_failure_stops_run() {
         .unwrap_err();
     assert!(matches!(err, RunError::Failed { .. }));
     assert!(!cb.started.lock().unwrap().contains(&"after".to_string()));
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, "failed");
+    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Failed);
 }
 
 #[tokio::test]
@@ -251,7 +251,7 @@ async fn script_failure_continue_proceeds() {
     let d = tempdir().unwrap();
     let store = Store::new(d.path().join(".flows"));
     let mut lint = script("lint", "exit 1");
-    lint.on_failure = "continue".into();
+    lint.on_failure = OnFailure::Continue;
     let phases = vec![lint, script("done", "echo done")];
     let cb = Cb::default();
     let completed = run(&phases, Mock::new(vec![]), &cb, d.path(), &store)
@@ -265,7 +265,7 @@ async fn agent_error_artifact_stops() {
     let d = tempdir().unwrap();
     let store = Store::new(d.path().join(".flows"));
     let mut plan = agent("plan");
-    plan.on_failure = "stop".into();
+    plan.on_failure = OnFailure::Stop;
     let provider = Mock::new(vec![artifact(r#"{"error": "boom"}"#)]);
     // an artifact whose content is {"error": ...} → treated as failure
     let cb = Cb::default();
@@ -288,7 +288,7 @@ async fn retry_on_failure_jumps_back() {
         // retry:implement loops — bounded by re-running implement which then...
         // to avoid infinite loop, make the script pass (echo) and assert order.
         let mut s = script("test", "echo ok");
-        s.on_failure = "retry:implement".into();
+        s.on_failure = OnFailure::Retry("implement".into());
         s
     }];
     let provider = Mock::new(vec![artifact("{}")]); // implement runs once, test passes
@@ -316,7 +316,7 @@ async fn loop_back_on_condition_bounded() {
     ]);
     let cb = Cb::default();
     let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, "completed");
+    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Completed);
     // implement appears started twice (looped once)
     let started = cb.started.lock().unwrap();
     assert_eq!(started.iter().filter(|p| *p == "implement").count(), 2);
@@ -434,7 +434,7 @@ async fn auto_test_unresolvable_stops_run_despite_retry() {
     // repo has no detectable stack → @auto:test can't resolve → fatal stop,
     // even though on_failure says retry:implement.
     let mut test = script("test", "@auto:test");
-    test.on_failure = "retry:implement".into();
+    test.on_failure = OnFailure::Retry("implement".into());
     let phases = vec![agent("implement"), test];
     let provider = Mock::new(vec![artifact("{}")]);
     let cb = Cb::default();
@@ -442,7 +442,7 @@ async fn auto_test_unresolvable_stops_run_despite_retry() {
         .await
         .unwrap_err();
     assert!(matches!(err, RunError::Failed { .. }));
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, "failed");
+    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Failed);
 }
 
 #[tokio::test]

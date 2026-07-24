@@ -400,7 +400,7 @@ fn run_rows(store: &Store) -> Vec<RunRow> {
                 .read_state(&m.run_id)
                 .ok()
                 .flatten()
-                .map(|s| s.status)
+                .map(|s| s.status.to_string())
                 .unwrap_or_default();
             (m.run_id, status, m.idea)
         })

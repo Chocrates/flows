@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use flows_core::models::{resolve_preset, resolve_profile, resolve_tools, PhaseType};
+use flows_core::models::{resolve_preset, resolve_profile, resolve_tools, OnFailure, PhaseType};
 use flows_core::{Artifact, LLMConfig, PhaseConfig, ToolsConfig, WebSearchConfig};
 
 fn base() -> LLMConfig {
@@ -110,7 +110,7 @@ fn llm_config_default_model() {
 fn phase_defaults() {
     let p = PhaseConfig::new("plan");
     assert_eq!(p.phase_type, PhaseType::Agent);
-    assert_eq!(p.on_failure, "stop");
+    assert_eq!(p.on_failure, OnFailure::Stop);
     assert_eq!(p.max_clarification_rounds, 3);
     assert_eq!(p.max_tool_rounds, None);
     assert_eq!(p.max_loop_iterations, 3);

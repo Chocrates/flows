@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use flows_core::models::{GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig};
+use flows_core::models::{GlobalConfig, LLMConfig, OnFailure, PhaseConfig, PhaseType, ProjectConfig, RunStatus};
 use flows_core::state::Store;
 use flows_llm::types::{Completion, CompletionRequest, LlmError};
 use flows_llm::Provider;
@@ -100,7 +100,7 @@ async fn diamond_respects_dependency_order() {
     assert_eq!(order.len(), 4);
     assert_eq!(order[0], "a"); // root first
     assert_eq!(order[3], "d"); // sink last
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, "completed");
+    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Completed);
     // b and c only start after a
     let started = cb.started.lock().unwrap();
     let pa = started.iter().position(|x| x == "a").unwrap();
@@ -114,7 +114,7 @@ async fn dag_on_failure_continue_lets_dependents_run() {
     let d = tempdir().unwrap();
     let store = Store::new(d.path().join(".flows"));
     let mut a = script("a", "exit 1", &[]);
-    a.on_failure = "continue".into();
+    a.on_failure = OnFailure::Continue;
     let phases = vec![a, script("b", "echo b", &["a"])];
     let cb = Cb::default();
     let order = run(&phases, &cb, d.path(), &store).await.unwrap();
@@ -126,14 +126,14 @@ async fn dag_on_failure_stop_fails_run() {
     let d = tempdir().unwrap();
     let store = Store::new(d.path().join(".flows"));
     let mut a = script("a", "exit 1", &[]);
-    a.on_failure = "stop".into();
+    a.on_failure = OnFailure::Stop;
     let phases = vec![a, script("b", "echo b", &["a"])];
     let cb = Cb::default();
     let err = run(&phases, &cb, d.path(), &store).await.unwrap_err();
     assert!(matches!(err, RunError::Failed { .. }));
     // b must never have started (its dep failed / run stopped)
     assert!(!cb.started.lock().unwrap().contains(&"b".to_string()));
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, "failed");
+    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Failed);
 }
 
 #[tokio::test]

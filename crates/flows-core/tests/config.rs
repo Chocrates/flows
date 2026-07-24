@@ -408,3 +408,16 @@ fn falls_back_to_openai_api_key_env() {
     std::env::remove_var("OPENAI_API_KEY");
     assert_eq!(g.llm.api_key, "sk-openai-xyz");
 }
+
+#[test]
+fn bad_on_failure_rejected_at_load() {
+    use flows_core::config::parse_phases_from_yaml;
+    let yaml = "phases:\n  - name: build\n    type: agent\n    on_failure: bogus\n";
+    let err = parse_phases_from_yaml(yaml).unwrap_err().to_string();
+    assert!(err.contains("on_failure"), "should name the field: {err}");
+    // Valid forms still parse.
+    for ok in ["stop", "continue", "retry:implement"] {
+        let y = format!("phases:\n  - name: p\n    type: agent\n    on_failure: \"{ok}\"\n");
+        assert!(parse_phases_from_yaml(&y).is_ok(), "should accept {ok}: {:?}", parse_phases_from_yaml(&y).err());
+    }
+}

@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use flows_core::dryrun::{build_plan_lines, dry_run, validate_dry_run};
-use flows_core::models::{GlobalConfig, PhaseConfig, PhaseType, ProjectConfig};
+use flows_core::models::{GlobalConfig, OnFailure, PhaseConfig, PhaseType, ProjectConfig};
 use flows_core::pipeline::validate_pipeline;
 
 fn agent(name: &str) -> PhaseConfig {
@@ -53,7 +53,7 @@ fn dag_loop_forbidden() {
 fn dag_retry_forbidden() {
     let mut b = agent("b");
     b.depends_on = vec!["a".into()];
-    b.on_failure = "retry:a".into();
+    b.on_failure = OnFailure::Retry("a".into());
     let err = validate_pipeline(&[agent("a"), b]).unwrap_err();
     assert!(err.contains("retry:X on_failure not supported in DAG"));
 }

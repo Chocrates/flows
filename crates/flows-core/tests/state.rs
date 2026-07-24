@@ -1,6 +1,6 @@
 //! Ports of the behavior in `tests/test_state.py`.
 
-use flows_core::models::{RunMeta, RunState};
+use flows_core::models::{RunMeta, RunState, RunStatus};
 use flows_core::state::Store;
 use tempfile::tempdir;
 
@@ -26,7 +26,7 @@ fn meta(run_id: &str) -> RunMeta {
 fn state(run_id: &str) -> RunState {
     RunState {
         run_id: run_id.into(),
-        status: "running".into(),
+        status: RunStatus::Running,
         current_phase: "plan".into(),
         current_phase_index: 0,
         round: 0,
