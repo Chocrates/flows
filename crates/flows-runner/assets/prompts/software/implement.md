@@ -55,6 +55,13 @@ contents inside your final response or the artifact JSON. The artifact is a shor
 **summary** of work already written to disk, not the code itself. A phase that ends
 without `write_file` calls has produced nothing and will fail.
 
+**Never delete your source tree or start over.** Do not `rm -rf src` (or otherwise
+wipe your files) to "take a simpler approach" — that destroys working code and
+regresses progress. When a build fails, **fix the errors in place, incrementally**:
+read the compiler output, correct the specific lines, rebuild. Simplifying means
+editing a function, not deleting the project. If an external library's API keeps
+failing, verify it with `lookup`/`http_get` (above) rather than rewriting blindly.
+
 **Create files at the repo root shown above — do not nest the project in a new
 subdirectory.** The build, lint, and test steps run from the repo root, so a
 `Cargo.toml` (or equivalent manifest) placed in a subfolder won't be found and the

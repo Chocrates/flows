@@ -171,6 +171,53 @@ async fn reads_file_via_tool() {
     assert_eq!(art.content["read"], "ok");
 }
 
+#[derive(Default)]
+struct CaptureCb {
+    results: Mutex<Vec<String>>,
+}
+#[async_trait]
+impl AgentCallbacks for CaptureCb {
+    fn on_tool_result(&self, _name: &str, summary: &str, _is_error: bool) {
+        self.results.lock().unwrap().push(summary.to_string());
+    }
+}
+
+#[tokio::test]
+async fn reread_of_unchanged_file_is_deduped() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("hello.txt"), "world").unwrap();
+    let provider = Mock::new(vec![
+        tool("read_file", r#"{"path": "hello.txt"}"#),
+        tool("read_file", r#"{"path": "hello.txt"}"#), // identical re-read
+        artifact_json(r#"{"read": "ok"}"#),
+    ]);
+    let cb = CaptureCb::default();
+    run_agent_phase(
+        &files_phase(),
+        "idea",
+        d.path(),
+        &empty_artifacts(),
+        "feature",
+        &LLMConfig::default(),
+        &provider,
+        &cb,
+        None,
+        &ContextConfig::default(),
+        &WebSearchConfig::default(),
+        0.0,
+        0.0,
+        None,
+    )
+    .await;
+    let results = cb.results.lock().unwrap();
+    assert!(results[0].contains("world"), "first read full: {:?}", results[0]);
+    assert!(
+        results[1].contains("already read"),
+        "second read should be deduped: {:?}",
+        results[1]
+    );
+}
+
 struct AnswerCb(&'static str);
 #[async_trait]
 impl AgentCallbacks for AnswerCb {
@@ -473,6 +520,64 @@ impl AgentCallbacks for CancelledCb {
     fn cancelled(&self) -> bool {
         true
     }
+}
+
+// Provider whose response takes a long time — stands in for a slow local model.
+struct SlowProvider;
+#[async_trait]
+impl Provider for SlowProvider {
+    async fn complete(&self, _req: &CompletionRequest) -> Result<Completion, LlmError> {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        Ok(Completion {
+            content: "too late".into(),
+            reasoning: None,
+            tool_calls: vec![],
+            usage: Usage::default(),
+            stop_reason: None,
+        })
+    }
+}
+
+// Not cancelled at the round-top check, then cancelled while the stream is in
+// flight — so only the mid-stream race can catch it.
+struct CancelAfterFirstCheck(std::sync::atomic::AtomicUsize);
+#[async_trait]
+impl AgentCallbacks for CancelAfterFirstCheck {
+    fn cancelled(&self) -> bool {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+    }
+}
+
+#[tokio::test]
+async fn cancel_mid_stream_aborts_without_waiting_out_the_call() {
+    let start = std::time::Instant::now();
+    let result = run_agent_phase(
+        &files_phase(),
+        "idea",
+        Path::new("/tmp"),
+        &empty_artifacts(),
+        "feature",
+        &LLMConfig::default(),
+        &SlowProvider,
+        &CancelAfterFirstCheck(std::sync::atomic::AtomicUsize::new(0)),
+        None,
+        &ContextConfig::default(),
+        &WebSearchConfig::default(),
+        0.0,
+        0.0,
+        None,
+    )
+    .await;
+    assert_eq!(
+        result.artifact.content.get("error").and_then(|e| e.as_str()),
+        Some("cancelled")
+    );
+    // Must abort mid-stream (~300ms poll), not wait out the 5s call.
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(3),
+        "cancel took too long: {:?}",
+        start.elapsed()
+    );
 }
 
 #[tokio::test]

@@ -208,6 +208,20 @@ fn input_mode_keys_do_not_trigger_shortcuts() {
 }
 
 #[test]
+fn ctrl_c_detaches_without_answering() {
+    let mut a = app();
+    let (reply, mut rx) = tokio::sync::oneshot::channel();
+    a.handle_ui_event(UiEvent::NeedInput {
+        prompt: "?".into(),
+        reply,
+    });
+    // Ctrl+C: quit the TUI, but do NOT send a reply — the gate stays pending.
+    a.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(a.quit);
+    assert!(rx.try_recv().is_err(), "no answer should have been sent");
+}
+
+#[test]
 fn input_mode_view_controls_still_work() {
     let mut a = app();
     // Some scrollback so scroll has an effect.

@@ -1,7 +1,7 @@
 //! Agent phase — the LLM tool loop: build the request, stream the response,
 //! dispatch tools, honour round/cost budgets, parse questions/artifacts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -218,6 +218,14 @@ impl AgentCallbacks for NoopCallbacks {}
 pub struct AgentResult {
     pub artifact: Artifact,
     pub cost_usd: f64,
+}
+
+/// Cheap non-cryptographic hash of a string, for detecting an unchanged re-read.
+fn hash_str(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
 }
 
 fn error_artifact(phase: &str, idea: &str, msg: impl Into<String>) -> Artifact {
@@ -532,10 +540,12 @@ fn summarize_tool_call(name: &str, args: &Value) -> String {
             args.get("path").and_then(Value::as_str).unwrap_or("")
         ),
         "write_file" => {
+            // Count chars (not bytes) to match the `Written: … (N chars)` result —
+            // otherwise non-ASCII content (e.g. ♠♥♦♣) makes the two counts disagree.
             let n = args
                 .get("content")
                 .and_then(Value::as_str)
-                .map(str::len)
+                .map(|s| s.chars().count())
                 .unwrap_or(0);
             format!(
                 "write_file {:?} ({n} chars)",
@@ -995,6 +1005,9 @@ your context small.",
     // Consecutive rounds whose only write was a no-op (unchanged bytes); drives the
     // nudge/abort loop guard below.
     let mut noop_write_streak = 0u32;
+    // read_file dedup cache: call-args → content hash of what we already served, so
+    // an unchanged re-read returns a short pointer instead of the full file again.
+    let mut read_cache: HashMap<String, u64> = HashMap::new();
 
     // Optional full-prompt transcript (what the model actually saw each round),
     // gated by `FLOWS_TRANSCRIPT` so normal runs aren't bloated. The eval harness
@@ -1069,10 +1082,28 @@ your context small.",
         let on_token = |t: &str| filter.lock().unwrap().feed(t, &emit);
         let no_thinking = |_: &str| {};
         let t0 = std::time::Instant::now();
-        let completion = match provider
-            .complete_streaming(&req, &on_token, &no_thinking)
-            .await
-        {
+        // Race the (possibly long) streaming call against a cancel poll so `c`
+        // takes effect within ~300ms even mid-response. Dropping the future aborts
+        // the in-flight HTTP request. Without this, cancel only lands at the next
+        // round boundary — i.e. after a 30-120s call finishes ("c doesn't cancel").
+        let stream_fut = provider.complete_streaming(&req, &on_token, &no_thinking);
+        tokio::pin!(stream_fut);
+        let stream_result = loop {
+            tokio::select! {
+                r = &mut stream_fut => break r,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {
+                    if callbacks.cancelled() {
+                        filter.lock().unwrap().finish(&emit);
+                        callbacks.on_note("⛔ cancelled — aborting the in-flight request");
+                        return AgentResult {
+                            artifact: error_artifact(&phase.name, idea, "cancelled"),
+                            cost_usd: phase_cost,
+                        };
+                    }
+                }
+            }
+        };
+        let completion = match stream_result {
             Ok(c) => c,
             Err(e) => {
                 // Surface the failure in the output pane — otherwise a dropped LLM
@@ -1231,7 +1262,7 @@ your context small.",
                     continue;
                 }
 
-                let result = dispatch_tool(
+                let mut result = dispatch_tool(
                     &tc.name,
                     &args,
                     &phase.tools,
@@ -1241,6 +1272,28 @@ your context small.",
                     flows_dir,
                 )
                 .await;
+                // Read dedup: local models frequently re-read the same unchanged
+                // file dozens of times (observed: 137 reads of 17 files), bloating
+                // context and burning rounds. Serve a re-read of identical content
+                // as a short pointer instead of the full text. A changed file (the
+                // model edited it since) hashes differently, so it's served in full
+                // and re-cached. Keyed on the exact call args so different ranges of
+                // one file aren't collapsed together.
+                if tc.name == "read_file" && !result.starts_with("Error") {
+                    let key = format!("{}|{}", tc.name, tc.arguments);
+                    let h = hash_str(&result);
+                    if read_cache.get(&key) == Some(&h) {
+                        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+                        result = format!(
+                            "(You already read {path:?} earlier this phase and it is unchanged \
+                             ({} chars). Reuse that copy — re-reading the same file wastes context \
+                             and rounds. Edit it with write_file if you need to change it.)",
+                            result.chars().count()
+                        );
+                    } else {
+                        read_cache.insert(key, h);
+                    }
+                }
                 let (summary, is_error) = summarize_tool_result(&result);
                 callbacks.on_tool_result(&tc.name, &summary, is_error);
                 // Track search productivity: a search with no result URL (empty or

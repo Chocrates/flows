@@ -1147,7 +1147,10 @@ impl RunnerCallbacks for Waiting {
         self.publish("waiting_input", q.to_vec());
         self.ping("flows: needs input", &q.join("  •  "));
         loop {
-            if self.store.poll_cancel(&self.run_id) {
+            // Peek (don't consume): leave the cancel signal for the runner's own
+            // post-phase check to consume and actually cancel. Consuming it here
+            // would return an empty answer that the gate reads as "proceed".
+            if self.store.is_cancelled(&self.run_id) {
                 return String::new();
             }
             if let Some(answer) = self.store.read_answer(&self.run_id) {
@@ -1163,7 +1166,10 @@ impl RunnerCallbacks for Waiting {
         self.publish("waiting_approval", vec![instructions.to_string()]);
         self.ping("flows: approval needed", instructions);
         loop {
-            if self.store.poll_cancel(&self.run_id) {
+            // Peek (don't consume) — see on_questions above. Consuming cancel here
+            // returns "" which the approval gate reads as APPROVE, resuming the run
+            // instead of killing it.
+            if self.store.is_cancelled(&self.run_id) {
                 return String::new();
             }
             // An answer (typed feedback) also advances; capture it so the human
@@ -1911,5 +1917,26 @@ mod waiting_tests {
         };
         store.send_cancel("r1").unwrap();
         assert_eq!(w.on_questions("plan", &["q?".into()]).await, "");
+        // The gate must PEEK, not consume — the runner's own poll_cancel needs the
+        // signal to actually cancel the run (else the empty answer reads as proceed).
+        assert!(store.is_cancelled("r1"), "cancel signal must survive the gate");
+    }
+
+    #[tokio::test]
+    async fn cancel_at_approval_gate_does_not_consume_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        seed(&store, "r1");
+        let w = Waiting {
+            store: store.clone(),
+            run_id: "r1".into(),
+            notify: false,
+            sound: false,
+        };
+        store.send_cancel("r1").unwrap();
+        // Unblocks with an empty answer, but leaves the cancel signal for the runner
+        // — otherwise the approval gate would read "" as APPROVE and resume the run.
+        assert_eq!(w.on_human_gate("approve", "ok?").await, "");
+        assert!(store.is_cancelled("r1"), "cancel signal must survive the gate");
     }
 }

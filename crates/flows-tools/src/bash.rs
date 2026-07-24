@@ -19,6 +19,13 @@ fn blocked_patterns() -> &'static [Regex] {
     PATTERNS.get_or_init(|| {
         [
             r"rm\s+-rf\s+[/~]",
+            // Recursive delete of the working dir or a glob — wipes everything.
+            r"\brm\s+-[a-z]*r[a-z]*\s+(-[a-z]+\s+)*(\.|\*)(\s|$)",
+            // Recursive delete of a source directory. The model must fix code in
+            // place, not nuke and restart (observed failure: `rm -rf src` then
+            // rebuild a stub). Build outputs (target/node_modules/dist) are NOT
+            // matched — cleaning those is legitimate.
+            r"\brm\s+-[a-z]*r[a-z]*\s+(-[a-z]+\s+)*(\./)?(src|lib|app|source|crates|tests?)(/)?(\s|$)",
             r"(curl|wget).*\|\s*(ba)?sh",
             r">\s*/etc/",
             r"\bsudo\b",

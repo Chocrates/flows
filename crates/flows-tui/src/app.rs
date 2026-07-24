@@ -444,6 +444,16 @@ impl App {
         // output toggles must keep working when a question/gate is pending. Scroll
         // keys don't insert text; toggles use Alt so plain t/j/s still type.
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Detach WITHOUT answering: quit the TUI and leave the question pending. A
+        // backgrounded run keeps waiting on the gate — re-attach to answer later.
+        // Distinct from Enter (submit) and Esc (accept), so you can leave to check
+        // something without accidentally approving.
+        if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')) {
+            self.quit = true;
+            self.status = "detached (question still pending) — reattach to answer".into();
+            return;
+        }
         match key.code {
             KeyCode::Up => return self.output.scroll_up(1),
             KeyCode::Down => return self.output.scroll_down(1),
@@ -613,9 +623,9 @@ impl App {
         f.render_widget(Paragraph::new(self.help_line()), rows[help_idx]);
         if let Some(i) = panel_idx {
             let title = if self.status.contains("approval") {
-                " approve (Enter=ok · type feedback) "
+                " approve (Enter=ok · type feedback · ^C detach) "
             } else {
-                " answer "
+                " answer (Enter=submit · ^C detach) "
             };
             let block = Block::bordered()
                 .title(title)
