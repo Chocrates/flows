@@ -5,6 +5,7 @@ pub mod bash;
 pub mod code_search;
 pub mod error;
 pub mod files;
+pub mod html;
 pub mod http;
 pub mod lookup;
 pub mod plugin;

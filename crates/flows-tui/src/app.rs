@@ -136,24 +136,28 @@ impl ChannelCallbacks {
     }
 }
 
+/// Format clarification questions for the input panel: a single question inline,
+/// several numbered one-per-line — so a multi-part prompt is readable instead of
+/// run together. Shared by the live run and `attach`.
+pub fn format_questions(questions: &[String]) -> String {
+    match questions {
+        [only] => format!("? {only}"),
+        many => {
+            let list = many
+                .iter()
+                .enumerate()
+                .map(|(i, q)| format!("{}. {q}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("?\n{list}")
+        }
+    }
+}
+
 #[async_trait]
 impl RunnerCallbacks for ChannelCallbacks {
     async fn on_questions(&self, _phase: &str, questions: &[String]) -> String {
-        // One question per line (numbered when there are several) so a multi-part
-        // clarification is readable instead of run together on one line.
-        let prompt = match questions {
-            [only] => format!("? {only}"),
-            many => {
-                let list = many
-                    .iter()
-                    .enumerate()
-                    .map(|(i, q)| format!("{}. {q}", i + 1))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!("?\n{list}")
-            }
-        };
-        self.request_input(prompt).await
+        self.request_input(format_questions(questions)).await
     }
     async fn on_human_gate(&self, _phase: &str, instructions: &str) -> String {
         self.request_input(format!("⏸ {instructions}")).await

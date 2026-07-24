@@ -7,28 +7,7 @@ use serde_json::{json, Value};
 use flows_core::models::WebSearchConfig;
 
 use crate::error::{ToolError, ToolResult};
-
-/// Strip HTML tags and decode a few common entities.
-fn strip_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#x27;", "'")
-        .replace("&#39;", "'")
-        .trim()
-        .to_string()
-}
+use crate::html::strip_html;
 
 /// DuckDuckGo wraps result links as `/l/?uddg=<percent-encoded-url>`; unwrap them.
 fn unwrap_href(href: &str) -> String {
@@ -120,11 +99,7 @@ pub async fn web_search(query: &str, config: &WebSearchConfig) -> ToolResult<Val
 }
 
 fn client(timeout_secs: u64) -> ToolResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .user_agent("Mozilla/5.0 flows/0.2")
-        .build()
-        .map_err(|e| ToolError::new(format!("client build failed: {e}")))
+    crate::http::http_client(timeout_secs, "Mozilla/5.0 flows/0.2", true)
 }
 
 async fn duckduckgo(query: &str, max: usize) -> ToolResult<Value> {

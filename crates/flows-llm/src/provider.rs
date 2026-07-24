@@ -14,6 +14,65 @@ use crate::types::{Completion, CompletionRequest, LlmError};
 /// Callback for streamed text/reasoning deltas.
 pub type Emit<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
+/// An SSE event accumulator: fold decoded `data:` JSON events into a `Completion`,
+/// emitting text/reasoning deltas as they arrive. Implemented by each provider's
+/// accumulator so the byte-stream framing lives in one place ([`drive_sse`]).
+pub trait SseAccumulator {
+    fn process(&mut self, event: &Value, on_token: Emit<'_>, on_thinking: Emit<'_>);
+    fn finish(self) -> Completion;
+}
+
+impl SseAccumulator for Accumulator {
+    fn process(&mut self, event: &Value, on_token: Emit<'_>, on_thinking: Emit<'_>) {
+        Accumulator::process(self, event, on_token, on_thinking);
+    }
+    fn finish(self) -> Completion {
+        Accumulator::finish(self)
+    }
+}
+
+impl SseAccumulator for crate::openai::StreamAccumulator {
+    fn process(&mut self, event: &Value, on_token: Emit<'_>, on_thinking: Emit<'_>) {
+        crate::openai::StreamAccumulator::process(self, event, on_token, on_thinking);
+    }
+    fn finish(self) -> Completion {
+        crate::openai::StreamAccumulator::finish(self)
+    }
+}
+
+/// Read an SSE byte stream, split it into events on blank lines, and feed each
+/// event's `data:` JSON into `acc` (skipping empties and `[DONE]`). Shared by
+/// every streaming provider — the framing is identical, only the accumulator and
+/// the request differ.
+async fn drive_sse<A: SseAccumulator>(
+    resp: reqwest::Response,
+    mut acc: A,
+    on_token: Emit<'_>,
+    on_thinking: Emit<'_>,
+) -> Result<Completion, LlmError> {
+    let mut buf = String::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| LlmError::Http(e.to_string()))?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(pos) = buf.find("\n\n") {
+            let block: String = buf.drain(..pos + 2).collect();
+            for line in block.lines() {
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
+                    if data.is_empty() || data == "[DONE]" {
+                        continue;
+                    }
+                    if let Ok(ev) = serde_json::from_str::<Value>(data) {
+                        acc.process(&ev, on_token, on_thinking);
+                    }
+                }
+            }
+        }
+    }
+    Ok(acc.finish())
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     async fn complete(&self, req: &CompletionRequest) -> Result<Completion, LlmError>;
@@ -111,30 +170,7 @@ impl Provider for AnthropicProvider {
             return Err(LlmError::Api { status, body });
         }
 
-        // Read the SSE byte stream, split into events on blank lines, feed the
-        // `data:` JSON of each into the accumulator.
-        let mut acc = Accumulator::new();
-        let mut buf = String::new();
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| LlmError::Http(e.to_string()))?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(pos) = buf.find("\n\n") {
-                let event_block: String = buf.drain(..pos + 2).collect();
-                for line in event_block.lines() {
-                    if let Some(data) = line.strip_prefix("data:") {
-                        let data = data.trim();
-                        if data.is_empty() || data == "[DONE]" {
-                            continue;
-                        }
-                        if let Ok(ev) = serde_json::from_str::<Value>(data) {
-                            acc.process(&ev, on_token, on_thinking);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(acc.finish())
+        drive_sse(resp, Accumulator::new(), on_token, on_thinking).await
     }
 }
 
@@ -220,28 +256,13 @@ impl Provider for OpenAiProvider {
             return Err(LlmError::Api { status, body });
         }
 
-        let mut acc = crate::openai::StreamAccumulator::new();
-        let mut buf = String::new();
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| LlmError::Http(e.to_string()))?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(pos) = buf.find("\n\n") {
-                let block: String = buf.drain(..pos + 2).collect();
-                for line in block.lines() {
-                    if let Some(data) = line.strip_prefix("data:") {
-                        let data = data.trim();
-                        if data.is_empty() || data == "[DONE]" {
-                            continue;
-                        }
-                        if let Ok(ev) = serde_json::from_str::<Value>(data) {
-                            acc.process(&ev, on_token, on_thinking);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(acc.finish())
+        drive_sse(
+            resp,
+            crate::openai::StreamAccumulator::new(),
+            on_token,
+            on_thinking,
+        )
+        .await
     }
 }
 

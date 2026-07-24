@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::error::{ToolError, ToolResult};
+use crate::html::strip_html;
 
 /// One normalized result row, uniform across every source.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -63,12 +64,8 @@ pub fn source_catalog() -> String {
 }
 
 fn client() -> ToolResult<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        // crates.io / GitHub require a descriptive User-Agent; be a good citizen.
-        .user_agent("flows/0.2 structured-lookup (https://github.com/)")
-        .build()
-        .map_err(|e| ToolError::new(format!("client build failed: {e}")))
+    // crates.io / GitHub require a descriptive User-Agent; be a good citizen.
+    crate::http::http_client(12, "flows/0.2 structured-lookup (https://github.com/)", true)
 }
 
 /// Run a structured lookup against `source`. Returns
@@ -113,27 +110,6 @@ async fn get_json(
         return Err(ToolError::new(format!("HTTP {status}: {head}")));
     }
     serde_json::from_str(&text).map_err(|e| ToolError::new(format!("bad JSON from {base}: {e}")))
-}
-
-/// Strip HTML tags + decode a few entities (Wikipedia snippets are HTML).
-fn strip_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out.replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .trim()
-        .to_string()
 }
 
 fn s(v: &Value, key: &str) -> String {
@@ -462,10 +438,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn strip_html_decodes_entities() {
-        assert_eq!(strip_html("<b>Bevy</b> &amp; ECS"), "Bevy & ECS");
-    }
+    // strip_html now lives in `crate::html` and is tested there.
 
     #[test]
     fn crate_name_query_strips_version() {

@@ -1120,6 +1120,32 @@ impl Waiting {
         }
     }
 
+    /// Poll the run's signal files until the gate is answered. Peeks the cancel
+    /// signal (leaving it for the runner to consume + cancel), returns a typed
+    /// answer through `map_answer`, and — when `accept_advance` — treats a bare
+    /// advance as "approved". Shared by `on_questions` and `on_human_gate`.
+    async fn wait_for_reply(
+        &self,
+        accept_advance: bool,
+        map_answer: impl Fn(String) -> String,
+    ) -> String {
+        loop {
+            if self.store.is_cancelled(&self.run_id) {
+                return String::new();
+            }
+            if let Some(answer) = self.store.read_answer(&self.run_id) {
+                let _ = self.store.poll_advance(&self.run_id); // clear paired advance
+                self.resume_running();
+                return map_answer(answer);
+            }
+            if accept_advance && self.store.poll_advance(&self.run_id) {
+                self.resume_running();
+                return "approved".into();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
     /// Append streamed output to `<run_dir>/output.log` so `flows attach` can
     /// tail it live (a backgrounded worker has no terminal of its own). Written
     /// as JSONL `{"c": category, "x": text}` so the reader can restore the
@@ -1146,49 +1172,23 @@ impl RunnerCallbacks for Waiting {
     async fn on_questions(&self, _p: &str, q: &[String]) -> String {
         self.publish("waiting_input", q.to_vec());
         self.ping("flows: needs input", &q.join("  •  "));
-        loop {
-            // Peek (don't consume): leave the cancel signal for the runner's own
-            // post-phase check to consume and actually cancel. Consuming it here
-            // would return an empty answer that the gate reads as "proceed".
-            if self.store.is_cancelled(&self.run_id) {
-                return String::new();
-            }
-            if let Some(answer) = self.store.read_answer(&self.run_id) {
-                let _ = self.store.poll_advance(&self.run_id); // clear paired advance
-                self.resume_running();
-                return answer;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
+        // A question needs a typed answer; a bare advance is not an accept here.
+        self.wait_for_reply(false, |answer| answer).await
     }
 
     async fn on_human_gate(&self, _p: &str, instructions: &str) -> String {
         self.publish("waiting_approval", vec![instructions.to_string()]);
         self.ping("flows: approval needed", instructions);
-        loop {
-            // Peek (don't consume) — see on_questions above. Consuming cancel here
-            // returns "" which the approval gate reads as APPROVE, resuming the run
-            // instead of killing it.
-            if self.store.is_cancelled(&self.run_id) {
-                return String::new();
+        // A bare advance approves; typed feedback is captured so the gate's loop
+        // condition sees it; empty answer means approve.
+        self.wait_for_reply(true, |answer| {
+            if answer.is_empty() {
+                "approved".into()
+            } else {
+                answer
             }
-            // An answer (typed feedback) also advances; capture it so the human
-            // gate's loop condition sees the feedback rather than just "approved".
-            if let Some(answer) = self.store.read_answer(&self.run_id) {
-                let _ = self.store.poll_advance(&self.run_id);
-                self.resume_running();
-                return if answer.is_empty() {
-                    "approved".into()
-                } else {
-                    answer
-                };
-            }
-            if self.store.poll_advance(&self.run_id) {
-                self.resume_running();
-                return "approved".into();
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
+        })
+        .await
     }
 
     // -- live output streamed to output.log (tailed by `flows attach`) --------
@@ -1696,17 +1696,19 @@ fn stop_active_run(store: &Store, run_id: &str) -> bool {
     match store.read_meta(run_id).ok().and_then(|m| m.pid) {
         Some(pid) if pid > 0 => {
             #[cfg(unix)]
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            // Still alive? (signal 0 just checks existence) → SIGKILL.
-            #[cfg(unix)]
-            unsafe {
-                if libc::kill(pid, 0) == 0 {
-                    libc::kill(pid, libc::SIGKILL);
+            {
+                use nix::sys::signal::{kill, Signal};
+                use nix::unistd::Pid;
+                let pid = Pid::from_raw(pid);
+                let _ = kill(pid, Signal::SIGTERM);
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                // Still alive? (a `None` signal just probes existence) → SIGKILL.
+                if kill(pid, None).is_ok() {
+                    let _ = kill(pid, Signal::SIGKILL);
                 }
             }
+            #[cfg(not(unix))]
+            std::thread::sleep(std::time::Duration::from_millis(400));
         }
         // No pid recorded (older run): fall back to the cancel signal + grace.
         _ => std::thread::sleep(std::time::Duration::from_millis(300)),
