@@ -129,6 +129,19 @@ fn sh_quote_filter_escapes_arg() {
         parameters: json!({}),
         command: "echo {{ msg | sh_quote }}".into(),
     };
-    let out = run_plugin_tool(&def, &json!({"msg": "hello world"}), d.path()).unwrap();
-    assert!(out.contains("hello world"));
+    // Shell-injection payload: WITHOUT sh_quote, `; touch pwned` would run as a
+    // second command and create the file. WITH it, the whole string is one quoted
+    // literal argument to `echo`.
+    let payload = "; touch pwned #";
+    let out = run_plugin_tool(&def, &json!({"msg": payload}), d.path()).unwrap();
+    // Echoed literally...
+    assert!(
+        out.contains("; touch pwned"),
+        "payload not echoed literally: {out:?}"
+    );
+    // ...and the injected command did NOT execute.
+    assert!(
+        !d.path().join("pwned").exists(),
+        "sh_quote failed to neutralize the injection — `touch pwned` ran"
+    );
 }

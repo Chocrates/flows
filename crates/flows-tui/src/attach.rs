@@ -301,16 +301,15 @@ mod tests {
     use flows_core::LlmLogger;
     use std::io::Write;
 
+    // Unit-checks the signal primitives attach's cleanup relies on. The full
+    // start-of-loop cleanup (inside `attach_loop`) is exercised end-to-end by
+    // `tests/pty.rs`; here we only pin that answer+advance are consumable.
     #[test]
-    fn finished_run_signal_cleanup_consumes_stale_signals() {
-        // Regression: a completed run must not leave answer/advance signals that
-        // could be misread as a pending approval. attach_tui's start-of-loop
-        // cleanup consumes them.
+    fn gate_signals_are_consumable_so_cleanup_can_clear_them() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
         store.ensure_run_dir("r1").unwrap();
         store.send_answer("r1", "approved").unwrap(); // writes answer.txt + advance
-                                                      // mirror attach's cleanup for a finished run
         let _ = store.poll_cancel("r1");
         let _ = store.poll_advance("r1");
         let _ = store.read_answer("r1");
@@ -353,10 +352,11 @@ mod tests {
             .any(|l| l == "plain old line"));
     }
 
+    // Unit-checks the replay helpers (`tail_from` + `push_output_line`) that
+    // `attach_loop` uses to backfill prior output. The loop's own offset=0 start is
+    // covered end-to-end by `tests/pty.rs`.
     #[test]
-    fn attach_replays_existing_output_log_from_start() {
-        // Regression: attaching to an already-running (or finished) run must
-        // backfill the prior output, not show a blank pane waiting for new output.
+    fn tail_from_offset_zero_replays_full_log() {
         use crate::app::OutputLog;
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("output.log");

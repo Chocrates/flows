@@ -71,7 +71,12 @@ pub fn detect_stack(root: &Path) -> StackInfo {
             || is_dir(root, "test");
         info.test_cmd = if has_pytest {
             "pytest -x -q".into()
+        } else if pm == "pip" {
+            // pip is not a task runner (`pip run` doesn't exist); fall back to the
+            // stdlib test discovery, which is always available.
+            "python -m unittest".into()
         } else {
+            // uv / poetry can run a project-defined `test` command.
             format!("{pm} run test")
         };
         if has_pytest {

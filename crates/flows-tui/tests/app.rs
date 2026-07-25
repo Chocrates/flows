@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use flows_tui::app::{App, UiEvent};
+use flows_tui::app::{format_questions, App, UiEvent};
 use flows_tui::PhaseStatus;
 
 fn app() -> App {
@@ -421,4 +421,27 @@ fn status_shows_paused_while_awaiting_input_then_resumes() {
     assert!(!a.status.contains("running"));
     a.handle_key(key(KeyCode::Enter));
     assert!(!a.status.contains("paused"));
+}
+
+#[test]
+fn format_questions_single_inline_multi_numbered() {
+    assert_eq!(format_questions(&["only?".into()]), "? only?");
+    assert_eq!(
+        format_questions(&["a?".into(), "b?".into(), "c?".into()]),
+        "?\n1. a?\n2. b?\n3. c?"
+    );
+}
+
+#[test]
+fn round_event_sets_readout_and_phase_start_clears_it() {
+    let mut a = app();
+    a.handle_ui_event(UiEvent::Round { text: "7/200".into() });
+    assert_eq!(a.round, "7/200");
+    // A new phase resets the round readout so it isn't stale.
+    a.handle_ui_event(UiEvent::PhaseStart {
+        name: "implement".into(),
+        index: 1,
+        total: 2,
+    });
+    assert!(a.round.is_empty(), "round should reset on phase start");
 }

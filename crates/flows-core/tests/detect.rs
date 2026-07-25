@@ -37,7 +37,8 @@ fn detect_python_pip_no_pytest() {
     touch(d.path(), "requirements.txt", "requests\n");
     let info = detect_stack(d.path());
     assert_eq!(info.language, "python");
-    assert_eq!(info.test_cmd, "pip run test");
+    // pip is not a task runner — fall back to the stdlib runner, not `pip run test`.
+    assert_eq!(info.test_cmd, "python -m unittest");
 }
 
 #[test]

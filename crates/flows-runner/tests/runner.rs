@@ -280,20 +280,36 @@ async fn agent_error_artifact_stops() {
 async fn retry_on_failure_jumps_back() {
     let d = tempdir().unwrap();
     let store = Store::new(d.path().join(".flows"));
-    // test script fails once then... it's static, so use retry with a script that
-    // always fails but capped indirectly: use agent implement + a test script that
-    // passes after the file exists.
+    // `test` FAILS the first run (creates the marker, exit 1) then PASSES (marker
+    // exists, exit 0). So its `on_failure: retry:implement` fires exactly once and
+    // jumps back to implement. If the jump-back were broken, implement runs once
+    // and the run fails at `test`.
     let phases = vec![agent("implement"), {
-        // passes only if marker exists; implement won't create it, so it fails,
-        // retry:implement loops — bounded by re-running implement which then...
-        // to avoid infinite loop, make the script pass (echo) and assert order.
-        let mut s = script("test", "echo ok");
+        let mut s = script(
+            "test",
+            "if [ -f marker ]; then exit 0; else touch marker; exit 1; fi",
+        );
         s.on_failure = OnFailure::Retry("implement".into());
         s
     }];
-    let provider = Mock::new(vec![artifact("{}")]); // implement runs once, test passes
+    // implement runs twice: the initial pass and again after the retry jump-back.
+    let provider = Mock::new(vec![artifact("{}"), artifact("{}")]);
     let cb = Cb::default();
     let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
+    assert_eq!(
+        cb.started
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| *p == "implement")
+            .count(),
+        2,
+        "retry:implement must re-run implement after the test failure"
+    );
+    assert_eq!(
+        store.read_state("r1").unwrap().unwrap().status,
+        RunStatus::Completed
+    );
     assert_eq!(completed, vec!["implement", "test"]);
 }
 
