@@ -5,6 +5,7 @@ pub mod config;
 pub mod detect;
 pub mod dryrun;
 pub mod estimate;
+pub mod json;
 pub mod llm_log;
 pub mod models;
 pub mod notify;

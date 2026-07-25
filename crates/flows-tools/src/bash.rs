@@ -14,10 +14,19 @@ use flows_core::models::BashConfig;
 use crate::error::{ToolError, ToolResult};
 use crate::sandbox::{run_confined, DEFAULT_MAX_OUTPUT, DEFAULT_TIMEOUT_SECS};
 
+/// Compile a static pattern table once. The patterns are compile-time constants,
+/// so an invalid one is a programmer bug (panics, never reached at runtime).
+fn compile_patterns(patterns: &[&str]) -> Vec<Regex> {
+    patterns
+        .iter()
+        .map(|p| Regex::new(p).expect("valid safety pattern"))
+        .collect()
+}
+
 fn blocked_patterns() -> &'static [Regex] {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
-        [
+        compile_patterns(&[
             r"rm\s+-rf\s+[/~]",
             // Recursive delete of the working dir or a glob — wipes everything.
             r"\brm\s+-[a-z]*r[a-z]*\s+(-[a-z]+\s+)*(\.|\*)(\s|$)",
@@ -33,10 +42,7 @@ fn blocked_patterns() -> &'static [Regex] {
             r"dd\s+.*of=/dev/",
             r"mkfs",
             r":\(\)\s*\{.*\};\s*:", // fork bomb
-        ]
-        .iter()
-        .map(|p| Regex::new(p).expect("valid blocked pattern"))
-        .collect()
+        ])
     })
 }
 
@@ -58,7 +64,7 @@ pub fn check_blocked(command: &str) -> ToolResult<()> {
 fn network_denied_patterns() -> &'static [Regex] {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
-        [
+        compile_patterns(&[
             // raw network clients
             r"\b(curl|wget|nc|ncat|netcat|socat|telnet|ssh|scp|sftp|ftp|rsync|aria2c)\b",
             // inline code execution (can open sockets): python -c, python -m http…
@@ -71,10 +77,7 @@ fn network_denied_patterns() -> &'static [Regex] {
             // piping / heredoc into a bare interpreter (stdin = code)
             r"\|\s*(python[0-9.]*|node|ruby|perl|php)\s*-?\s*$",
             r"\b(python[0-9.]*|node|ruby|perl|php)\s*<<",
-        ]
-        .iter()
-        .map(|p| Regex::new(p).expect("valid network pattern"))
-        .collect()
+        ])
     })
 }
 

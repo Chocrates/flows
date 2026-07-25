@@ -54,10 +54,7 @@ fn resolve_model(name: &str) -> EmbeddingModel {
 /// Embed a batch locally, loading (and caching) the model on first use. Blocking
 /// CPU work — call from a blocking context (`spawn_blocking`).
 fn embed_local(model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-    let mut map = EMBEDDERS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .map_err(|_| "embedder cache poisoned".to_string())?;
+    let mut map = crate::lock(EMBEDDERS.get_or_init(|| Mutex::new(HashMap::new())));
     if !map.contains_key(model) {
         let emb = TextEmbedding::try_new(TextInitOptions::new(resolve_model(model)))
             .map_err(|e| format!("load embedding model `{model}`: {e}"))?;
@@ -341,10 +338,7 @@ fn load_or_build_index(
         .unwrap_or_else(|_| repo_root.to_path_buf());
     let key = format!("{}|{model}", canon.to_string_lossy());
 
-    let mut memo = INDEXES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .map_err(|_| "index memo poisoned".to_string())?;
+    let mut memo = crate::lock(INDEXES.get_or_init(|| Mutex::new(HashMap::new())));
     if let Some(existing) = memo.get(&key) {
         return Ok(existing.clone());
     }
@@ -472,7 +466,7 @@ mod tests {
         use std::sync::atomic::Ordering;
         let reset = || {
             if let Some(m) = INDEXES.get() {
-                m.lock().unwrap().clear();
+                crate::lock(m).clear();
             }
             EMBED_COUNT.store(0, Ordering::Relaxed);
         };

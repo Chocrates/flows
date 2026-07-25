@@ -1079,7 +1079,7 @@ your context small.",
             TokenKind::Normal => callbacks.on_token(t),
             TokenKind::Json => callbacks.on_json(t),
         };
-        let on_token = |t: &str| filter.lock().unwrap().feed(t, &emit);
+        let on_token = |t: &str| crate::lock(&filter).feed(t, &emit);
         let no_thinking = |_: &str| {};
         let t0 = std::time::Instant::now();
         // Race the (possibly long) streaming call against a cancel poll so `c`
@@ -1093,7 +1093,7 @@ your context small.",
                 r = &mut stream_fut => break r,
                 _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {
                     if callbacks.cancelled() {
-                        filter.lock().unwrap().finish(&emit);
+                        crate::lock(&filter).finish(&emit);
                         callbacks.on_note("⛔ cancelled — aborting the in-flight request");
                         return AgentResult {
                             artifact: error_artifact(&phase.name, idea, "cancelled"),
@@ -1119,7 +1119,7 @@ your context small.",
                 };
             }
         };
-        filter.lock().unwrap().finish(&emit);
+        crate::lock(&filter).finish(&emit);
         let latency_ms = t0.elapsed().as_millis() as i64;
         callbacks.on_note(&format!(
             "← response · in {} / out {} tok · {} ms",
@@ -1601,8 +1601,8 @@ mod stream_filter_tests {
         let normal = Mutex::new(String::new());
         let json = Mutex::new(String::new());
         let emit = |kind: TokenKind, t: &str| match kind {
-            TokenKind::Normal => normal.lock().unwrap().push_str(t),
-            TokenKind::Json => json.lock().unwrap().push_str(t),
+            TokenKind::Normal => crate::lock(&normal).push_str(t),
+            TokenKind::Json => crate::lock(&json).push_str(t),
         };
         let mut f = StreamFilter::default();
         for c in chunks {

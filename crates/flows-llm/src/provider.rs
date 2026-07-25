@@ -40,6 +40,21 @@ impl SseAccumulator for crate::openai::StreamAccumulator {
     }
 }
 
+/// Read a non-streaming completion response: check the status (mapping a
+/// non-2xx to `LlmError::Api` with the body), then parse the JSON. Both providers
+/// share this tail; only the request headers and the final `parse_response` differ.
+async fn read_completion(resp: reqwest::Response) -> Result<Value, LlmError> {
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| LlmError::Http(e.to_string()))?;
+    if !status.is_success() {
+        return Err(LlmError::Api {
+            status: status.as_u16(),
+            body: text,
+        });
+    }
+    serde_json::from_str(&text).map_err(|e| LlmError::Parse(e.to_string()))
+}
+
 /// Read an SSE byte stream, split it into events on blank lines, and feed each
 /// event's `data:` JSON into `acc` (skipping empties and `[DONE]`). Shared by
 /// every streaming provider — the framing is identical, only the accumulator and
@@ -126,19 +141,7 @@ impl Provider for AnthropicProvider {
                 .json(&body)
         })
         .await?;
-
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
-        if !status.is_success() {
-            return Err(LlmError::Api {
-                status: status.as_u16(),
-                body: text,
-            });
-        }
-        let v: Value = serde_json::from_str(&text).map_err(|e| LlmError::Parse(e.to_string()))?;
+        let v = read_completion(resp).await?;
         anthropic::parse_response(&v)
     }
 
@@ -149,9 +152,7 @@ impl Provider for AnthropicProvider {
         on_thinking: Emit<'_>,
     ) -> Result<Completion, LlmError> {
         let mut body = anthropic::build_body(req);
-        body.as_object_mut()
-            .unwrap()
-            .insert("stream".into(), Value::Bool(true));
+        body.insert("stream".into(), Value::Bool(true));
         let url = format!("{}/v1/messages", self.api_base);
 
         let resp = send_with_retry(&self.retry, || {
@@ -211,18 +212,7 @@ impl Provider for OpenAiProvider {
                 .json(&body)
         })
         .await?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
-        if !status.is_success() {
-            return Err(LlmError::Api {
-                status: status.as_u16(),
-                body: text,
-            });
-        }
-        let v: Value = serde_json::from_str(&text).map_err(|e| LlmError::Parse(e.to_string()))?;
+        let v = read_completion(resp).await?;
         crate::openai::parse_response(&v)
     }
 
@@ -233,10 +223,9 @@ impl Provider for OpenAiProvider {
         on_thinking: Emit<'_>,
     ) -> Result<Completion, LlmError> {
         let mut body = crate::openai::build_body(req);
-        let obj = body.as_object_mut().unwrap();
-        obj.insert("stream".into(), Value::Bool(true));
+        body.insert("stream".into(), Value::Bool(true));
         // Ask for usage in the final chunk (OpenAI honors; llama.cpp/others ignore).
-        obj.insert(
+        body.insert(
             "stream_options".into(),
             serde_json::json!({"include_usage": true}),
         );

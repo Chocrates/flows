@@ -10,7 +10,7 @@ use serde_json::{json, Map, Value};
 use crate::types::{Completion, CompletionRequest, LlmError, Message, Role, ToolCall, Usage};
 
 /// Build the Anthropic Messages API request body.
-pub fn build_body(req: &CompletionRequest) -> Value {
+pub fn build_body(req: &CompletionRequest) -> Map<String, Value> {
     let mut body = Map::new();
     body.insert("model".into(), json!(req.model));
 
@@ -42,7 +42,7 @@ pub fn build_body(req: &CompletionRequest) -> Value {
         );
     }
 
-    Value::Object(body)
+    body
 }
 
 /// Translate neutral messages into Anthropic message objects, merging

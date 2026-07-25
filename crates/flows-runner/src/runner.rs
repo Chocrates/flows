@@ -164,7 +164,7 @@ impl Ctx<'_> {
     /// model+endpoint+key and reused across phases.
     fn provider_for(&self, eff: &LLMConfig) -> Arc<dyn Provider> {
         let key = format!("{}\u{0}{}\u{0}{}", eff.model, eff.api_base, eff.api_key);
-        let mut cache = self.providers.lock().unwrap();
+        let mut cache = crate::lock(&self.providers);
         cache
             .entry(key)
             .or_insert_with(|| (self.factory)(eff))

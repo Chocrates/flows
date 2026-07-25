@@ -101,6 +101,36 @@ pub struct Completion {
     pub stop_reason: Option<String>,
 }
 
+impl Completion {
+    /// Assemble a `Completion` from a stream accumulator's parts: normalize empty
+    /// tool-call arguments to `{}` and fold reasoning into an `Option`. Shared by
+    /// both providers' `finish()` — only their stop-reason field name differs.
+    pub(crate) fn from_stream_parts(
+        content: String,
+        reasoning: String,
+        mut tool_calls: Vec<ToolCall>,
+        input_tokens: u64,
+        output_tokens: u64,
+        stop_reason: Option<String>,
+    ) -> Self {
+        for tc in &mut tool_calls {
+            if tc.arguments.is_empty() {
+                tc.arguments = "{}".to_string();
+            }
+        }
+        Self {
+            content,
+            reasoning: (!reasoning.is_empty()).then_some(reasoning),
+            tool_calls,
+            usage: Usage {
+                input_tokens,
+                output_tokens,
+            },
+            stop_reason,
+        }
+    }
+}
+
 /// Per-request options shared across providers.
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {

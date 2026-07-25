@@ -12,7 +12,7 @@ fn is_reasoning_model(model: &str) -> bool {
 }
 
 /// Build the Chat Completions request body.
-pub fn build_body(req: &CompletionRequest) -> Value {
+pub fn build_body(req: &CompletionRequest) -> Map<String, Value> {
     let mut messages: Vec<Value> = Vec::new();
     if !req.system.is_empty() {
         messages.push(json!({"role": "system", "content": req.system}));
@@ -73,7 +73,7 @@ pub fn build_body(req: &CompletionRequest) -> Value {
             .collect();
         body.insert("tools".into(), json!(tools));
     }
-    Value::Object(body)
+    body
 }
 
 /// Streaming accumulator for Chat Completions SSE chunks (OpenAI + llama.cpp).
@@ -157,22 +157,15 @@ impl StreamAccumulator {
         }
     }
 
-    pub fn finish(mut self) -> Completion {
-        for tc in &mut self.tool_calls {
-            if tc.arguments.is_empty() {
-                tc.arguments = "{}".to_string();
-            }
-        }
-        Completion {
-            content: self.content,
-            reasoning: (!self.reasoning.is_empty()).then_some(self.reasoning),
-            tool_calls: self.tool_calls,
-            usage: Usage {
-                input_tokens: self.input_tokens,
-                output_tokens: self.output_tokens,
-            },
-            stop_reason: self.finish_reason,
-        }
+    pub fn finish(self) -> Completion {
+        Completion::from_stream_parts(
+            self.content,
+            self.reasoning,
+            self.tool_calls,
+            self.input_tokens,
+            self.output_tokens,
+            self.finish_reason,
+        )
     }
 }
 

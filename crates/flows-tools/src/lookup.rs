@@ -87,6 +87,23 @@ pub async fn lookup(source: &str, query: &str, max: usize) -> ToolResult<Value> 
 // -- shared HTTP helpers -----------------------------------------------------
 
 /// GET `base` with `params` (percent-encoded by reqwest) and parse JSON.
+/// Read a response as JSON: check the status (surfacing the first 200 chars of an
+/// error body) and parse. `label` names the source in error messages. Shared by
+/// the simple `get_json` path and callers that build their own request (GitHub
+/// needs custom headers).
+async fn read_json(resp: reqwest::Response, label: &str) -> ToolResult<Value> {
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| ToolError::new(format!("{label} read failed: {e}")))?;
+    if !status.is_success() {
+        let head: String = text.chars().take(200).collect();
+        return Err(ToolError::new(format!("{label} HTTP {status}: {head}")));
+    }
+    serde_json::from_str(&text).map_err(|e| ToolError::new(format!("{label} bad JSON: {e}")))
+}
+
 async fn get_json(
     client: &reqwest::Client,
     base: &str,
@@ -100,21 +117,10 @@ async fn get_json(
         .send()
         .await
         .map_err(|e| ToolError::new(format!("request failed: {e}")))?;
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| ToolError::new(format!("read failed: {e}")))?;
-    if !status.is_success() {
-        let head: String = text.chars().take(200).collect();
-        return Err(ToolError::new(format!("HTTP {status}: {head}")));
-    }
-    serde_json::from_str(&text).map_err(|e| ToolError::new(format!("bad JSON from {base}: {e}")))
+    read_json(resp, base).await
 }
 
-fn s(v: &Value, key: &str) -> String {
-    v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
-}
+use flows_core::json::str_field as s;
 
 /// crates.io `q=` is a full-text search, so a version baked into the query
 /// (`bevy 0.19.0`) drags in crates whose *description* mentions that version
@@ -373,17 +379,7 @@ impl Source for GitHub {
             .send()
             .await
             .map_err(|e| ToolError::new(format!("request failed: {e}")))?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| ToolError::new(format!("read failed: {e}")))?;
-        if !status.is_success() {
-            let head: String = text.chars().take(200).collect();
-            return Err(ToolError::new(format!("HTTP {status}: {head}")));
-        }
-        let v: Value =
-            serde_json::from_str(&text).map_err(|e| ToolError::new(format!("bad JSON: {e}")))?;
+        let v = read_json(resp, "github").await?;
         let mut hits = Vec::new();
         for it in v
             .get("items")

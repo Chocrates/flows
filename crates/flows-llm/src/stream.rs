@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::types::{Completion, ToolCall, Usage};
+use crate::types::{Completion, ToolCall};
 
 #[derive(Default)]
 pub struct Accumulator {
@@ -20,9 +20,7 @@ pub struct Accumulator {
     stop_reason: Option<String>,
 }
 
-fn as_str(v: &Value, key: &str) -> String {
-    v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
-}
+use flows_core::json::str_field as as_str;
 
 impl Accumulator {
     pub fn new() -> Self {
@@ -102,21 +100,14 @@ impl Accumulator {
         }
     }
 
-    pub fn finish(mut self) -> Completion {
-        for tc in &mut self.tool_calls {
-            if tc.arguments.is_empty() {
-                tc.arguments = "{}".to_string();
-            }
-        }
-        Completion {
-            content: self.content,
-            reasoning: (!self.reasoning.is_empty()).then_some(self.reasoning),
-            tool_calls: self.tool_calls,
-            usage: Usage {
-                input_tokens: self.input_tokens,
-                output_tokens: self.output_tokens,
-            },
-            stop_reason: self.stop_reason,
-        }
+    pub fn finish(self) -> Completion {
+        Completion::from_stream_parts(
+            self.content,
+            self.reasoning,
+            self.tool_calls,
+            self.input_tokens,
+            self.output_tokens,
+            self.stop_reason,
+        )
     }
 }
