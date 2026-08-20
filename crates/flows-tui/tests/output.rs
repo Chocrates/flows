@@ -63,6 +63,23 @@ fn scroll_back_to_bottom_resumes_following() {
 }
 
 #[test]
+fn plain_click_does_not_stop_following() {
+    // A click sets a zero-width selection (start == update at the same point). It
+    // must NOT suspend follow — regression: a single click used to freeze the pane.
+    let mut p = pane(8);
+    fill(&mut p, 40);
+    assert!(p.following());
+    p.start_selection(3, 2); // click down
+    assert!(!p.has_selection(), "a point is not a real selection");
+    fill(&mut p, 10); // more output after the click
+    assert_eq!(
+        p.scroll_y(),
+        p.max_scroll(),
+        "follow must continue after a plain click"
+    );
+}
+
+#[test]
 fn active_selection_suspends_follow() {
     // The key streaming-selection fix: while a selection exists, new output must
     // not scroll the view (so the highlight stays put).

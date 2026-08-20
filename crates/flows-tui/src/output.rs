@@ -242,9 +242,11 @@ impl OutputPane {
     // -- scrolling -------------------------------------------------------
 
     fn apply_follow(&mut self) {
-        // Follow the bottom on new content — UNLESS the user has a live
-        // selection, which would otherwise scroll the highlight out of view.
-        if self.follow && self.selection.is_none() {
+        // Follow the bottom on new content — UNLESS the user has a live selection
+        // spanning a range, which auto-scroll would drag out of view. A zero-width
+        // selection from a plain click (`a == b`) must NOT suspend follow, or a
+        // single click in the pane would silently stop auto-scroll forever.
+        if self.follow && !self.has_selection() {
             self.scroll_y = self.max_scroll();
         } else {
             self.scroll_y = self.scroll_y.min(self.max_scroll());
