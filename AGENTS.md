@@ -4,131 +4,144 @@
 
 `flows` is a local-first pipeline automation tool. It chains LLM agents, shell scripts, and human checkpoints into repeatable workflows — all run in-process against the project directory, all state on disk. No cloud orchestration, no Docker, no Temporal.
 
+It is a **Rust** Cargo workspace producing a single `flows` binary. (It was ported from Python; `docs/RUST_PORT.md` is the historical port plan — the Python package no longer exists.)
+
 ## Stack
 
-| Layer | Tool |
-|-------|------|
-| LLM calls | LiteLLM (any provider, OpenAI-compatible) |
-| CLI | Typer + Rich |
-| TUI | Textual (live run monitoring, human gates) |
-| Prompt templates | Jinja2 + Markdown |
-| Config | PyYAML |
-| HTTP tool | httpx |
-| Web search | duckduckgo-search (default), Brave, Serper |
-| Tests | pytest + pytest-asyncio + pytest-cov |
+| Layer | Crate(s) |
+|-------|----------|
+| Async runtime / HTTP | `tokio`, `reqwest` (rustls) |
+| LLM calls | hand-rolled providers in `flows-llm`: Anthropic Messages + OpenAI-compatible Chat Completions (streaming SSE, tool calls, reasoning) |
+| CLI | `clap` (derive) + `clap_complete` |
+| TUI | `ratatui` + `crossterm`, `arboard` clipboard |
+| Prompt templates / loop conditions | `minijinja` (Jinja2-compatible) + Markdown |
+| Config / state | `serde`, `serde_json`, `serde_yaml_ng` |
+| Repo context | `ignore` (gitignore-aware walk), tree-sitter (repo map), `fastembed` (local ONNX embeddings, opt-in retrieval) |
+| Web search | DuckDuckGo (default), optional self-hosted SearXNG, doc lookup |
+| Shell sandbox | bubblewrap (Linux) / Seatbelt (macOS) — external binaries |
+| Tests | `cargo test`, `portable-pty` + `vt100` for real-terminal TUI tests |
 
 ## Project layout
 
 ```
 flows/
-├── flows/
-│   ├── cli/main.py          — all CLI commands (excluded from coverage)
-│   ├── _worker.py           — background run subprocess (excluded from coverage)
-│   ├── tui.py               — Textual TUI (excluded from coverage)
-│   ├── runner.py            — pipeline execution engine (linear + DAG)
-│   ├── config.py            — 3-tier config loader
-│   ├── models.py            — dataclasses: PhaseConfig, ToolsConfig, Artifact, ...
-│   ├── templates.py         — template loader (package YAML + user ~/.flows/templates/)
-│   ├── detect.py            — stack detection for flows init --generate
-│   ├── estimate.py          — cost estimation (no LLM calls)
-│   ├── dryrun.py            — dry-run validation and display
-│   ├── llm_log.py           — JSONL logger for every LLM call
-│   ├── state.py             — atomic read/write of run state on disk
-│   ├── usage.py             — parse llm.jsonl, compute cost breakdown
-│   ├── pricing.py           — per-model token pricing table
-│   ├── notify.py            — cross-platform desktop notifications
-│   ├── default_templates/   — builtin template YAML files (feature, software, ...)
-│   ├── prompts/             — builtin Jinja2 prompt .md files per template/phase
-│   ├── phases/
-│   │   ├── agent.py         — LLM loop with tool use
-│   │   ├── script.py        — subprocess runner
-│   │   └── human.py         — gate waiter
-│   └── tools/
-│       ├── files.py         — read_file, write_file, list_files (repo-scoped)
-│       ├── bash.py          — subprocess with allowlist + hardcoded blocks
-│       ├── http.py          — http_get with private IP blocking
-│       ├── search.py        — web_search with pluggable backends
-│       └── plugin.py        — user-defined plugin tools (~/.flows/tools/*.yml)
-├── tests/                   — 427+ tests, 100% coverage required
-├── pyproject.toml
-├── AGENTS.md                — this file
-├── DESIGN.md                — architecture and design decisions
-└── README.md                — user-facing documentation
+├── Cargo.toml                    — workspace (version, shared deps)
+├── Makefile                      — fmt / fmt-check / lint / test / check / install
+├── crates/
+│   ├── flows-core/               — no I/O-heavy logic; shared types + config
+│   │   ├── src/models.rs         — PhaseConfig, ToolsConfig, Artifact, GlobalConfig, presets
+│   │   ├── src/config.rs         — 3-tier config loader + merge, `context` block
+│   │   ├── src/templates.rs      — template lookup (project → global → embedded builtin)
+│   │   ├── src/state.rs          — atomic run state, signal files (`Store`)
+│   │   ├── src/{pricing,usage,estimate,dryrun,detect,notify,llm_log,thinking,pipeline,json}.rs
+│   │   └── assets/default_templates/*.yml — builtin templates (embedded)
+│   ├── flows-llm/                — `Provider` trait; anthropic.rs, openai.rs, stream.rs, retry.rs
+│   ├── flows-tools/              — tools the agent can call
+│   │   ├── src/files.rs          — read_file (+ line ranges), write_file, list_files (repo-scoped, O_NOFOLLOW)
+│   │   ├── src/code_search.rs    — search_code (repo-scoped regex search)
+│   │   ├── src/bash.rs           — allowlisted commands, run through the sandbox
+│   │   ├── src/sandbox/          — `run_confined`: bwrap.rs (Linux), seatbelt.rs (macOS); fails closed
+│   │   ├── src/http.rs           — http_get with SSRF guard + redirect revalidation
+│   │   ├── src/{search,lookup,html}.rs — web search backends, doc lookup
+│   │   └── src/plugin.rs         — user plugin tools (~/.flows/tools/*.yml)
+│   ├── flows-runner/             — execution engine
+│   │   ├── src/runner.rs         — run_pipeline (linear + DAG), RunnerCallbacks, cost guard
+│   │   ├── src/agent.rs          — LLM tool loop, nudges/stall detection, context assembly
+│   │   ├── src/script.rs         — script phases (+ `@auto:test` / `@auto:lint`)
+│   │   ├── src/prompts.rs        — prompt lookup + MiniJinja render
+│   │   ├── src/{repo_context,repo_map,budget,retrieval}.rs — context delivery for small models
+│   │   └── assets/prompts/<template>/<phase>.md — builtin prompts (embedded)
+│   ├── flows-tui/                — ratatui app: live run, attach view, home/launcher screen
+│   └── flows-cli/                — the `flows` binary (main.rs) + eval harness (eval*.rs), searxng.rs
+├── eval-fixtures/                — labeled fixtures for `flows eval`
+├── openspec/                     — specs (openspec/specs/) + change proposals (openspec/changes/)
+├── docs/                         — architecture, configuration, eval, templates, ROADMAP
+├── DESIGN.md                     — architecture and design decisions
+└── README.md                     — user-facing documentation
 ```
+
+Dependency direction: `flows-core` ← `flows-tools`, `flows-llm` ← `flows-runner` ← `flows-tui` ← `flows-cli`.
 
 ## Build & test commands
 
+Use the `make` targets (CI runs the same gate):
+
 ```bash
-uv sync --extra dev          # install all deps including dev
-uv run pytest                # all tests (must reach 100% coverage)
-uv run pytest tests/test_runner.py  # single file
-uv run flows --help          # CLI entrypoint
-uv run flows run "idea" --no-tui    # run without TUI (plain output)
+make check          # fmt-check + clippy -D warnings + cargo test --workspace (full gate)
+make fmt            # cargo fmt --all
+make lint           # cargo clippy --workspace --all-targets -- -D warnings
+make test           # cargo test --workspace
+make install        # install `flows` to ~/.cargo/bin
+
+cargo test -p flows-runner --test agent   # single test file
+cargo run -p flows-cli -- --help          # CLI entrypoint without installing
 ```
+
+A few tests are `#[ignore]`d (e.g. end-to-end retrieval that downloads an embedding model); run them with `cargo test -- --ignored`.
+
+## CLI commands
+
+`doctor`, `config`, `init`, `templates`, `plan` (validate + cost estimate), `run [--tui|--background] [-C dir]`, `runs`, `attach`, `usage`, `stop`, `delete`, `clean`, `searxng up|down|status`, `eval run|list|review|report|clean|retrieval`, `completions`, and the hidden `worker` (background run process). Running `flows` with no args opens the TUI home screen.
 
 ## Config system (3-tier, lowest → highest priority)
 
 ```
-~/.flows/config.yml               # global user: model, api_key, notifications
+~/.flows/config.yml               # global user: model, api_key, profiles, notifications, context
 ~/.flows/projects/<repo-name>.yml # user project override: model, cost limit
 .flows.yml                        # repo project config (committed)
 ```
 
-For LLM config: project wins over user-project-override wins over global.  
+For LLM config: project wins over user-project-override wins over global.
 `max_cost_usd` and `notifications` live in global/user-project layers only.
+Named model **profiles** let each phase route to a different model/provider.
+The `context` block gates context-delivery features (all off by default). Only the eval harness overrides it per run (`flows eval run --configs baseline,rag,…`); `flows run` has no per-run flag yet.
 
 ## Runner architecture
 
-`run_pipeline()` in `runner.py` is the core execution engine. It:
-1. Writes `RunMeta` and `RunState` to `~/.flows/runs/{run_id}/`
-2. Merges LLM config (global → project)
+`run_pipeline()` in `flows-runner/src/runner.rs` is the core execution engine. It:
+1. Validates the pipeline and writes `RunMeta` / `RunState` to `~/.flows/runs/{run_id}/`
+2. Merges LLM config (global → project) and resolves per-phase model profiles
 3. Detects execution mode:
-   - **Linear**: no phase has `depends_on` → sequential execution with loops and retry
-   - **DAG**: any phase has `depends_on` → parallel execution via `asyncio.gather`
-4. Calls `_run_phase()` for each phase (agent / script / human)
+   - **Linear**: no phase has `depends_on` → sequential, with `loop_back_to` and `on_failure: retry:X`
+   - **DAG**: any phase has `depends_on` → ready phases run concurrently. `loop_back_to` / `retry:X` are rejected at validation. Human phases wait for in-flight tasks (serialized).
+4. Runs each phase (agent / script / human)
 5. Fires `RunnerCallbacks` events throughout
 
 ### RunnerCallbacks
 
-All UI (TUI, foreground print, background notify) is implemented via `RunnerCallbacks`. Never print to stdout in core modules — only in callbacks, cli/main.py, _worker.py, and tui.py.
+All UI (TUI, foreground print, background worker) is implemented via the `RunnerCallbacks` trait. Core crates must not print — report through callbacks (`on_note`, `on_status`, …). Only `flows-cli` and `flows-tui` write to the terminal.
 
-### Linear vs DAG mode
+### Loop conditions
 
-- **Linear**: phases run sequentially. `loop_back_to`, `on_failure: retry:X` supported.
-- **DAG**: phases whose `depends_on` deps are all complete run concurrently via `asyncio.wait`. `loop_back_to` and `retry:X` are NOT supported in DAG mode (validation error at startup).
-- Human phases in DAG mode: wait for all in-flight tasks before running (serialized).
-
-### Loop condition evaluation
-
-`_eval_loop_condition(condition, artifact_content)` uses `jinja2.sandbox.SandboxedEnvironment`. Returns `True` → loop fires. Condition is a Jinja2 expression; `content` is the artifact content dict.
+Loop conditions are MiniJinja expressions evaluated in a sandboxed environment against the artifact content (`content`). `true` → loop fires.
 
 ## Phase types
 
-| Type | Module | Key behavior |
-|------|--------|-------------|
-| `agent` | `phases/agent.py` | LLM loop, tool calls, clarification rounds, streaming |
-| `script` | `phases/script.py` | subprocess, Jinja2 command render (idea variable), captures stdout/stderr |
-| `human` | `phases/human.py` | awaits user input; in background mode polls signal files |
+| Type | Where | Key behavior |
+|------|-------|-------------|
+| `agent` | `flows-runner/src/agent.rs` | LLM loop, tool calls, clarification rounds, streaming, stall guards (no-op writes, empty responses, max rounds), cost cap |
+| `script` | `flows-runner/src/script.rs` | subprocess, MiniJinja-rendered command, captures stdout/stderr |
+| `human` | `flows-runner/src/runner.rs` | awaits user input; in background mode polls signal files |
 
 ## Tool system
 
-Tools are enabled per phase via `ToolsConfig`. Presets: `files`, `files_and_test`, `files_and_deps`, `research`, `research_and_code`, `all`. Plugin tools: `~/.flows/tools/<name>.yml` loaded by `tools/plugin.py`.
+Tools are enabled per phase via `ToolsConfig`. Presets: `files`, `files_and_test`, `files_and_deps`, `research`, `research_ro`, `research_and_code`, `all`. Plugin tools: `~/.flows/tools/<name>.yml`. Models with `supports_tools: false` get no tool schemas and receive pushed context instead.
 
-Bash tool requires explicit allowlist. Hardcoded blocks regardless of config: `rm -rf /`, `curl|bash`, `sudo`, writes to `/etc/`, fork bombs.
+Every shell command (bash tool + plugin tools) runs through `sandbox::run_confined`: filesystem read-only except the project dir and a private `/tmp`. If no sandbox is available, commands refuse to run. Bash additionally requires an allowlist; hardcoded blocks apply regardless (`rm -rf /`, `curl|bash`, `sudo`, writes to `/etc/`, fork bombs).
 
-## Prompt loading (in phases/agent.py)
+## Prompt loading (`flows-runner/src/prompts.rs`)
 
 Lookup order (first match wins):
 1. `phase.prompt` field (repo-relative path or builtin key)
-2. `~/.flows/prompts/{template}/{phase}.md` (user override)
-3. `flows/prompts/{template}/{phase}.md` (builtin)
-4. `~/.flows/prompts/{phase}.md` (user generic)
-5. `flows/prompts/{phase}.md` (builtin generic)
-6. Auto-generated fallback
+2. `<repo>/.flows/prompts/{template}/{phase}.md` (project override)
+3. `~/.flows/prompts/{template}/{phase}.md` (global override)
+4. builtin `assets/prompts/{template}/{phase}.md`
+5. `<repo>/.flows/prompts/{phase}.md` → 6. `~/.flows/prompts/{phase}.md` → 7. builtin generic
+8. Auto-generated fallback
 
-## Template loading (in templates.py)
+## Template loading (`flows-core/src/templates.rs`)
 
-Lookup order: `~/.flows/templates/<name>.yml` → `flows/default_templates/<name>.yml` → ValueError.
+`<repo>/.flows/templates/<name>.yml` → `~/.flows/templates/<name>.yml` → embedded builtin → error.
 
 ## State on disk
 
@@ -137,41 +150,43 @@ Lookup order: `~/.flows/templates/<name>.yml` → `flows/default_templates/<name
   meta.json      — idea, repo_path, template, phases, created_at, pid
   state.json     — status, current_phase, completed_phases, questions, error
   llm.jsonl      — every LLM call (request, response, tool calls, usage)
-  artifacts/
-    {phase}.yml  — each phase's artifact content
-  signals/
-    cancel       — touch to cancel
-    advance      — touch to advance human gate
-    answer.txt   — answer text for background Q&A
+  output.log     — streamed output (read by `flows attach`)
+  artifacts/{phase}.yml
+  signals/       — cancel, advance, answer.txt
+~/.flows/index/<repo-hash>/<model>.json — persisted retrieval index
 ```
 
-State files written atomically (temp file + rename). Signal files polled by background worker.
+State files are written atomically (temp file + rename).
+
+## Specs (OpenSpec)
+
+Capabilities live in `openspec/specs/` (code-search, context-eval, eval-harness, model-io, model-profiles, repo-context, security-model, semantic-retrieval). New features go through a change under `openspec/changes/` (propose → apply → archive). Use the `opsx:*` / `openspec-*` skills.
 
 ## Hard constraints
 
-- **100% test coverage** on all modules except `flows/cli/main.py`, `flows/_worker.py`, `flows/tui.py`. Coverage enforced by `pytest --cov-fail-under=100`.
-- **Never print to stdout in core modules.** All output goes through `RunnerCallbacks`.
-- **Model agnostic.** All LLM calls via LiteLLM. Never import a provider SDK directly.
-- **No business logic in CLI.** CLI calls runner/config/template functions only.
-- **File tool scoped to repo root.** `../` traversal blocked in `tools/files.py`.
-- **Bash requires allowlist.** `BashConfig.unrestricted=True` requires explicit opt-in.
-- Tests must pass before committing: `uv run pytest`
+- **Gate must pass before committing:** `make check` (fmt, clippy `-D warnings`, all tests).
+- **Every change ships with tests.** Agent-loop behavior is tested with the mock provider in `crates/flows-runner/tests/agent.rs`.
+- **No printing in core crates** (`flows-core`, `flows-tools`, `flows-llm`, `flows-runner`). Use `RunnerCallbacks`.
+- **Model agnostic.** All LLM calls go through the `flows-llm` `Provider` trait; never call a vendor API from elsewhere.
+- **No business logic in the CLI.** `flows-cli` calls into core/runner functions.
+- **File tools scoped to repo root.** Traversal, absolute paths, and symlink escapes are rejected.
+- **Shell commands are sandboxed and fail closed.** `BashConfig.unrestricted = true` requires explicit opt-in.
+- **New context features land behind a `context.*` flag**, off by default.
 
 ## Common patterns
 
 ### Adding a new phase type
-1. Add handler in `phases/your_type.py`
-2. Dispatch in `runner.py:_run_phase()`
-3. Add to `PhaseConfig.type` validation
+1. Add a variant to `PhaseType` in `flows-core/src/models.rs` (+ parsing/validation)
+2. Implement and dispatch it in `flows-runner/src/runner.rs`
+3. Add tests in `crates/flows-runner/tests/`
 
 ### Adding a new tool
-1. Implement in `tools/your_tool.py`
-2. Add field to `ToolsConfig` in `models.py`
-3. Add to `_build_tool_defs()` and `_dispatch_tool()` in `phases/agent.py`
-4. Update `resolve_tools()` presets in `models.py` if needed
+1. Implement in `flows-tools/src/your_tool.rs` (+ `tests/your_tool.rs`)
+2. Add a field to `ToolsConfig` in `flows-core/src/models.rs` and update presets if needed
+3. Register the schema in `build_tool_defs` and handle it in `dispatch_tool` in `flows-runner/src/agent.rs`
 
 ### Adding a new CLI command
-Add to `flows/cli/main.py` (excluded from coverage). Test via integration or by testing the underlying module directly.
+Add a variant to `Command` in `flows-cli/src/main.rs`; put the logic in a library crate and test it there.
 
 ### Adding a new template
-Drop `<name>.yml` in `flows/default_templates/`. It appears in `flows templates list` and `flows init` picker automatically.
+Drop `<name>.yml` in `crates/flows-core/assets/default_templates/` and its prompts in `crates/flows-runner/assets/prompts/<name>/`. Both are embedded at build time.
