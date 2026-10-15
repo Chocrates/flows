@@ -1,7 +1,7 @@
 # eval-harness Specification
 
 ## Purpose
-TBD - created by archiving change eval-harness. Update Purpose after archive.
+Headless evaluation of models and context configurations against labeled fixture suites, with a persistent results store and comparison reports.
 ## Requirements
 ### Requirement: Context feature-flag configuration
 

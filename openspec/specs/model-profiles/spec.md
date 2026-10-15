@@ -1,7 +1,7 @@
 # model-profiles Specification
 
 ## Purpose
-TBD - created by archiving change multi-model-routing. Update Purpose after archive.
+Named model profiles that let each phase route to a different model and provider, while literal model strings keep working.
 ## Requirements
 ### Requirement: Named model profiles
 

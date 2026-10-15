@@ -1,7 +1,7 @@
 # model-io Specification
 
 ## Purpose
-TBD - created by archiving change model-io-resilience. Update Purpose after archive.
+Resilient model I/O: retry transient failures with backoff, degrade cleanly for models without tool calling, cap completion tokens per phase, and tolerate common model path mistakes.
 ## Requirements
 ### Requirement: Retry transient LLM failures with backoff
 
