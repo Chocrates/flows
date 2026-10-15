@@ -174,6 +174,9 @@ const NUDGE_AFTER_NOOP_WRITES: u32 = 3;
 /// If no-op writes keep coming after the nudge, abort the phase once the streak
 /// reaches this — the model is wedged in a rewrite loop and won't recover.
 const ABORT_AFTER_NOOP_WRITES: u32 = 6;
+/// Consecutive empty final responses tolerated (with a nudge each) before the
+/// phase fails — a model that keeps returning nothing is stuck.
+const MAX_EMPTY_RESPONSES: u32 = 3;
 /// Most-recent messages budgeting never trims (keeps the live turn coherent).
 const BUDGET_RECENT_KEEP: usize = 4;
 
@@ -1008,6 +1011,9 @@ your context small.",
     // read_file dedup cache: call-args → content hash of what we already served, so
     // an unchanged re-read returns a short pointer instead of the full file again.
     let mut read_cache: HashMap<String, u64> = HashMap::new();
+    // Consecutive empty final responses — nudge the model to start producing, fail
+    // if it keeps stalling.
+    let mut empty_streak = 0u32;
 
     // Optional full-prompt transcript (what the model actually saw each round),
     // gated by `FLOWS_TRANSCRIPT` so normal runs aren't bloated. The eval harness
@@ -1188,6 +1194,7 @@ your context small.",
         };
 
         if !tool_calls.is_empty() {
+            empty_streak = 0; // productive round — reset the empty-response streak
             messages.push(Message::assistant_tools(
                 (!completion.content.is_empty()).then(|| completion.content.clone()),
                 tool_calls.clone(),
@@ -1492,7 +1499,45 @@ starting — likely stuck in a build/search loop"
                 };
             }
             _ => {
-                // Unparsed — treat raw output as the artifact.
+                // Empty final response — the model ended the round with no tool
+                // call, no artifact, and no text. Observed: an implement phase that
+                // read files, reasoned itself in circles, then returned "". Rather
+                // than accept it as an empty artifact (a silent do-nothing
+                // "success"), nudge it to start producing and continue — it usually
+                // has plenty of round budget left. Fail only if it keeps stalling.
+                if completion.content.trim().is_empty() {
+                    empty_streak += 1;
+                    if empty_streak >= MAX_EMPTY_RESPONSES {
+                        let msg = format!(
+                            "agent produced an empty response {empty_streak} times — no \
+                             artifact, no tool call, nothing written. The phase did no work."
+                        );
+                        callbacks.on_note(&format!("⛔ {msg}"));
+                        return AgentResult {
+                            artifact: error_artifact(&phase.name, idea, msg),
+                            cost_usd: phase_cost,
+                        };
+                    }
+                    callbacks.on_note(
+                        "⚠ empty response — nudging the model to act instead of deliberate",
+                    );
+                    let nudge = if can_write {
+                        "Your last response was empty — you produced nothing. Stop \
+                         deliberating and act now: call a tool. If you are implementing, \
+                         write the next file with `write_file` (start with the simplest \
+                         one); when a detail is ambiguous, implement the straightforward \
+                         version, note the assumption in a comment, and keep going. Do not \
+                         analyze edge cases before the core code exists. When all work is \
+                         written to disk, emit the final artifact JSON."
+                    } else {
+                        "Your last response was empty — you produced nothing. Take a \
+                         concrete action now: call a tool, or emit your final artifact \
+                         JSON. Do not reply with empty or filler content."
+                    };
+                    messages.push(Message::user(nudge));
+                    continue;
+                }
+                // Unparsed non-empty text — treat raw output as the artifact.
                 return AgentResult {
                     artifact: Artifact {
                         phase: phase.name.clone(),

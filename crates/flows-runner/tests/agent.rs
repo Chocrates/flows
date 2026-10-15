@@ -456,6 +456,60 @@ async fn artifact_with_real_writes_succeeds() {
 }
 
 #[tokio::test]
+async fn repeated_empty_responses_fail() {
+    // Model keeps returning empty (reasoned itself out, wrote nothing). Each empty
+    // is nudged; after MAX_EMPTY_RESPONSES the phase fails — never accepted as an
+    // empty `raw_output` artifact.
+    let provider = Mock::new(vec![text(""), text("  \n "), text("   ")]);
+    let art = run_agent_phase(
+        &files_phase(),
+        "idea",
+        Path::new("/tmp"),
+        &empty_artifacts(),
+        "feature",
+        &LLMConfig::default(),
+        &provider,
+        &NoopCallbacks,
+        None,
+        &ContextConfig::default(),
+        &WebSearchConfig::default(),
+        0.0,
+        0.0,
+        None,
+    )
+    .await
+    .artifact;
+    let err = art.content["error"].as_str().unwrap_or("");
+    assert!(err.contains("empty response"), "unexpected: {art:?}");
+}
+
+#[tokio::test]
+async fn empty_response_then_recovers() {
+    // One empty response gets nudged; the model then produces a real artifact and
+    // the phase succeeds — a single hiccup must not kill the run.
+    let provider = Mock::new(vec![text(""), artifact_json(r#"{"ok": true}"#)]);
+    let art = run_agent_phase(
+        &files_phase(),
+        "idea",
+        Path::new("/tmp"),
+        &empty_artifacts(),
+        "feature",
+        &LLMConfig::default(),
+        &provider,
+        &NoopCallbacks,
+        None,
+        &ContextConfig::default(),
+        &WebSearchConfig::default(),
+        0.0,
+        0.0,
+        None,
+    )
+    .await
+    .artifact;
+    assert_eq!(art.content["ok"], true, "should recover: {art:?}");
+}
+
+#[tokio::test]
 async fn cost_cap_aborts() {
     let provider = Mock::new(vec![artifact_json(r#"{"x": 1}"#)]);
     let art = run_agent_phase(

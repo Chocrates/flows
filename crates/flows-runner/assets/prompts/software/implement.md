@@ -55,6 +55,16 @@ contents inside your final response or the artifact JSON. The artifact is a shor
 **summary** of work already written to disk, not the code itself. A phase that ends
 without `write_file` calls has produced nothing and will fail.
 
+**Act, don't deliberate.** Get the core code onto disk first — types, then the
+main data structures, then the straightforward logic — before you reason about
+tricky edge cases. When a rule or detail is subtle or ambiguous, implement the
+**obvious, straightforward version now**, note the assumption in a `//` comment,
+and keep building; do NOT spend your round budget analyzing an edge case (e.g. an
+exact test scenario) before the code it tests even exists. If you catch yourself
+re-reading the same spec paragraph or arguing with yourself, stop and write code.
+Every round must end in a concrete action — a `write_file`, another tool call, or
+the final artifact — never an empty response.
+
 **Never delete your source tree or start over.** Do not `rm -rf src` (or otherwise
 wipe your files) to "take a simpler approach" — that destroys working code and
 regresses progress. When a build fails, **fix the errors in place, incrementally**:
