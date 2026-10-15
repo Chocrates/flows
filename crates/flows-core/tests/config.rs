@@ -418,6 +418,10 @@ fn bad_on_failure_rejected_at_load() {
     // Valid forms still parse.
     for ok in ["stop", "continue", "retry:implement"] {
         let y = format!("phases:\n  - name: p\n    type: agent\n    on_failure: \"{ok}\"\n");
-        assert!(parse_phases_from_yaml(&y).is_ok(), "should accept {ok}: {:?}", parse_phases_from_yaml(&y).err());
+        assert!(
+            parse_phases_from_yaml(&y).is_ok(),
+            "should accept {ok}: {:?}",
+            parse_phases_from_yaml(&y).err()
+        );
     }
 }

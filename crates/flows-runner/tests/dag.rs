@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use flows_core::models::{GlobalConfig, LLMConfig, OnFailure, PhaseConfig, PhaseType, ProjectConfig, RunStatus};
+use flows_core::models::{
+    GlobalConfig, LLMConfig, OnFailure, PhaseConfig, PhaseType, ProjectConfig, RunStatus,
+};
 use flows_core::state::Store;
 use flows_llm::types::{Completion, CompletionRequest, LlmError};
 use flows_llm::Provider;
@@ -100,7 +102,10 @@ async fn diamond_respects_dependency_order() {
     assert_eq!(order.len(), 4);
     assert_eq!(order[0], "a"); // root first
     assert_eq!(order[3], "d"); // sink last
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Completed);
+    assert_eq!(
+        store.read_state("r1").unwrap().unwrap().status,
+        RunStatus::Completed
+    );
     // b and c only start after a
     let started = cb.started.lock().unwrap();
     let pa = started.iter().position(|x| x == "a").unwrap();
@@ -133,7 +138,10 @@ async fn dag_on_failure_stop_fails_run() {
     assert!(matches!(err, RunError::Failed { .. }));
     // b must never have started (its dep failed / run stopped)
     assert!(!cb.started.lock().unwrap().contains(&"b".to_string()));
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Failed);
+    assert_eq!(
+        store.read_state("r1").unwrap().unwrap().status,
+        RunStatus::Failed
+    );
 }
 
 #[tokio::test]

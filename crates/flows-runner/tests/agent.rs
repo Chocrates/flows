@@ -210,7 +210,11 @@ async fn reread_of_unchanged_file_is_deduped() {
     )
     .await;
     let results = cb.results.lock().unwrap();
-    assert!(results[0].contains("world"), "first read full: {:?}", results[0]);
+    assert!(
+        results[0].contains("world"),
+        "first read full: {:?}",
+        results[0]
+    );
     assert!(
         results[1].contains("already read"),
         "second read should be deduped: {:?}",
@@ -329,7 +333,10 @@ async fn noop_write_loop_aborts() {
     // error/no-write guards can't see it (the write "succeeds"), so the no-op
     // guard must catch it and abort with a loop-detected error.
     let d = tempfile::tempdir().unwrap();
-    let w = tool("write_file", r#"{"path": "Cargo.toml", "content": "[workspace]"}"#);
+    let w = tool(
+        "write_file",
+        r#"{"path": "Cargo.toml", "content": "[workspace]"}"#,
+    );
     let provider = Mock::new(vec![
         w.clone(),
         w.clone(),
@@ -431,7 +438,10 @@ async fn artifact_with_real_writes_succeeds() {
     // Same shape, but the model actually wrote a file first — must NOT trip the guard.
     let d = tempfile::tempdir().unwrap();
     let provider = Mock::new(vec![
-        tool("write_file", r#"{"path": "src/main.rs", "content": "fn main(){}"}"#),
+        tool(
+            "write_file",
+            r#"{"path": "src/main.rs", "content": "fn main(){}"}"#,
+        ),
         artifact_json(r#"{"files_written": ["src/main.rs"], "summary": "done"}"#),
     ]);
     let art = run_agent_phase(
@@ -623,7 +633,11 @@ async fn cancel_mid_stream_aborts_without_waiting_out_the_call() {
     )
     .await;
     assert_eq!(
-        result.artifact.content.get("error").and_then(|e| e.as_str()),
+        result
+            .artifact
+            .content
+            .get("error")
+            .and_then(|e| e.as_str()),
         Some("cancelled")
     );
     // Must abort mid-stream (~300ms poll), not wait out the 5s call.

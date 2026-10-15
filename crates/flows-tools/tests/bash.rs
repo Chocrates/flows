@@ -144,7 +144,11 @@ fn smoke_test_pattern_allowed_with_safe_set() {
     // Real GUI smoke-test the agent emits: launch, wait, kill — every segment is
     // in the code allowlist (cargo/sleep/kill/pkill/true), across newlines and `&`.
     let cfg = allowed(&["cargo*", "sleep*", "kill*", "pkill*", "true*"]);
-    assert!(check_allowlist("cargo run 2>&1 &\nsleep 3\nkill %1 2>/dev/null || true", &cfg).is_ok());
+    assert!(check_allowlist(
+        "cargo run 2>&1 &\nsleep 3\nkill %1 2>/dev/null || true",
+        &cfg
+    )
+    .is_ok());
     assert!(check_allowlist("cargo run &\nsleep 5\npkill -f freecell || true", &cfg).is_ok());
     // But an unlisted command chained in is still rejected.
     let err = check_allowlist("cargo run &\nsleep 3\nnc -l 1234", &cfg).unwrap_err();

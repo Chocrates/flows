@@ -380,7 +380,11 @@ impl App {
                     self.phases.set_status(&name, PhaseStatus::Done);
                 }
             }
-            UiEvent::LoopBack { from, to, iteration } => {
+            UiEvent::LoopBack {
+                from,
+                to,
+                iteration,
+            } => {
                 // Clear stale ✓ on the phases about to re-run, then mark the source
                 // as looping (↻) — a rejected design shouldn't read as "done".
                 self.phases.restart_range(&to, &from);

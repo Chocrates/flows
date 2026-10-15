@@ -65,7 +65,11 @@ pub fn source_catalog() -> String {
 
 fn client() -> ToolResult<reqwest::Client> {
     // crates.io / GitHub require a descriptive User-Agent; be a good citizen.
-    crate::http::http_client(12, "flows/0.2 structured-lookup (https://github.com/)", true)
+    crate::http::http_client(
+        12,
+        "flows/0.2 structured-lookup (https://github.com/)",
+        true,
+    )
 }
 
 /// Run a structured lookup against `source`. Returns
@@ -129,10 +133,12 @@ use flows_core::json::str_field as s;
 fn crate_name_query(q: &str) -> String {
     let is_versionish = |tok: &str| {
         let t = tok.strip_prefix('v').unwrap_or(tok);
-        tok.eq_ignore_ascii_case("version")
-            || t.chars().next().is_some_and(|c| c.is_ascii_digit())
+        tok.eq_ignore_ascii_case("version") || t.chars().next().is_some_and(|c| c.is_ascii_digit())
     };
-    let kept: Vec<&str> = q.split_whitespace().take_while(|t| !is_versionish(t)).collect();
+    let kept: Vec<&str> = q
+        .split_whitespace()
+        .take_while(|t| !is_versionish(t))
+        .collect();
     if kept.is_empty() {
         q.trim().to_string()
     } else {

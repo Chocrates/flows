@@ -293,9 +293,12 @@ async fn execute_phase(
                     }
                 }
             }
-            match crate::script::run_script_cancellable(&effective, ctx.repo_root, ctx.idea, &|| {
-                ctx.store.is_cancelled(ctx.run_id)
-            }) {
+            match crate::script::run_script_cancellable(
+                &effective,
+                ctx.repo_root,
+                ctx.idea,
+                &|| ctx.store.is_cancelled(ctx.run_id),
+            ) {
                 Ok(res) => {
                     ctx.logger.script(
                         &phase.name,

@@ -50,7 +50,9 @@ fn drop_element(mut s: String, tag: &str) -> String {
     let close = format!("</{tag}>");
     loop {
         let lower = s.to_ascii_lowercase();
-        let Some(start) = lower.find(&open) else { break };
+        let Some(start) = lower.find(&open) else {
+            break;
+        };
         let Some(open_end) = lower[start..].find('>').map(|g| start + g + 1) else {
             break;
         };

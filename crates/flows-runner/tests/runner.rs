@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use flows_core::models::{GlobalConfig, LLMConfig, OnFailure, PhaseConfig, PhaseType, ProjectConfig, RunStatus};
+use flows_core::models::{
+    GlobalConfig, LLMConfig, OnFailure, PhaseConfig, PhaseType, ProjectConfig, RunStatus,
+};
 use flows_core::state::Store;
 use flows_llm::types::{Completion, CompletionRequest, LlmError, Usage};
 use flows_llm::Provider;
@@ -224,7 +226,10 @@ async fn linear_agent_script_human_completes() {
     let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
     assert_eq!(completed, vec!["plan", "lint", "approve"]);
     // state + artifacts persisted
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Completed);
+    assert_eq!(
+        store.read_state("r1").unwrap().unwrap().status,
+        RunStatus::Completed
+    );
     assert!(store.artifact_path("r1", "plan").exists());
     assert!(store.artifact_path("r1", "lint").exists());
 }
@@ -243,7 +248,10 @@ async fn script_failure_stops_run() {
         .unwrap_err();
     assert!(matches!(err, RunError::Failed { .. }));
     assert!(!cb.started.lock().unwrap().contains(&"after".to_string()));
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Failed);
+    assert_eq!(
+        store.read_state("r1").unwrap().unwrap().status,
+        RunStatus::Failed
+    );
 }
 
 #[tokio::test]
@@ -332,7 +340,10 @@ async fn loop_back_on_condition_bounded() {
     ]);
     let cb = Cb::default();
     let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Completed);
+    assert_eq!(
+        store.read_state("r1").unwrap().unwrap().status,
+        RunStatus::Completed
+    );
     // implement appears started twice (looped once)
     let started = cb.started.lock().unwrap();
     assert_eq!(started.iter().filter(|p| *p == "implement").count(), 2);
@@ -458,7 +469,10 @@ async fn auto_test_unresolvable_stops_run_despite_retry() {
         .await
         .unwrap_err();
     assert!(matches!(err, RunError::Failed { .. }));
-    assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Failed);
+    assert_eq!(
+        store.read_state("r1").unwrap().unwrap().status,
+        RunStatus::Failed
+    );
 }
 
 #[tokio::test]

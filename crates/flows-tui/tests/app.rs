@@ -435,7 +435,9 @@ fn format_questions_single_inline_multi_numbered() {
 #[test]
 fn round_event_sets_readout_and_phase_start_clears_it() {
     let mut a = app();
-    a.handle_ui_event(UiEvent::Round { text: "7/200".into() });
+    a.handle_ui_event(UiEvent::Round {
+        text: "7/200".into(),
+    });
     assert_eq!(a.round, "7/200");
     // A new phase resets the round readout so it isn't stale.
     a.handle_ui_event(UiEvent::PhaseStart {

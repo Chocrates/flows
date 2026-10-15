@@ -45,7 +45,10 @@ impl SseAccumulator for crate::openai::StreamAccumulator {
 /// share this tail; only the request headers and the final `parse_response` differ.
 async fn read_completion(resp: reqwest::Response) -> Result<Value, LlmError> {
     let status = resp.status();
-    let text = resp.text().await.map_err(|e| LlmError::Http(e.to_string()))?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| LlmError::Http(e.to_string()))?;
     if !status.is_success() {
         return Err(LlmError::Api {
             status: status.as_u16(),

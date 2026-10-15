@@ -1852,7 +1852,9 @@ mod waiting_tests {
             // wait until the run publishes the question, then answer it
             loop {
                 if let Ok(Some(st)) = s2.read_state("r1") {
-                    if st.status == RunStatus::WaitingInput && st.questions == vec!["color?".to_string()] {
+                    if st.status == RunStatus::WaitingInput
+                        && st.questions == vec!["color?".to_string()]
+                    {
                         break;
                     }
                 }
@@ -1865,7 +1867,10 @@ mod waiting_tests {
         assert_eq!(answer, "blue");
         sender.await.unwrap();
         // status restored to running after answering
-        assert_eq!(store.read_state("r1").unwrap().unwrap().status, RunStatus::Running);
+        assert_eq!(
+            store.read_state("r1").unwrap().unwrap().status,
+            RunStatus::Running
+        );
     }
 
     #[tokio::test]
@@ -1898,7 +1903,10 @@ mod waiting_tests {
         assert_eq!(w.on_questions("plan", &["q?".into()]).await, "");
         // The gate must PEEK, not consume — the runner's own poll_cancel needs the
         // signal to actually cancel the run (else the empty answer reads as proceed).
-        assert!(store.is_cancelled("r1"), "cancel signal must survive the gate");
+        assert!(
+            store.is_cancelled("r1"),
+            "cancel signal must survive the gate"
+        );
     }
 
     #[tokio::test]
@@ -1916,6 +1924,9 @@ mod waiting_tests {
         // Unblocks with an empty answer, but leaves the cancel signal for the runner
         // — otherwise the approval gate would read "" as APPROVE and resume the run.
         assert_eq!(w.on_human_gate("approve", "ok?").await, "");
-        assert!(store.is_cancelled("r1"), "cancel signal must survive the gate");
+        assert!(
+            store.is_cancelled("r1"),
+            "cancel signal must survive the gate"
+        );
     }
 }

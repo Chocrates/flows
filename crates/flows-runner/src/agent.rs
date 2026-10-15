@@ -1244,9 +1244,9 @@ your context small.",
                         args.get("path").and_then(Value::as_str),
                         args.get("content").and_then(Value::as_str),
                     ) {
-                        (Some(p), Some(c)) => {
-                            files::read_file(repo_root, p).map(|cur| cur == c).unwrap_or(false)
-                        }
+                        (Some(p), Some(c)) => files::read_file(repo_root, p)
+                            .map(|cur| cur == c)
+                            .unwrap_or(false),
                         _ => false,
                     };
 
