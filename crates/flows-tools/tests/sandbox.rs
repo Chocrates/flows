@@ -417,7 +417,7 @@ fn wrap_masks_before_repo_bind() {
 
 /// A fake home with an SSH key, a .netrc, and flows' API-key config. Not under
 /// `/tmp`: the sandbox mounts its own `/tmp`, which would hide it regardless.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn fake_home() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let d = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let home = d.path().canonicalize().unwrap();
@@ -432,7 +432,7 @@ fn fake_home() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn real_sandbox_hides_credentials_by_absolute_path() {
     use flows_tools::sandbox::testing::run_confined_with_home;
     if !sandbox_available() {
@@ -453,7 +453,7 @@ fn real_sandbox_hides_credentials_by_absolute_path() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn real_sandbox_expose_credentials_keeps_flows_config_hidden() {
     use flows_tools::sandbox::testing::run_confined_with_home;
     if !sandbox_available() {
@@ -472,7 +472,7 @@ fn real_sandbox_expose_credentials_keeps_flows_config_hidden() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn real_sandbox_repo_inside_masked_dir_still_works() {
     use flows_tools::sandbox::testing::run_confined_with_home;
     if !sandbox_available() {
@@ -498,4 +498,89 @@ fn real_sandbox_repo_inside_masked_dir_still_works() {
             .trim(),
         "made"
     );
+}
+
+// -- macOS: no host IPC (Seatbelt) -------------------------------------------
+
+#[test]
+#[cfg(target_os = "macos")]
+fn macos_sandbox_blocks_unix_socket_connect() {
+    if !sandbox_available() {
+        eprintln!("SKIP macos_sandbox_blocks_unix_socket_connect: sandbox-exec unavailable");
+        return;
+    }
+    let d = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let sock = d.path().join("host.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let out = run_confined(
+        &format!("echo hi | nc -U {} && echo CONNECTED", sock.display()),
+        d.path(),
+        30,
+        10_000,
+        &Confinement::default(),
+    )
+    .unwrap();
+    assert!(!out.contains("CONNECTED"), "unix socket reachable: {out}");
+    assert!(
+        matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "host listener accepted a connection from the sandbox"
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn macos_sandbox_blocks_apple_events() {
+    if !sandbox_available() {
+        eprintln!("SKIP macos_sandbox_blocks_apple_events: sandbox-exec unavailable");
+        return;
+    }
+    let d = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    // Driving another app is the launchd/AppleEvents route out of the sandbox.
+    let out = run_confined(
+        "osascript -e 'tell application \"Finder\" to get name' && echo ESCAPED",
+        d.path(),
+        30,
+        10_000,
+        &Confinement::default(),
+    )
+    .unwrap();
+    assert!(!out.contains("ESCAPED"), "AppleEvents reachable: {out}");
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn macos_sandbox_keeps_dns_tls_and_toolchain() {
+    if !sandbox_available() {
+        eprintln!("SKIP macos_sandbox_keeps_dns_tls_and_toolchain: sandbox-exec unavailable");
+        return;
+    }
+    let host_net = std::process::Command::new("curl")
+        .args(["-sS", "-o", "/dev/null", "https://example.com"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let d = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let out = run_confined(
+        "cargo --version && git --version && echo TOOLS-OK",
+        d.path(),
+        60,
+        10_000,
+        &Confinement::default(),
+    )
+    .unwrap();
+    assert!(out.contains("TOOLS-OK"), "toolchain broken: {out}");
+    if !host_net {
+        eprintln!("SKIP network half: host has no network");
+        return;
+    }
+    let out = run_confined(
+        "curl -sS -o /dev/null -w 'HTTP=%{http_code}' https://example.com",
+        d.path(),
+        60,
+        10_000,
+        &Confinement::default(),
+    )
+    .unwrap();
+    assert!(out.contains("HTTP=200"), "DNS/TLS broken in sandbox: {out}");
 }
