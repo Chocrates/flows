@@ -96,7 +96,7 @@ repo:
   `github` (uses `GITHUB_TOKEN` if set). Prefer this for library/API details —
   e.g. `lookup(source="crates_io", query="bevy")` returns the latest version.
 - **`http_get`** — fetch a public URL (SSRF-guarded).
-- **`web_search`** — general web search. Two backends:
+- **`web_search`** — general web search. Four backends:
 
 ```yaml
 tools:
@@ -107,7 +107,16 @@ tools:
     # backend: searxng
     # base_url: http://localhost:8888
     # api_key: ""            # only if the instance gates its JSON API
+    # …or a keyed API (more reliable than scraping, costs quota):
+    # backend: brave         # Brave Search API — key: api_key or $BRAVE_API_KEY
+    # backend: serper        # Serper (Google results) — key: api_key or $SERPER_API_KEY
+    # base_url: …            # optional endpoint override for brave/serper
 ```
+
+Keyed backends send the key only to their own endpoint (or `base_url`).
+`flows doctor` reports whether a key is configured; it doesn't make a request,
+so it doesn't spend quota. A 401/403 reply means the key is wrong, and 429 means
+you're over the rate limit or quota.
 
 ### Self-hosted SearXNG
 

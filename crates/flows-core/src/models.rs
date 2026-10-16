@@ -621,8 +621,9 @@ pub struct WebSearchConfig {
     pub max_results: u32,
     #[serde(default)]
     pub api_key: String,
-    /// Base URL for the `searxng` backend, e.g. `http://192.168.50.147:8080`.
-    /// Ignored by other backends.
+    /// Base URL for the `searxng` backend, e.g. `http://192.168.50.147:8080`;
+    /// for `brave` / `serper`, an optional endpoint override. Ignored by
+    /// `duckduckgo`.
     #[serde(default)]
     pub base_url: String,
 }

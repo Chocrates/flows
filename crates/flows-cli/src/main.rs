@@ -617,6 +617,22 @@ fn cmd_doctor() -> Result<(), String> {
 /// searxng is configured, using the same code path a run would.
 fn check_web_search(global: &GlobalConfig) {
     let ws = &global.tools.web_search;
+    if matches!(ws.backend.as_str(), "brave" | "serper") {
+        // Keyed APIs: report the key, don't spend quota on a probe.
+        let env = if ws.backend == "brave" {
+            "BRAVE_API_KEY"
+        } else {
+            "SERPER_API_KEY"
+        };
+        match flows_tools::search::backend_key(ws) {
+            Some(_) => println!("  search:    {}  [key set]", ws.backend),
+            None => println!(
+                "  search:    {}  ⚠ no API key (tools.web_search.api_key or ${env})",
+                ws.backend
+            ),
+        }
+        return;
+    }
     if ws.backend != "searxng" {
         println!("  search:    {} (no connectivity check needed)", ws.backend);
         return;

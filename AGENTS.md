@@ -17,7 +17,7 @@ It is a **Rust** Cargo workspace producing a single `flows` binary. (It was port
 | Prompt templates / loop conditions | `minijinja` (Jinja2-compatible) + Markdown |
 | Config / state | `serde`, `serde_json`, `serde_yaml_ng` |
 | Repo context | `ignore` (gitignore-aware walk), tree-sitter (repo map), `fastembed` (local ONNX embeddings, opt-in retrieval) |
-| Web search | DuckDuckGo (default), optional self-hosted SearXNG, doc lookup |
+| Web search | DuckDuckGo (default), self-hosted SearXNG, keyed Brave / Serper, doc lookup |
 | Shell sandbox | bubblewrap (Linux) / Seatbelt (macOS) — external binaries |
 | Tests | `cargo test`, `portable-pty` + `vt100` for real-terminal TUI tests |
 
@@ -160,7 +160,7 @@ State files are written atomically (temp file + rename).
 
 ## Specs (OpenSpec)
 
-Capabilities live in `openspec/specs/` (code-search, conditional-phases, context-eval, eval-harness, model-io, model-profiles, repo-context, security-model, semantic-retrieval). New features go through a change under `openspec/changes/` (propose → apply → archive). Use the `opsx:*` / `openspec-*` skills.
+Capabilities live in `openspec/specs/` (code-search, conditional-phases, context-eval, eval-harness, model-io, model-profiles, repo-context, security-model, semantic-retrieval, web-search). New features go through a change under `openspec/changes/` (propose → apply → archive). Use the `opsx:*` / `openspec-*` skills.
 
 ## Hard constraints
 
