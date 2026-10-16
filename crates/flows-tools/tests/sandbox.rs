@@ -5,7 +5,7 @@ use std::process::{ExitStatus, Output};
 
 use flows_tools::sandbox::{
     format_output, run_confined, sandbox_available, testing::run_confined_inner_for_test,
-    wrap_command, Limits,
+    wrap_command, Confinement, Limits,
 };
 use tempfile::tempdir;
 
@@ -36,7 +36,13 @@ fn wrap_command_confines_to_repo() {
         .into_owned();
     let argv = wrap_command(d.path(), "echo hi");
     assert_eq!(argv[0], "bwrap");
-    assert_eq!(argv.iter().filter(|a| *a == "--ro-bind").count(), 1);
+    // `/` is the only read-only *root* bind (others are credential masks).
+    assert_eq!(
+        argv.windows(3)
+            .filter(|w| w[0] == "--ro-bind" && w[1] == "/")
+            .count(),
+        1
+    );
     assert_eq!(
         arg_after(&argv, "--ro-bind", 2),
         &["/".to_string(), "/".to_string()]
@@ -148,7 +154,7 @@ fn real_sandbox_confines_writes_to_repo() {
         &repo,
         30,
         20_000,
-        &Limits::default(),
+        &Confinement::default(),
     )
     .unwrap();
     assert_eq!(
@@ -164,7 +170,7 @@ fn real_sandbox_confines_writes_to_repo() {
         &repo,
         30,
         20_000,
-        &Limits::default(),
+        &Confinement::default(),
     );
     assert!(!outside.exists(), "write outside repo should be blocked");
 
@@ -175,7 +181,7 @@ fn real_sandbox_confines_writes_to_repo() {
         &repo,
         30,
         20_000,
-        &Limits::default(),
+        &Confinement::default(),
     );
     assert!(victim.exists(), "delete outside repo should be blocked");
 }
@@ -217,7 +223,7 @@ fn real_sandbox_blocks_unix_socket_connect() {
         d.path(),
         30,
         10_000,
-        &Limits::default(),
+        &Confinement::default(),
     )
     .unwrap();
     assert!(!out.contains("CONNECTED"), "unix socket reachable: {out}");
@@ -237,7 +243,7 @@ fn real_sandbox_keeps_socketpair_and_inet() {
         d.path(),
         30,
         10_000,
-        &Limits::default(),
+        &Confinement::default(),
     )
     .unwrap();
     assert!(
@@ -273,7 +279,10 @@ fn real_sandbox_memory_cap_kills_hog() {
         d.path(),
         60,
         10_000,
-        &limits,
+        &Confinement {
+            limits,
+            ..Confinement::default()
+        },
     )
     .unwrap();
     assert!(!out.contains("ALLOCATED"), "hog survived: {out}");
@@ -299,7 +308,10 @@ fn real_sandbox_task_cap_contains_fork_bomb() {
         d.path(),
         60,
         10_000,
-        &limits,
+        &Confinement {
+            limits,
+            ..Confinement::default()
+        },
     )
     .unwrap();
     let running: usize = out
@@ -321,6 +333,114 @@ fn real_sandbox_normal_command_unaffected_by_limits() {
         return;
     }
     let d = tempdir().unwrap();
-    let out = run_confined("echo ok", d.path(), 30, 1_000, &Limits::default()).unwrap();
+    let out = run_confined("echo ok", d.path(), 30, 1_000, &Confinement::default()).unwrap();
     assert_eq!(out.trim(), "ok");
+}
+
+// -- credential masking ------------------------------------------------------
+
+#[test]
+#[cfg(target_os = "linux")]
+fn wrap_masks_before_repo_bind() {
+    let d = tempdir().unwrap();
+    let home = d.path().canonicalize().unwrap();
+    std::fs::create_dir(home.join(".ssh")).unwrap();
+    std::fs::write(home.join(".netrc"), "x").unwrap();
+    let repo = home.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let hidden = flows_tools::sandbox::hidden_paths_in(&home, false);
+    let argv = flows_tools::sandbox::backend().wrap(&repo, "true", &hidden);
+    let ssh = home.join(".ssh").display().to_string();
+    let netrc = home.join(".netrc").display().to_string();
+    let tmpfs = argv.windows(2).position(|w| w == ["--tmpfs", ssh.as_str()]);
+    let null = argv
+        .windows(3)
+        .position(|w| w == ["--ro-bind", "/dev/null", netrc.as_str()]);
+    let bind = argv.iter().position(|a| a == "--bind").unwrap();
+    assert!(tmpfs.unwrap() < bind && null.unwrap() < bind, "{argv:?}");
+}
+
+/// A fake home with an SSH key, a .netrc, and flows' API-key config. Not under
+/// `/tmp`: the sandbox mounts its own `/tmp`, which would hide it regardless.
+#[cfg(target_os = "linux")]
+fn fake_home() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let d = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let home = d.path().canonicalize().unwrap();
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    std::fs::write(home.join(".ssh/id_test"), "SSH-SECRET").unwrap();
+    std::fs::write(home.join(".netrc"), "NETRC-SECRET").unwrap();
+    std::fs::create_dir_all(home.join(".flows")).unwrap();
+    std::fs::write(home.join(".flows/config.yml"), "API-KEY-SECRET").unwrap();
+    let repo = home.join("work/repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    (d, home, repo)
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn real_sandbox_hides_credentials_by_absolute_path() {
+    use flows_tools::sandbox::testing::run_confined_with_home;
+    if !sandbox_available() {
+        eprintln!("SKIP real_sandbox_hides_credentials_by_absolute_path: needs bwrap");
+        return;
+    }
+    let (_d, home, repo) = fake_home();
+    let h = home.display();
+    let cmd = format!(
+        "cat {h}/.ssh/id_test {h}/.netrc {h}/.flows/config.yml; echo LS=$(ls -A {h}/.ssh)END"
+    );
+    let out = run_confined_with_home(&cmd, &repo, &home, false).unwrap();
+    assert!(!out.contains("SECRET"), "credential leaked: {out}");
+    // control: the same home is otherwise visible (not hidden by /tmp)
+    let ctl = run_confined_with_home(&format!("ls {h}/work"), &repo, &home, false).unwrap();
+    assert!(ctl.contains("repo"), "fake home not visible at all: {ctl}");
+    assert!(out.contains("LS=END"), "masked dir not empty: {out}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn real_sandbox_expose_credentials_keeps_flows_config_hidden() {
+    use flows_tools::sandbox::testing::run_confined_with_home;
+    if !sandbox_available() {
+        eprintln!("SKIP real_sandbox_expose_credentials_keeps_flows_config_hidden: needs bwrap");
+        return;
+    }
+    let (_d, home, repo) = fake_home();
+    let h = home.display();
+    let cmd = format!("cat {h}/.ssh/id_test; echo; cat {h}/.flows/config.yml");
+    let out = run_confined_with_home(&cmd, &repo, &home, true).unwrap();
+    assert!(out.contains("SSH-SECRET"), "opt-out did not expose: {out}");
+    assert!(
+        !out.contains("API-KEY-SECRET"),
+        "flows config leaked: {out}"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn real_sandbox_repo_inside_masked_dir_still_works() {
+    use flows_tools::sandbox::testing::run_confined_with_home;
+    if !sandbox_available() {
+        eprintln!("SKIP real_sandbox_repo_inside_masked_dir_still_works: needs bwrap");
+        return;
+    }
+    let (_d, home, _repo) = fake_home();
+    let repo = home.join(".ssh/project");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("README"), "readme-here").unwrap();
+    let out = run_confined_with_home(
+        "cat README; echo made > new.txt; cat ../id_test",
+        &repo,
+        &home,
+        false,
+    )
+    .unwrap();
+    assert!(out.contains("readme-here"), "{out}");
+    assert!(!out.contains("SSH-SECRET"), "sibling key leaked: {out}");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("new.txt"))
+            .unwrap()
+            .trim(),
+        "made"
+    );
 }

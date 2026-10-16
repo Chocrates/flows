@@ -2,14 +2,15 @@
 //!
 //! The whole filesystem is bound read-only, the repo re-bound read-write and
 //! made the working directory, `/tmp` a private tmpfs, and user/ipc/pid/uts/
-//! cgroup namespaces unshared, and a seccomp filter (see `seccomp`) denies unix
+//! cgroup namespaces unshared, credential stores masked (empty tmpfs over a
+//! directory, `/dev/null` over a file), and a seccomp filter (see `seccomp`) denies unix
 //! sockets so the command can't reach host services (session bus, container
 //! engines, display server) that would run code outside the sandbox. Network is
 //! left shared so package/build commands can fetch dependencies. Requires
 //! unprivileged user namespaces.
 
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
@@ -35,7 +36,7 @@ impl Sandbox for BwrapSandbox {
         *PROBE.get_or_init(probe)
     }
 
-    fn wrap(&self, repo_root: &Path, command: &str) -> Vec<String> {
+    fn wrap(&self, repo_root: &Path, command: &str, hidden: &[PathBuf]) -> Vec<String> {
         let root = repo_root
             .canonicalize()
             .unwrap_or_else(|_| repo_root.to_path_buf())
@@ -60,15 +61,25 @@ impl Sandbox for BwrapSandbox {
             "/proc",
             "--tmpfs",
             "/tmp",
-            "--bind",
-            &root,
-            &root,
-            "--chdir",
-            &root,
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
+
+        // Credential masks go before the repo/cache binds: later mounts win, and
+        // bwrap creates their mount points inside a mask's tmpfs, so a repo that
+        // lives under a masked dir stays reachable.
+        for p in hidden {
+            let p = p.to_string_lossy().into_owned();
+            if Path::new(&p).is_dir() {
+                argv.extend(["--tmpfs".into(), p]);
+            } else {
+                argv.extend(["--ro-bind".into(), "/dev/null".into(), p]);
+            }
+        }
+
+        argv.extend(["--bind".into(), root.clone(), root.clone()]);
+        argv.extend(["--chdir".into(), root]);
 
         // Persistent, writable toolchain cache (cargo registry, go/npm/pip/gradle/…
         // caches) so sandboxed builds survive the fresh-`/tmp`-per-call reset. Bound

@@ -9,7 +9,7 @@ use minijinja::{Environment, Value as JinjaValue};
 use serde_json::Value;
 
 use crate::error::{ToolError, ToolResult};
-use crate::sandbox::{run_confined, Limits, DEFAULT_MAX_OUTPUT, DEFAULT_TIMEOUT_SECS};
+use crate::sandbox::{run_confined, Confinement, DEFAULT_MAX_OUTPUT, DEFAULT_TIMEOUT_SECS};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginToolDef {
@@ -19,6 +19,9 @@ pub struct PluginToolDef {
     pub parameters: Value,
     /// Jinja shell-command template.
     pub command: String,
+    /// Let the command read the user's credential stores (hidden by default),
+    /// e.g. a plugin wrapping `gh`.
+    pub expose_credentials: bool,
 }
 
 fn flows_base(flows_dir: Option<&Path>) -> PathBuf {
@@ -49,6 +52,10 @@ pub fn load_plugin_tool(name: &str, flows_dir: Option<&Path>) -> Option<PluginTo
         description: get_str("description").unwrap_or_default(),
         parameters,
         command: get_str("command").unwrap_or_default(),
+        expose_credentials: raw
+            .get("expose_credentials")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -102,6 +109,9 @@ pub fn run_plugin_tool(defn: &PluginToolDef, args: &Value, repo_root: &Path) -> 
         repo_root,
         DEFAULT_TIMEOUT_SECS,
         DEFAULT_MAX_OUTPUT,
-        &Limits::default(),
+        &Confinement {
+            expose_credentials: defn.expose_credentials,
+            ..Confinement::default()
+        },
     )
 }

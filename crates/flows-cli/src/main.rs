@@ -458,6 +458,13 @@ fn check_sandbox() {
             defaults.memory_mb,
             defaults.max_procs
         );
+        let hidden =
+            flows_tools::sandbox::hidden_paths(&flows_tools::sandbox::Confinement::default());
+        println!(
+            "  secrets:   {} credential path(s) under ~ hidden from commands \
+             (tools.bash.expose_credentials: true re-exposes all but ~/.flows config)",
+            hidden.len()
+        );
         return;
     }
     println!("  sandbox:   {name} NOT usable — shell commands (bash/plugin) fail closed.");

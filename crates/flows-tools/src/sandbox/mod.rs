@@ -4,8 +4,9 @@
 //! The contract every backend upholds: the command may read system files (so
 //! tools run) but may only **write** inside the project directory and a private
 //! `/tmp`; the host environment is cleared (no secrets leak in); execution
-//! **fails closed** if no functional sandbox is present. An allowlist alone
-//! cannot contain an interpreter — the sandbox is the real boundary.
+//! **fails closed** if no functional sandbox is present. Known credential stores
+//! under `$HOME` are hidden (see [`hidden_paths`]). An allowlist alone cannot
+//! contain an interpreter — the sandbox is the real boundary.
 //!
 //! Backends:
 //!   * [`bwrap`] — Linux, via bubblewrap + user namespaces.
@@ -30,6 +31,112 @@ pub mod seccomp;
 
 pub use limits::{limits_mode, LimitMode, Limits};
 
+use flows_core::models::BashConfig;
+
+/// Per-command confinement settings beyond the fixed filesystem rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Confinement {
+    pub limits: Limits,
+    /// Re-expose [`CREDENTIAL_PATHS`] (flows' own secrets stay hidden).
+    pub expose_credentials: bool,
+}
+
+impl Confinement {
+    /// A phase's bash settings.
+    pub fn from_bash(cfg: &BashConfig) -> Confinement {
+        Confinement {
+            limits: Limits::from_bash(cfg),
+            expose_credentials: cfg.expose_credentials,
+        }
+    }
+}
+
+/// Credential stores under `$HOME` hidden from sandboxed commands unless a
+/// phase sets `expose_credentials`. Directories and single files; only the
+/// ones that exist are masked.
+pub const CREDENTIAL_PATHS: &[&str] = &[
+    // ssh, gpg, password managers, desktop keyrings
+    ".ssh",
+    ".gnupg",
+    ".password-store",
+    ".local/share/keyrings",
+    ".config/op",
+    // cloud + cluster CLIs
+    ".aws",
+    ".azure",
+    ".config/gcloud",
+    ".oci",
+    ".kube",
+    ".docker",
+    ".terraform.d",
+    ".vault-token",
+    ".config/doctl",
+    ".fly",
+    // forges + package registries
+    ".config/gh",
+    ".config/hub",
+    ".netrc",
+    ".git-credentials",
+    ".config/git/credentials",
+    ".npmrc",
+    ".yarnrc.yml",
+    ".pypirc",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".m2/settings.xml",
+    ".gradle/gradle.properties",
+    ".gem/credentials",
+    // databases + object stores
+    ".pgpass",
+    ".my.cnf",
+    ".boto",
+    ".s3cfg",
+    ".config/rclone",
+    // browsers (session cookies)
+    ".mozilla",
+    ".config/google-chrome",
+    ".config/chromium",
+    ".config/BraveSoftware",
+    // AI assistants
+    ".claude",
+    ".claude.json",
+    ".codex",
+    ".config/anthropic",
+    ".config/openai",
+];
+
+/// flows' own secrets (API keys), hidden even with `expose_credentials`.
+/// `~/.flows/tools/` stays visible: plugin commands may call scripts there.
+pub const FLOWS_SECRET_PATHS: &[&str] = &[".flows/config.yml", ".flows/projects"];
+
+/// The paths to hide for one command, resolved against the invoking user's
+/// `$HOME`.
+pub fn hidden_paths(c: &Confinement) -> Vec<PathBuf> {
+    match std::env::var_os("HOME") {
+        Some(home) => hidden_paths_in(Path::new(&home), c.expose_credentials),
+        None => Vec::new(),
+    }
+}
+
+/// [`hidden_paths`] for an explicit home. Existing paths only, canonicalized
+/// (a symlinked `~/.ssh` is masked at its target), deduplicated.
+pub fn hidden_paths_in(home: &Path, expose_credentials: bool) -> Vec<PathBuf> {
+    let creds: &[&str] = if expose_credentials {
+        &[]
+    } else {
+        CREDENTIAL_PATHS
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    for rel in FLOWS_SECRET_PATHS.iter().chain(creds) {
+        if let Ok(p) = home.join(rel).canonicalize() {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
 // Cold compiles are the long pole: a first Bevy build pulls a large dependency
 // tree and can run well past 120s. Default generously (15 min) so builds don't
 // spuriously time out; a hung command still eventually aborts. Overridable per
@@ -44,8 +151,9 @@ pub trait Sandbox: Send + Sync {
     fn name(&self) -> &'static str;
     /// True if this backend can set up a working sandbox on this host.
     fn available(&self) -> bool;
-    /// The argv that runs `command` confined to `repo_root`.
-    fn wrap(&self, repo_root: &Path, command: &str) -> Vec<String>;
+    /// The argv that runs `command` confined to `repo_root`, with each of
+    /// `hidden` (existing, canonical paths) unreadable.
+    fn wrap(&self, repo_root: &Path, command: &str, hidden: &[PathBuf]) -> Vec<String>;
     /// Message shown when [`available`](Self::available) is false.
     fn unavailable_reason(&self) -> &'static str;
     /// Last-moment setup on the spawn (e.g. handing the child a seccomp program
@@ -171,9 +279,14 @@ pub fn sandbox_available() -> bool {
     backend().available()
 }
 
-/// The confined argv for `command` under `repo_root` (delegates to the backend).
+/// The confined argv for `command` under `repo_root` with default confinement.
 pub fn wrap_command(repo_root: &Path, command: &str) -> Vec<String> {
-    backend().wrap(repo_root, command)
+    wrap_command_with(repo_root, command, &Confinement::default())
+}
+
+/// The confined argv for `command` under `repo_root` (delegates to the backend).
+pub fn wrap_command_with(repo_root: &Path, command: &str, c: &Confinement) -> Vec<String> {
+    backend().wrap(repo_root, command, &hidden_paths(c))
 }
 
 /// Name of the active backend (`bwrap`, `seatbelt`, or `none`).
@@ -214,7 +327,7 @@ fn run_confined_inner<F>(
     command: &str,
     repo_root: &Path,
     max_output: usize,
-    limits: &Limits,
+    confinement: &Confinement,
     available: bool,
     exec: F,
 ) -> ToolResult<String>
@@ -224,11 +337,11 @@ where
     if !available {
         return Err(ToolError::new(backend().unavailable_reason()));
     }
-    let argv = wrap_command(repo_root, command);
+    let argv = wrap_command_with(repo_root, command, confinement);
     let output = exec(&argv).map_err(|e| ToolError::new(format!("sandbox exec failed: {e}")))?;
     let mut text = format_output(&output, max_output);
     if was_sigkilled(&output) {
-        if let Some(hint) = limits::kill_hint(limits) {
+        if let Some(hint) = limits::kill_hint(&confinement.limits) {
             text.push('\n');
             text.push_str(&hint);
         }
@@ -245,22 +358,22 @@ fn was_sigkilled(output: &Output) -> bool {
         || matches!(output.status.code(), Some(137 | 143))
 }
 
-/// Run `command` in the platform sandbox under `limits`. Fails closed if the
-/// sandbox is unavailable; resource limits degrade (see [`limits`]).
+/// Run `command` in the platform sandbox under `confinement`. Fails closed if
+/// the sandbox is unavailable; resource limits degrade (see [`limits`]).
 pub fn run_confined(
     command: &str,
     repo_root: &Path,
     timeout_secs: u64,
     max_output: usize,
-    limits: &Limits,
+    confinement: &Confinement,
 ) -> ToolResult<String> {
     run_confined_inner(
         command,
         repo_root,
         max_output,
-        limits,
+        confinement,
         sandbox_available(),
-        |argv| spawn_with_timeout(argv, repo_root, timeout_secs, limits),
+        |argv| spawn_with_timeout(argv, repo_root, timeout_secs, &confinement.limits),
     )
 }
 
@@ -344,7 +457,7 @@ impl Sandbox for NoSandbox {
     fn available(&self) -> bool {
         false
     }
-    fn wrap(&self, _repo_root: &Path, command: &str) -> Vec<String> {
+    fn wrap(&self, _repo_root: &Path, command: &str, _hidden: &[PathBuf]) -> Vec<String> {
         vec!["/bin/sh".into(), "-c".into(), command.into()]
     }
     fn unavailable_reason(&self) -> &'static str {
@@ -359,6 +472,25 @@ impl Sandbox for NoSandbox {
 #[doc(hidden)]
 pub mod testing {
     use super::*;
+
+    /// Run `command` in the real sandbox with credential paths resolved against
+    /// `home` instead of `$HOME` (tests must not touch the user's real dotfiles).
+    pub fn run_confined_with_home(
+        command: &str,
+        repo_root: &Path,
+        home: &Path,
+        expose_credentials: bool,
+    ) -> ToolResult<String> {
+        if !sandbox_available() {
+            return Err(ToolError::new(backend().unavailable_reason()));
+        }
+        let hidden = hidden_paths_in(home, expose_credentials);
+        let argv = backend().wrap(repo_root, command, &hidden);
+        let limits = Limits::default();
+        let out = spawn_with_timeout(&argv, repo_root, 30, &limits)
+            .map_err(|e| ToolError::new(format!("sandbox exec failed: {e}")))?;
+        Ok(format_output(&out, DEFAULT_MAX_OUTPUT))
+    }
 
     /// Exposes `run_confined_inner` for tests (inject availability + a fake exec).
     pub fn run_confined_inner_for_test<F>(
@@ -375,9 +507,59 @@ pub mod testing {
             command,
             repo_root,
             max_output,
-            &Limits::default(),
+            &Confinement::default(),
             available,
             exec,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_paths_existing_only_and_flows_secrets_always() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().canonicalize().unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::write(home.join(".netrc"), "x").unwrap();
+        std::fs::create_dir_all(home.join(".flows/tools")).unwrap();
+        std::fs::write(home.join(".flows/config.yml"), "k").unwrap();
+
+        let hidden = hidden_paths_in(&home, false);
+        assert!(hidden.contains(&home.join(".ssh")));
+        assert!(hidden.contains(&home.join(".netrc")));
+        assert!(hidden.contains(&home.join(".flows/config.yml")));
+        assert!(
+            !hidden.contains(&home.join(".aws")),
+            "absent paths are skipped"
+        );
+        assert!(!hidden.iter().any(|p| p.ends_with("tools")));
+
+        let exposed = hidden_paths_in(&home, true);
+        assert_eq!(exposed, vec![home.join(".flows/config.yml")]);
+    }
+
+    #[test]
+    fn hidden_paths_resolve_symlinks_and_dedupe() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().canonicalize().unwrap();
+        let real = home.join("vault/ssh");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".ssh")).unwrap();
+        std::os::unix::fs::symlink(&real, home.join(".gnupg")).unwrap();
+        let hidden = hidden_paths_in(&home, false);
+        assert_eq!(hidden, vec![real]);
+    }
+
+    #[test]
+    fn from_bash_carries_exposure() {
+        let cfg = BashConfig {
+            expose_credentials: true,
+            ..BashConfig::default()
+        };
+        assert!(Confinement::from_bash(&cfg).expose_credentials);
+        assert!(!Confinement::default().expose_credentials);
     }
 }

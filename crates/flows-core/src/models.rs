@@ -39,6 +39,11 @@ pub struct BashConfig {
     /// `Some(0)` → unlimited.
     #[serde(default)]
     pub max_procs: Option<u64>,
+    /// Let sandboxed commands read the user's credential stores (`~/.ssh`,
+    /// `~/.aws`, …), which are hidden by default. Needed for git-over-ssh or
+    /// private-registry fetches. flows' own config stays hidden regardless.
+    #[serde(default)]
+    pub expose_credentials: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -280,6 +285,7 @@ pub fn resolve_tools(raw: Option<&Value>) -> Result<ToolsConfig, ModelError> {
                     timeout_secs: bm.get("timeout_secs").and_then(Value::as_u64),
                     memory_mb: bm.get("memory_mb").and_then(Value::as_u64),
                     max_procs: bm.get("max_procs").and_then(Value::as_u64),
+                    expose_credentials: as_bool(bm.get("expose_credentials")).unwrap_or(false),
                 }),
                 _ => None,
             };

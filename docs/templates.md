@@ -87,6 +87,7 @@ tools:
     # timeout_secs: 1800            # per-command timeout (default 900s; cold builds are slow)
     # memory_mb: 16384              # memory cap per command tree (default 8192; 0 = none)
     # max_procs: 2048               # process/thread cap per command (default 1024; 0 = none)
+    # expose_credentials: true      # let commands read ~/.ssh, ~/.aws, … (hidden by default)
   http_get: true           # GET public URLs (SSRF-guarded)
   web_search: true         # DuckDuckGo or SearXNG (see configuration.md)
   lookup: true             # crates.io / docs.rs / stackexchange / wikipedia / github
@@ -97,6 +98,19 @@ Resource limits use a per-command systemd user scope (cgroup) on Linux. Without
 one they fall back to a per-process memory rlimit, and on macOS they aren't
 enforced. Commands always still run; `flows doctor` shows which mode applies.
 A command killed by the memory cap says so in its output.
+
+Credential stores under your home directory are hidden from sandboxed commands
+by default: an empty directory or file appears in place of `~/.ssh`, `~/.gnupg`,
+`~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.kube`, `~/.docker`,
+`~/.config/gh`, `~/.netrc`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`,
+cargo credentials, password stores and keyrings, browser profiles, and
+AI-assistant configs (full list: `CREDENTIAL_PATHS` in
+`crates/flows-tools/src/sandbox/mod.rs`). A phase whose build needs them, e.g.
+git-over-ssh dependencies or a private registry, sets
+`tools.bash.expose_credentials: true`; a plugin sets `expose_credentials: true` in
+its YAML. flows' own `~/.flows/config.yml` and `~/.flows/projects/`, which hold
+API keys, stay hidden either way. Script phases are not sandboxed and see
+everything.
 
 ## `script` phase
 

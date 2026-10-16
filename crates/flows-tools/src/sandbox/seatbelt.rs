@@ -8,7 +8,7 @@
 //! `sandbox-exec` is deprecated by Apple but still ships and works on current
 //! macOS; if Apple removes it we'd move to a helper linking `sandbox_init`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
@@ -26,13 +26,13 @@ impl Sandbox for SeatbeltSandbox {
         *PROBE.get_or_init(probe)
     }
 
-    fn wrap(&self, repo_root: &Path, command: &str) -> Vec<String> {
+    fn wrap(&self, repo_root: &Path, command: &str, hidden: &[PathBuf]) -> Vec<String> {
         let root = repo_root
             .canonicalize()
             .unwrap_or_else(|_| repo_root.to_path_buf())
             .to_string_lossy()
             .into_owned();
-        let profile = profile_for(&root);
+        let profile = profile_for(&root, hidden);
         vec![
             "sandbox-exec".into(),
             "-p".into(),
@@ -50,11 +50,24 @@ this phase."
     }
 }
 
+fn sbpl_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Build the SBPL profile confining writes to `root` (+ temp) while allowing
-/// reads and network. `root` is escaped for the quoted SBPL string.
-fn profile_for(root: &str) -> String {
-    let esc = root.replace('\\', "\\\\").replace('"', "\\\"");
-    format!(
+/// reads and network, minus reads of `hidden`. Later SBPL rules take precedence,
+/// so the denies follow the broad `(allow file-read*)`.
+fn profile_for(root: &str, hidden: &[PathBuf]) -> String {
+    let esc = sbpl_escape(root);
+    let mut denies = String::new();
+    for p in hidden {
+        let kind = if p.is_dir() { "subpath" } else { "literal" };
+        denies.push_str(&format!(
+            "(deny file-read* ({kind} \"{}\"))\n",
+            sbpl_escape(&p.to_string_lossy())
+        ));
+    }
+    let profile = format!(
         r#"(version 1)
 (deny default)
 (allow process-exec)
@@ -75,7 +88,14 @@ fn profile_for(root: &str) -> String {
   (literal "/dev/dtracehelper")
   (literal "/dev/tty"))
 "#
-    )
+    );
+    // A repo under a hidden dir must stay readable: re-allow it last.
+    let reallow = if denies.is_empty() {
+        String::new()
+    } else {
+        format!("(allow file-read* (subpath \"{esc}\"))\n")
+    };
+    profile + &denies + &reallow
 }
 
 /// `sandbox-exec` exists and can initialize a trivial profile here.
@@ -95,10 +115,11 @@ fn probe() -> bool {
 #[cfg(test)]
 mod tests {
     use super::profile_for;
+    use std::path::PathBuf;
 
     #[test]
     fn profile_confines_writes_to_root_and_tmp() {
-        let p = profile_for("/Users/me/proj");
+        let p = profile_for("/Users/me/proj", &[]);
         assert!(p.contains("(deny default)"));
         assert!(p.contains("(allow file-read*)"));
         assert!(p.contains("(subpath \"/Users/me/proj\")"));
@@ -110,7 +131,36 @@ mod tests {
 
     #[test]
     fn profile_escapes_quotes_in_path() {
-        let p = profile_for("/tmp/we\"ird");
+        let p = profile_for("/tmp/we\"ird", &[]);
         assert!(p.contains("we\\\"ird"));
+    }
+
+    #[test]
+    fn profile_denies_hidden_paths_after_read_allow() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join(".ssh");
+        std::fs::create_dir(&dir).unwrap();
+        let file = d.path().join(".netrc");
+        std::fs::write(&file, "x").unwrap();
+        let p = profile_for("/Users/me/proj", &[dir.clone(), file.clone()]);
+        let allow = p.find("(allow file-read*)").unwrap();
+        let deny_dir = p
+            .find(&format!(
+                "(deny file-read* (subpath \"{}\"))",
+                dir.display()
+            ))
+            .unwrap();
+        let deny_file = p
+            .find(&format!(
+                "(deny file-read* (literal \"{}\"))",
+                file.display()
+            ))
+            .unwrap();
+        assert!(allow < deny_dir && allow < deny_file);
+        // the repo is re-allowed after the denies
+        let reallow = p
+            .rfind("(allow file-read* (subpath \"/Users/me/proj\"))")
+            .unwrap();
+        assert!(reallow > deny_dir && reallow > deny_file);
     }
 }

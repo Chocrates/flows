@@ -19,8 +19,8 @@ supervise. `flows` makes agent work **structured, safe, and observable**:
   runs the same way every time; lint/test commands adapt to your stack (cargo,
   pytest, npm, go).
 - **Safe** — the agent's shell runs in a filesystem sandbox (bubblewrap / Seatbelt):
-  read anything, **write only inside the repo**, host secrets scrubbed, fail-closed
-  if no sandbox. File tools can't escape the repo; web access is SSRF-guarded.
+  **write only inside the repo**, credential stores (`~/.ssh`, `~/.aws`, API keys, …)
+  hidden, no host IPC, fail-closed if no sandbox. File tools can't escape the repo; web access is SSRF-guarded.
 - **Observable** — live token streaming, per-phase token/cost accounting, a phase
   graph that shows loops, full run state on disk. Start a run, walk away, and
   **reattach** later — running or finished.
