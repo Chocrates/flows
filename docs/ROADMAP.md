@@ -35,12 +35,12 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - `web_search` backends `brave` (Brave Search API) and `serper` (Google via Serper), keyed by config or `BRAVE_API_KEY` / `SERPER_API_KEY`.
 - `tools.bash.offline: true` runs a phase's shell commands without network (loopback only).
 - Sandbox hides credential stores under `~` (ssh, gpg, cloud CLIs, forge tokens, registry creds, browsers, flows' own API-key config); `tools.bash.expose_credentials` opts out per phase.
+- Repo map breaks relevance ties by git recency (uncommitted files, then recent commits), read inside the sandbox; mtime fallback outside git.
 
 ## Next
 
 ### Context delivery follow-ups
 
-- **Git-recency ranking** — rank the repo map with git history instead of file mtime.
 - **Broader retrieval eval corpus** — all six fixtures come from this repo and most tasks name their target file path, which inflates path-matching rankers. Add path-free tasks and fixtures from other repos/languages.
 - **Retrieval index hygiene** — content-addressed vector cache so switching branches doesn't trigger a rebuild; eviction cap for `~/.flows/index/`.
 

@@ -7,10 +7,10 @@
 //!
 //! Signatures are the first line of each definition node (up to the body), which is
 //! cheap and language-agnostic enough for a map. Ranking is idea↔(path + symbol
-//! names) token overlap plus a small recent-modification boost (mtime proxy for
-//! git recency). Follow-up: true git-recency and per-language queries.
+//! names) token overlap plus a small recency boost: from git history when the
+//! repo has one (see [`git_recency`]), else from file mtimes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tree_sitter::{Node, Parser};
 
@@ -158,28 +158,99 @@ fn tokenize(s: &str) -> HashSet<String> {
     out
 }
 
+/// Largest recency boost; relevance (token overlap, in whole tokens) dominates.
+const MAX_RECENCY: f64 = 0.5;
+/// Commits of history read for git recency.
+const GIT_LOG_COMMITS: usize = 300;
+
+/// Recency boost per repo-relative path, in `[0, MAX_RECENCY]`.
+enum Recency {
+    Git(HashMap<String, f64>),
+    /// (oldest, newest) mtime across the ranked files.
+    Mtime(u64, u64),
+}
+
+impl Recency {
+    fn boost(&self, f: &FileSymbols) -> f64 {
+        match self {
+            Recency::Git(m) => m.get(&f.path).copied().unwrap_or(0.0),
+            Recency::Mtime(oldest, newest) if newest > oldest => {
+                MAX_RECENCY * (f.mtime.saturating_sub(*oldest)) as f64 / (newest - oldest) as f64
+            }
+            Recency::Mtime(..) => 0.0,
+        }
+    }
+}
+
+/// Shell script printing uncommitted + untracked paths, then the recent log as
+/// `@`-separated commits (newest first), all relative to the cwd. Runs inside
+/// the sandbox: `.git/config` is writable by agents, and options like
+/// `core.fsmonitor` or `gpg.program` would otherwise run repo-chosen commands on
+/// the host. The `-c` overrides are defense in depth on top of that.
+fn git_recency_script() -> String {
+    format!(
+        "G='git --no-pager -c core.fsmonitor=false -c log.showSignature=false -c core.quotepath=false'\n\
+         $G rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 3\n\
+         echo '@@dirty'\n\
+         $G diff --name-only --relative --no-ext-diff --no-textconv HEAD 2>/dev/null\n\
+         $G ls-files --others --exclude-standard 2>/dev/null\n\
+         echo '@@log'\n\
+         $G log --no-merges -n {GIT_LOG_COMMITS} --name-only --relative --no-renames \
+         --no-ext-diff --no-textconv --format=tformat:@ 2>/dev/null\n\
+         echo '@@end'\n"
+    )
+}
+
+/// Parse [`git_recency_script`] output into per-path boosts: uncommitted files
+/// get the full boost, committed ones `MAX / (1 + k/10)` for the newest commit
+/// `k` (0 = HEAD) touching them. `None` if the output is incomplete.
+fn parse_git_recency(out: &str) -> Option<HashMap<String, f64>> {
+    let body = out.split_once("@@dirty\n")?.1;
+    let (dirty, rest) = body.split_once("@@log\n")?;
+    let (log, _) = rest.split_once("@@end")?;
+    let mut map = HashMap::new();
+    for p in dirty.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        map.insert(p.to_string(), MAX_RECENCY);
+    }
+    let mut commit: i64 = -1;
+    for line in log.lines().map(str::trim) {
+        if line == "@" {
+            commit += 1;
+        } else if !line.is_empty() && commit >= 0 {
+            let boost = MAX_RECENCY / (1.0 + commit as f64 / 10.0);
+            map.entry(line.to_string()).or_insert(boost);
+        }
+    }
+    (!map.is_empty()).then_some(map)
+}
+
+/// Git-history recency for files under `repo_root`, or `None` when it isn't a
+/// git work tree or git / the sandbox is unavailable.
+fn git_recency(repo_root: &Path) -> Option<HashMap<String, f64>> {
+    use flows_tools::sandbox::{run_confined, Confinement};
+    let c = Confinement {
+        offline: true,
+        ..Confinement::default()
+    };
+    let out = run_confined(&git_recency_script(), repo_root, 15, 4 << 20, &c).ok()?;
+    parse_git_recency(&out)
+}
+
 /// Relevance score of a file to the idea: number of idea tokens that appear in the
-/// file's path + signatures, plus a small boost for recently modified files.
-fn score(idea_tokens: &HashSet<String>, f: &FileSymbols, newest_mtime: u64) -> f64 {
+/// file's path + signatures, plus the recency boost.
+fn score(idea_tokens: &HashSet<String>, f: &FileSymbols, recency: &Recency) -> f64 {
     let mut hay = f.path.clone();
     hay.push(' ');
     hay.push_str(&f.signatures.join(" "));
     let file_tokens = tokenize(&hay);
     let overlap = idea_tokens.intersection(&file_tokens).count() as f64;
-    // Recency boost in [0, 0.5]: newest file gets +0.5, older ones less.
-    let recency = if newest_mtime == 0 {
-        0.0
-    } else {
-        0.5 * (f.mtime as f64 / newest_mtime as f64)
-    };
-    overlap + recency
+    overlap + recency.boost(f)
 }
 
 /// Extract symbols for every supported file, then rank by relevance to `idea`
 /// (highest first). Shared by the rendered map and the deterministic eval.
 fn collect_ranked(repo_root: &Path, idea: &str) -> Vec<FileSymbols> {
     let mut files: Vec<FileSymbols> = Vec::new();
-    let mut newest_mtime = 0u64;
     for (rel, abs) in source_files(repo_root) {
         let Some(lang) = abs
             .extension()
@@ -201,17 +272,23 @@ fn collect_ranked(repo_root: &Path, idea: &str) -> Vec<FileSymbols> {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        newest_mtime = newest_mtime.max(mtime);
         files.push(FileSymbols {
             path: rel,
             signatures,
             mtime,
         });
     }
+    let recency = match git_recency(repo_root) {
+        Some(m) => Recency::Git(m),
+        None => Recency::Mtime(
+            files.iter().map(|f| f.mtime).min().unwrap_or(0),
+            files.iter().map(|f| f.mtime).max().unwrap_or(0),
+        ),
+    };
     let idea_tokens = tokenize(idea);
     files.sort_by(|a, b| {
-        score(&idea_tokens, b, newest_mtime)
-            .total_cmp(&score(&idea_tokens, a, newest_mtime))
+        score(&idea_tokens, b, &recency)
+            .total_cmp(&score(&idea_tokens, a, &recency))
             .then_with(|| a.path.cmp(&b.path))
     });
     files
@@ -311,6 +388,114 @@ mod tests {
         assert!(
             small.contains("truncated to a token budget"),
             "got: {small}"
+        );
+    }
+
+    #[test]
+    fn parses_git_recency_output() {
+        let out =
+            "@@dirty\nsrc/wip.rs\nnew.rs\n@@log\n@\n\nsrc/a.rs\n@\n\nsrc/b.rs\nsrc/a.rs\n@@end\n";
+        let m = parse_git_recency(out).unwrap();
+        assert_eq!(m["src/wip.rs"], MAX_RECENCY);
+        assert_eq!(m["new.rs"], MAX_RECENCY);
+        assert_eq!(m["src/a.rs"], MAX_RECENCY); // newest commit wins
+        assert!(m["src/b.rs"] < m["src/a.rs"]);
+        // Not a work tree / failed: no markers.
+        assert!(parse_git_recency("\n[exit code: 3]").is_none());
+        assert!(parse_git_recency("@@dirty\n@@log\n").is_none());
+    }
+
+    #[test]
+    fn mtime_fallback_spans_the_age_range() {
+        let f = |mtime| FileSymbols {
+            path: String::new(),
+            signatures: vec![],
+            mtime,
+        };
+        let r = Recency::Mtime(1_000, 2_000);
+        assert_eq!(r.boost(&f(2_000)), MAX_RECENCY);
+        assert_eq!(r.boost(&f(1_000)), 0.0);
+        assert_eq!(r.boost(&f(1_500)), MAX_RECENCY / 2.0);
+        assert_eq!(Recency::Mtime(5, 5).boost(&f(5)), 0.0);
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn git_history_orders_ties_and_dirty_files_first() {
+        if !flows_tools::sandbox_available() {
+            eprintln!("skipping: no sandbox");
+            return;
+        }
+        let d = tempdir().unwrap();
+        let r = d.path();
+        git(r, &["init", "-q"]);
+        let a = "pub fn alpha() {}\n";
+        std::fs::write(r.join("a.rs"), a).unwrap();
+        git(r, &["add", "-A"]);
+        git(r, &["commit", "-qm", "a"]);
+        std::fs::write(r.join("b.rs"), "pub fn beta() {}\n").unwrap();
+        git(r, &["add", "-A"]);
+        git(r, &["commit", "-qm", "b"]);
+        // Rewriting a.rs unchanged makes its mtime newest without a diff.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(r.join("a.rs"), a).unwrap();
+        assert_eq!(rank_files(r, "unrelated idea"), ["b.rs", "a.rs"]);
+
+        // An uncommitted edit outranks every commit.
+        std::fs::write(r.join("a.rs"), "pub fn alpha2() {}\n").unwrap();
+        assert_eq!(rank_files(r, "unrelated idea"), ["a.rs", "b.rs"]);
+    }
+
+    #[test]
+    fn git_runs_inside_the_sandbox() {
+        if !flows_tools::sandbox_available() {
+            eprintln!("skipping: no sandbox");
+            return;
+        }
+        let d = tempdir().unwrap();
+        let r = d.path();
+        git(r, &["init", "-q"]);
+        std::fs::write(r.join("a.rs"), "pub fn alpha() {}\n").unwrap();
+        git(r, &["add", "-A"]);
+        git(r, &["commit", "-qm", "a"]);
+        // A hostile hook in .git/config, which an agent could have written. Our
+        // `-c` override disables it; even if it ran, the sandbox keeps its write
+        // inside the repo, so the marker outside must never appear.
+        let outside = tempdir().unwrap();
+        let marker = outside.path().join("pwned");
+        git(
+            r,
+            &[
+                "config",
+                "core.fsmonitor",
+                &format!("touch {} #", marker.display()),
+            ],
+        );
+        assert!(git_recency(r).is_some());
+        assert!(!marker.exists());
+        // Control: unconfined, the same repo does run the hook.
+        git(r, &["diff", "--name-only", "HEAD"]);
+        assert!(
+            marker.exists(),
+            "control: fsmonitor hook should fire on the host"
         );
     }
 }
