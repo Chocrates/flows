@@ -362,14 +362,13 @@ pub fn load_project_config(repo_path: &Path) -> Result<Option<ProjectConfig>> {
         _ => Vec::new(),
     };
 
-    let context = parse_context_block(&raw);
-
     Ok(Some(ProjectConfig {
         llm,
         models: parse_profiles(&raw),
         phases,
         template: get_str(&raw, "template").unwrap_or_default(),
-        context,
+        context: parse_context_block(&raw),
+        context_keys: context_block_keys(&raw),
     }))
 }
 
@@ -434,11 +433,6 @@ pub fn resolve_llm(
     eff
 }
 
-/// Resolve a named context configuration into a [`ContextConfig`] (feature flags
-/// only; `exclude` stays at its default). Grammar: `baseline` (all off), `all`
-/// (all on), or one-or-more `+token` segments combined — `+search`, `+range`,
-/// `+slim`, `+map`, `+budget`, `+rag`. Any unrecognized token is an error. Used
-/// by the eval harness to A/B context configurations by name.
 /// Parse a config's `context:` block into a [`ContextConfig`]. Shared by the
 /// global and project loaders. `raw` is the whole config mapping.
 pub fn parse_context_block(raw: &Value) -> ContextConfig {
@@ -474,6 +468,11 @@ pub fn parse_context_block(raw: &Value) -> ContextConfig {
     }
 }
 
+/// Resolve a named context configuration into a [`ContextConfig`] (feature flags
+/// only; `exclude` stays at its default). Grammar: `baseline` (all off), `all`
+/// (all on), or one-or-more `+token` segments combined — `+search`, `+range`,
+/// `+slim`, `+map`, `+budget`, `+rag`. Any unrecognized token is an error. Used
+/// by `flows run --context` and the eval harness to pick configurations by name.
 pub fn parse_context_config(name: &str) -> std::result::Result<ContextConfig, String> {
     let name = name.trim();
     let mut cfg = ContextConfig {
@@ -508,6 +507,73 @@ pub fn parse_context_config(name: &str) -> std::result::Result<ContextConfig, St
         }
     }
     Ok(cfg)
+}
+
+/// Keys present in a config's `context:` block (empty when there is no block).
+fn context_block_keys(raw: &Value) -> Vec<String> {
+    match raw.get("context") {
+        Some(Value::Mapping(m)) => m
+            .keys()
+            .filter_map(|k| k.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn context_to_json(c: &ContextConfig) -> serde_json::Value {
+    serde_json::to_value(c).unwrap_or_default()
+}
+
+/// Effective context config for a run: the global `context:` block, with each key
+/// the project's block sets layered on top. A project that only says
+/// `retrieval: true` keeps the global `retrieval_model`, and vice versa.
+pub fn merge_context(global: &GlobalConfig, project: &ProjectConfig) -> ContextConfig {
+    let mut merged = context_to_json(&global.context);
+    let proj = context_to_json(&project.context);
+    for key in &project.context_keys {
+        if let Some(v) = proj.get(key) {
+            merged[key.as_str()] = v.clone();
+        }
+    }
+    serde_json::from_value(merged).unwrap_or_else(|_| global.context.clone())
+}
+
+/// Copy the feature flags (not the tuning knobs) from `flags` onto `base`.
+pub fn with_context_flags(base: &ContextConfig, flags: &ContextConfig) -> ContextConfig {
+    ContextConfig {
+        search_tool: flags.search_tool,
+        range_reads: flags.range_reads,
+        slim_tree: flags.slim_tree,
+        repo_map: flags.repo_map,
+        budgeting: flags.budgeting,
+        retrieval: flags.retrieval,
+        oracle: flags.oracle,
+        ..base.clone()
+    }
+}
+
+/// Make `ctx` the project's complete context config, so it wins over the global
+/// block for every key. Used for per-run overrides.
+pub fn pin_context(project: &mut ProjectConfig, ctx: ContextConfig) {
+    project.context_keys = match context_to_json(&ctx) {
+        serde_json::Value::Object(m) => m.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+    project.context = ctx;
+}
+
+/// Apply a per-run `--context` spec (see [`parse_context_config`]): its feature
+/// flags replace the merged global + project flags for this run only; tuning
+/// knobs (`retrieval_model`, budgets, …) still come from config.
+pub fn apply_context_override(
+    global: &GlobalConfig,
+    project: &mut ProjectConfig,
+    spec: &str,
+) -> std::result::Result<(), String> {
+    let flags = parse_context_config(spec)?;
+    let effective = with_context_flags(&merge_context(global, project), &flags);
+    pin_context(project, effective);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

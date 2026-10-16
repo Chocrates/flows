@@ -76,6 +76,7 @@ async fn run(
             phases: vec![],
             template: String::new(),
             context: Default::default(),
+            context_keys: Vec::new(),
         },
         &|_: &LLMConfig| -> Arc<dyn Provider> { Arc::new(Mock(Mutex::new(VecDeque::new()))) },
         cb,

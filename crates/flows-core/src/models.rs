@@ -573,6 +573,10 @@ pub struct ProjectConfig {
     pub template: String,
     #[serde(default)]
     pub context: ContextConfig,
+    /// Keys the project's `context:` block actually sets. Only these override
+    /// the global block (see `config::merge_context`); everything else inherits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -66,6 +66,7 @@ fn main() {
             phases: vec![],
             template: String::new(),
             context: Default::default(),
+            context_keys: Vec::new(),
         },
         Box::new(|_| std::sync::Arc::new(MockProvider)),
         store,

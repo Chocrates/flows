@@ -20,6 +20,7 @@ fn empty_project() -> ProjectConfig {
         phases: vec![],
         template: String::new(),
         context: Default::default(),
+        context_keys: Vec::new(),
     }
 }
 

@@ -450,7 +450,7 @@ pub async fn run_pipeline(
         store,
         flows_dir,
         logger,
-        context: project_cfg.context.clone(),
+        context: flows_core::config::merge_context(global_cfg, project_cfg),
     };
 
     if is_dag(phases) {

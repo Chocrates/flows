@@ -94,7 +94,7 @@ A few tests are `#[ignore]`d (e.g. end-to-end retrieval that downloads an embedd
 For LLM config: project wins over user-project-override wins over global.
 `max_cost_usd` and `notifications` live in global/user-project layers only.
 Named model **profiles** let each phase route to a different model/provider.
-The `context` block gates context-delivery features (all off by default). Only the eval harness overrides it per run (`flows eval run --configs baseline,rag,…`); `flows run` has no per-run flag yet.
+The `context` block gates context-delivery features (all off by default). Project keys overlay global keys (`config::merge_context`); `flows run --context map+rag` overrides the flags for one run (`config::apply_context_override`, passed to background workers via `FLOWS_CONTEXT`).
 
 ## Runner architecture
 

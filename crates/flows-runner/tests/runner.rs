@@ -118,6 +118,7 @@ async fn run(
             phases: vec![],
             template: String::new(),
             context: Default::default(),
+            context_keys: Vec::new(),
         },
         &factory,
         cb,
@@ -161,6 +162,7 @@ async fn per_phase_profiles_route_to_distinct_cached_providers() {
         phases: vec![],
         template: String::new(),
         context: Default::default(),
+        context_keys: Vec::new(),
     };
 
     // Phases: a → coder, b → default, c → coder (reuses a's provider).

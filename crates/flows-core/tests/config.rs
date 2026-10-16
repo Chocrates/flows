@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use flows_core::config::{
-    apply_user_project_override, load_global_config, load_project_config,
-    load_user_project_override, merge_llm, merge_profiles, resolve_llm, ConfigError,
+    apply_context_override, apply_user_project_override, load_global_config, load_project_config,
+    load_user_project_override, merge_context, merge_llm, merge_profiles, resolve_llm, ConfigError,
 };
 use flows_core::models::{GlobalConfig, LLMConfig, PhaseType, ProjectConfig};
 use serde_yaml_ng::Value;
@@ -119,6 +119,7 @@ fn project_profiles_override_global() {
         phases: vec![],
         template: String::new(),
         context: Default::default(),
+        context_keys: Vec::new(),
     };
     let merged = merge_profiles(&global, &project);
     assert_eq!(merged["coder"].model, "project-coder"); // project wins
@@ -327,6 +328,7 @@ fn merge_llm_project_overrides_and_falls_back() {
         phases: vec![],
         template: String::new(),
         context: Default::default(),
+        context_keys: Vec::new(),
     };
     let merged = merge_llm(&global, &project);
     assert_eq!(merged.model, "p-model"); // project wins
@@ -343,6 +345,7 @@ fn merge_llm_thinking_tristate() {
         phases: vec![],
         template: String::new(),
         context: Default::default(),
+        context_keys: Vec::new(),
     };
     // project None → inherit global
     assert_eq!(merge_llm(&global, &project).thinking, Some(true));
@@ -424,4 +427,73 @@ fn bad_on_failure_rejected_at_load() {
             parse_phases_from_yaml(&y).err()
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// context: global + project merge, per-run override
+// ---------------------------------------------------------------------------
+
+fn context_configs(global_yml: &str, project_yml: &str) -> (GlobalConfig, ProjectConfig) {
+    let dir = tempdir().unwrap();
+    let g = load_global_config(Some(&write(dir.path(), "config.yml", global_yml))).unwrap();
+    write(dir.path(), ".flows.yml", project_yml);
+    let p = load_project_config(dir.path()).unwrap().unwrap();
+    (g, p)
+}
+
+#[test]
+fn global_context_applies_when_project_has_no_block() {
+    let (g, p) = context_configs(
+        "context:\n  repo_map: true\n  retrieval_model: bge-small\n",
+        "template: feature\n",
+    );
+    assert!(p.context_keys.is_empty());
+    let c = merge_context(&g, &p);
+    assert!(c.repo_map);
+    assert_eq!(c.retrieval_model, "bge-small");
+}
+
+#[test]
+fn project_context_keys_layer_over_global() {
+    let (g, p) = context_configs(
+        "context:\n  repo_map: true\n  retrieval_model: bge-small\n  retrieval_max_chunks: 4\n",
+        "context:\n  retrieval: true\n  repo_map: false\n",
+    );
+    let c = merge_context(&g, &p);
+    assert!(c.retrieval, "project turns retrieval on");
+    assert!(!c.repo_map, "project explicitly turns repo_map off");
+    assert_eq!(c.retrieval_model, "bge-small", "unset keys inherit global");
+    assert_eq!(c.retrieval_max_chunks, 4);
+}
+
+#[test]
+fn context_override_replaces_flags_keeps_tuning() {
+    let (g, mut p) = context_configs(
+        "context:\n  search_tool: true\n  retrieval_model: bge-small\n",
+        "context:\n  budget_fraction: 0.5\n",
+    );
+    apply_context_override(&g, &mut p, "map+rag").unwrap();
+    let c = merge_context(&g, &p);
+    assert!(c.repo_map && c.retrieval);
+    assert!(!c.search_tool, "override flags replace config flags");
+    assert_eq!(c.retrieval_model, "bge-small");
+    assert_eq!(c.budget_fraction, 0.5);
+}
+
+#[test]
+fn context_override_baseline_turns_everything_off() {
+    let (g, mut p) = context_configs(
+        "context:\n  repo_map: true\n",
+        "context:\n  retrieval: true\n",
+    );
+    apply_context_override(&g, &mut p, "baseline").unwrap();
+    let c = merge_context(&g, &p);
+    assert!(!c.repo_map && !c.retrieval);
+}
+
+#[test]
+fn context_override_rejects_unknown_token() {
+    let (g, mut p) = context_configs("{}\n", "template: feature\n");
+    let err = apply_context_override(&g, &mut p, "map+bogus").unwrap_err();
+    assert!(err.contains("bogus"), "{err}");
 }

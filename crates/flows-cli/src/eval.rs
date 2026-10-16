@@ -20,7 +20,10 @@ use async_trait::async_trait;
 use include_dir::{include_dir, Dir};
 use serde::Deserialize;
 
-use flows_core::config::{merge_llm, merge_profiles, parse_context_config, resolve_llm};
+use flows_core::config::{
+    merge_context, merge_llm, merge_profiles, parse_context_config, pin_context, resolve_llm,
+    with_context_flags,
+};
 use flows_core::models::{
     ContextConfig, GlobalConfig, LLMConfig, PhaseConfig, PhaseType, ProjectConfig,
 };
@@ -558,24 +561,11 @@ fn pin_config(
     let mut p = base_project.clone();
     p.llm = model.clone();
     p.models = HashMap::new();
-    // Start from the user's context config (so retrieval_model / max_chunks from
-    // `~/.flows/config.yml` survive) and overlay only the token-selected flags.
-    // Seed from global (where users set retrieval_model); a project `context`
-    // block overrides the retrieval settings when present.
-    let mut merged = base_global.context.clone();
-    if !base_project.context.retrieval_model.is_empty() {
-        merged.retrieval_model = base_project.context.retrieval_model.clone();
-        merged.retrieval_max_chunks = base_project.context.retrieval_max_chunks;
-        merged.retrieval_reindex_threshold = base_project.context.retrieval_reindex_threshold;
-    }
-    merged.search_tool = ctx.search_tool;
-    merged.range_reads = ctx.range_reads;
-    merged.slim_tree = ctx.slim_tree;
-    merged.repo_map = ctx.repo_map;
-    merged.budgeting = ctx.budgeting;
-    merged.retrieval = ctx.retrieval;
-    merged.oracle = ctx.oracle;
-    p.context = merged;
+    // Keep the user's tuning knobs (retrieval_model, budgets, … from global and
+    // project config) and overlay only the token-selected flags, pinned so the
+    // trial runs exactly this config.
+    let merged = merge_context(base_global, base_project);
+    pin_context(&mut p, with_context_flags(&merged, &ctx));
     (g, p)
 }
 

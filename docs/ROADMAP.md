@@ -25,6 +25,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Push context for models without tool calling.
 - `flows eval`: fixture × model × context-config matrix, results store, report, deterministic retrieval recall/MRR (`eval-harness`, `context-eval`).
 - Agent stall guards: no-op write streaks, empty-response nudges (fail after 3), max-round limit.
+- `flows run --context map+rag` per-run override; global and project `context:` blocks merge key-by-key.
 
 ## Next
 
@@ -34,7 +35,6 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - **Window-scaled retrieval** — size `retrieval_max_chunks` from the model's context window, like `budget_fraction`.
 - **Git-recency ranking** — rank the repo map with git history instead of file mtime.
 - **Retrieval index hygiene** — content-addressed vector cache so switching branches doesn't trigger a rebuild; eviction cap for `~/.flows/index/`.
-- **Per-run context override on `flows run`** — e.g. `--context repo_map=true,retrieval=true`. Today only `flows eval` overrides `context.*` per run.
 
 ### Sandbox & tools
 
@@ -54,5 +54,4 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 
 ## Tech debt
 
-- `flows-runner` writes to stderr directly in two places (`agent.rs` retrieval skip, `retrieval.rs` index-save failure). Route both through `RunnerCallbacks`.
 - `DESIGN.md` still has Python-era details in places (e.g. `_run_linear` / `asyncio.wait` in "Runner architecture", `flows/prompts/` paths in "Prompt loading").

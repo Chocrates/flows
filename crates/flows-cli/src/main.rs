@@ -9,7 +9,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use std::collections::HashMap;
 
 use flows_core::config::{
-    apply_user_project_override, load_global_config, load_project_config,
+    apply_context_override, apply_user_project_override, load_global_config, load_project_config,
     load_user_project_override, merge_llm, merge_profiles, resolve_llm,
 };
 use flows_core::detect::{detect_stack, generate_config};
@@ -92,6 +92,11 @@ enum Command {
         /// Detach and run in the background; returns immediately.
         #[arg(long)]
         background: bool,
+        /// Context-delivery features for this run only, overriding the config's
+        /// flags: `baseline`, `all`, or tokens joined by `+` (`search`, `range`,
+        /// `slim`, `map`, `budget`, `rag`), e.g. `--context map+rag`.
+        #[arg(long, value_name = "CONFIG")]
+        context: Option<String>,
     },
     /// List recent runs and their status.
     Runs,
@@ -339,12 +344,14 @@ fn main() -> ExitCode {
             directory,
             tui,
             background,
+            context,
         } => cmd_run(
             &idea.join(" "),
             template.as_deref(),
             directory.as_deref(),
             tui,
             background,
+            context.as_deref(),
         ),
         Command::Runs => cmd_runs(),
         Command::Stop { run_id } => cmd_stop(&run_id),
@@ -961,6 +968,7 @@ fn default_project() -> ProjectConfig {
         phases: vec![],
         template: String::new(),
         context: Default::default(),
+        context_keys: Vec::new(),
     }
 }
 
@@ -1260,7 +1268,7 @@ fn cmd_home() -> Result<(), String> {
             }
             flows_tui::HomeAction::StartRun { template, idea } => {
                 let run_id = uuid::Uuid::new_v4().to_string();
-                spawn_background(&run_id, &idea, &template, &cwd, &store, false)?;
+                spawn_background(&run_id, &idea, &template, &cwd, &store, false, None)?;
                 flows_tui::attach_tui(store.clone(), run_id).map_err(|e| e.to_string())?;
             }
             flows_tui::HomeAction::Plan { template, idea } => {
@@ -1271,7 +1279,7 @@ fn cmd_home() -> Result<(), String> {
                     flows_tui::plan_screen(&report, &tname, &idea).map_err(|e| e.to_string())?;
                 if start {
                     let run_id = uuid::Uuid::new_v4().to_string();
-                    spawn_background(&run_id, &idea, &tname, &cwd, &store, false)?;
+                    spawn_background(&run_id, &idea, &tname, &cwd, &store, false, None)?;
                     flows_tui::attach_tui(store.clone(), run_id).map_err(|e| e.to_string())?;
                 }
             }
@@ -1286,12 +1294,16 @@ fn cmd_run(
     repo: Option<&str>,
     tui: bool,
     background: bool,
+    context: Option<&str>,
 ) -> Result<(), String> {
     if idea.trim().is_empty() {
         return Err("provide an idea, e.g. `flows run \"add a feature\"`".into());
     }
     let cwd = resolve_repo_dir(repo)?;
-    let (phases, global, project, template_name) = resolve(&cwd, template)?;
+    let (phases, global, mut project, template_name) = resolve(&cwd, template)?;
+    if let Some(spec) = context {
+        apply_context_override(&global, &mut project, spec)?;
+    }
 
     let llm = merge_llm(&global, &project);
     let profiles = merge_profiles(&global, &project);
@@ -1300,7 +1312,7 @@ fn cmd_run(
     let run_id = uuid::Uuid::new_v4().to_string();
 
     if background {
-        return spawn_background(&run_id, idea, &template_name, &cwd, &store, true);
+        return spawn_background(&run_id, idea, &template_name, &cwd, &store, true, context);
     }
 
     if tui {
@@ -1308,7 +1320,7 @@ fn cmd_run(
         // path the home screen uses. This way quitting the view (`q`) only detaches;
         // the run keeps going and can be re-attached (`flows attach <id>`) or stopped
         // (`flows stop <id>`). Quitting no longer kills the run.
-        spawn_background(&run_id, idea, &template_name, &cwd, &store, false)?;
+        spawn_background(&run_id, idea, &template_name, &cwd, &store, false, context)?;
         flows_tui::attach_tui(store.clone(), run_id.clone()).map_err(|e| e.to_string())?;
         // After detaching, tell the user how to get back / stop it (unless it
         // already finished).
@@ -1353,6 +1365,7 @@ fn spawn_background(
     repo: &std::path::Path,
     store: &Store,
     announce: bool,
+    context: Option<&str>,
 ) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -1393,7 +1406,11 @@ fn spawn_background(
     let err_file = log_file.try_clone().map_err(|e| e.to_string())?;
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let child = Command::new(exe)
+    let mut cmd = Command::new(exe);
+    if let Some(spec) = context {
+        cmd.env("FLOWS_CONTEXT", spec);
+    }
+    let child = cmd
         .arg("worker")
         .arg(run_id)
         .env("FLOWS_IDEA", idea)
@@ -1424,7 +1441,10 @@ fn cmd_worker(run_id: &str) -> Result<(), String> {
     let template = std::env::var("FLOWS_TEMPLATE").ok();
     let repo = PathBuf::from(std::env::var("FLOWS_REPO").map_err(|_| "FLOWS_REPO not set")?);
 
-    let (phases, global, project, template_name) = resolve(&repo, template.as_deref())?;
+    let (phases, global, mut project, template_name) = resolve(&repo, template.as_deref())?;
+    if let Ok(spec) = std::env::var("FLOWS_CONTEXT") {
+        apply_context_override(&global, &mut project, &spec)?;
+    }
     let store = Store::new(flows_dir());
 
     let waiting = Waiting {

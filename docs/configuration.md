@@ -150,6 +150,13 @@ context:
   repo_map_max_tokens: 1500
 ```
 
+- The block can live in `~/.flows/config.yml`, `.flows.yml`, or both. Keys the
+  project sets override the global ones; everything else is inherited (so a
+  project can say just `retrieval: true` and keep your global `retrieval_model`).
+- Try a combination for one run without editing config:
+  `flows run "…" --context map+rag` (tokens: `search`, `range`, `slim`, `map`,
+  `budget`, `rag`; or `all` / `baseline`). It replaces the on/off flags only;
+  tuning keys still come from config.
 - A `supports_tools: false` model gets **no** tool schemas — only push context —
   so it never wastes turns trying to call tools.
 - **Retrieval is fully local.** Embeddings run in-process (`fastembed`/ONNX, a
