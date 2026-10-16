@@ -356,12 +356,20 @@ pub fn build_tool_defs(tools: &ToolsConfig, ctx: &ContextConfig) -> Vec<ToolDef>
             });
         }
     }
-    if tools.bash.is_some() {
+    if let Some(bash) = &tools.bash {
+        let mut description = "Run a shell command. It always executes from the repository \
+root (your working directory) — use repo-relative paths and do NOT `cd` elsewhere \
+(e.g. never `cd /tmp`); each call starts fresh at the repo root."
+            .to_string();
+        if bash.offline {
+            description.push_str(
+                " Commands have NO network access (only localhost): don't fetch \
+dependencies or call external services; use what is already installed or vendored.",
+            );
+        }
         defs.push(ToolDef {
             name: "bash".into(),
-            description: "Run a shell command. It always executes from the repository \
-root (your working directory) — use repo-relative paths and do NOT `cd` elsewhere \
-(e.g. never `cd /tmp`); each call starts fresh at the repo root.".into(),
+            description,
             parameters: json!({"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}),
         });
     }

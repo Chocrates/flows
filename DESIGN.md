@@ -629,7 +629,6 @@ Cross-cutting: background worker + signal files (answer/advance/cancel), desktop
 
 ## What's next
 
-- **Optional network isolation** for the shell sandbox (`--unshare-net`, opt-in for dep fetching).
 - **Pipeline composition**: `include` another pipeline as a phase.
 - **Template registry**: community-shared templates.
 

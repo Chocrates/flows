@@ -88,6 +88,7 @@ tools:
     # memory_mb: 16384              # memory cap per command tree (default 8192; 0 = none)
     # max_procs: 2048               # process/thread cap per command (default 1024; 0 = none)
     # expose_credentials: true      # let commands read ~/.ssh, ~/.aws, … (hidden by default)
+    # offline: true                 # no network for commands (loopback only); default off
   http_get: true           # GET public URLs (SSRF-guarded)
   web_search: true         # DuckDuckGo or SearXNG (see configuration.md)
   lookup: true             # crates.io / docs.rs / stackexchange / wikipedia / github
@@ -111,6 +112,12 @@ git-over-ssh dependencies or a private registry, sets
 its YAML. flows' own `~/.flows/config.yml` and `~/.flows/projects/`, which hold
 API keys, stay hidden either way. Script phases are not sandboxed and see
 everything.
+
+`offline: true` cuts the network for a phase's commands, which suits test, lint and
+review phases that don't fetch anything. On Linux the command gets its own
+loopback, so it can't reach services on the host's `127.0.0.1` either. On macOS
+it is limited to `localhost`, which is still shared with the host. The model is
+told the shell is offline.
 
 ## `script` phase
 

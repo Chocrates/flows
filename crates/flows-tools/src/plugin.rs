@@ -22,6 +22,8 @@ pub struct PluginToolDef {
     /// Let the command read the user's credential stores (hidden by default),
     /// e.g. a plugin wrapping `gh`.
     pub expose_credentials: bool,
+    /// Run without network access (loopback only).
+    pub offline: bool,
 }
 
 fn flows_base(flows_dir: Option<&Path>) -> PathBuf {
@@ -54,6 +56,10 @@ pub fn load_plugin_tool(name: &str, flows_dir: Option<&Path>) -> Option<PluginTo
         command: get_str("command").unwrap_or_default(),
         expose_credentials: raw
             .get("expose_credentials")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        offline: raw
+            .get("offline")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
     })
@@ -111,6 +117,7 @@ pub fn run_plugin_tool(defn: &PluginToolDef, args: &Value, repo_root: &Path) -> 
         DEFAULT_MAX_OUTPUT,
         &Confinement {
             expose_credentials: defn.expose_credentials,
+            offline: defn.offline,
             ..Confinement::default()
         },
     )

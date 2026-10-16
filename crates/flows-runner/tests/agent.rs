@@ -792,3 +792,24 @@ fn context_flags_gate_search_and_range() {
     let rf = defs.iter().find(|d| d.name == "read_file").unwrap();
     assert!(rf.parameters["properties"].get("start_line").is_some());
 }
+
+#[test]
+fn offline_bash_tells_the_model() {
+    use flows_core::models::{BashConfig, ContextConfig, ToolsConfig};
+    let desc = |offline: bool| {
+        let tools = ToolsConfig {
+            bash: Some(BashConfig {
+                offline,
+                ..BashConfig::default()
+            }),
+            ..Default::default()
+        };
+        flows_runner::agent::build_tool_defs(&tools, &ContextConfig::default())
+            .into_iter()
+            .find(|d| d.name == "bash")
+            .unwrap()
+            .description
+    };
+    assert!(desc(true).contains("NO network access"));
+    assert!(!desc(false).contains("network"));
+}

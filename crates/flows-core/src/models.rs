@@ -44,6 +44,10 @@ pub struct BashConfig {
     /// private-registry fetches. flows' own config stays hidden regardless.
     #[serde(default)]
     pub expose_credentials: bool,
+    /// Run commands without network access (loopback only). Off by default so
+    /// builds can fetch dependencies.
+    #[serde(default)]
+    pub offline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -286,6 +290,7 @@ pub fn resolve_tools(raw: Option<&Value>) -> Result<ToolsConfig, ModelError> {
                     memory_mb: bm.get("memory_mb").and_then(Value::as_u64),
                     max_procs: bm.get("max_procs").and_then(Value::as_u64),
                     expose_credentials: as_bool(bm.get("expose_credentials")).unwrap_or(false),
+                    offline: as_bool(bm.get("offline")).unwrap_or(false),
                 }),
                 _ => None,
             };

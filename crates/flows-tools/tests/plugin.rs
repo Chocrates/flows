@@ -80,6 +80,7 @@ fn empty_command_errors() {
         parameters: json!({}),
         command: String::new(),
         expose_credentials: false,
+        offline: false,
     };
     let err = run_plugin_tool(&def, &json!({}), d.path()).unwrap_err();
     assert!(err.0.contains("no command"));
@@ -94,6 +95,7 @@ fn bad_template_errors() {
         parameters: json!({}),
         command: "echo {{ ".into(), // unterminated
         expose_credentials: false,
+        offline: false,
     };
     let err = run_plugin_tool(&def, &json!({}), d.path()).unwrap_err();
     assert!(err.0.contains("render failed"));
@@ -114,6 +116,7 @@ fn renders_and_runs() {
         parameters: json!({}),
         command: "echo hi {{ who }}".into(),
         expose_credentials: false,
+        offline: false,
     };
     let out = run_plugin_tool(&def, &json!({"who": "world"}), d.path()).unwrap();
     assert!(out.contains("hi world"));
@@ -132,6 +135,7 @@ fn sh_quote_filter_escapes_arg() {
         parameters: json!({}),
         command: "echo {{ msg | sh_quote }}".into(),
         expose_credentials: false,
+        offline: false,
     };
     // Shell-injection payload: WITHOUT sh_quote, `; touch pwned` would run as a
     // second command and create the file. WITH it, the whole string is one quoted

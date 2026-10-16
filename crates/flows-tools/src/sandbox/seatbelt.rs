@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use super::Sandbox;
+use super::{Confinement, Sandbox};
 
 pub struct SeatbeltSandbox;
 
@@ -26,13 +26,19 @@ impl Sandbox for SeatbeltSandbox {
         *PROBE.get_or_init(probe)
     }
 
-    fn wrap(&self, repo_root: &Path, command: &str, hidden: &[PathBuf]) -> Vec<String> {
+    fn wrap(
+        &self,
+        repo_root: &Path,
+        command: &str,
+        c: &Confinement,
+        hidden: &[PathBuf],
+    ) -> Vec<String> {
         let root = repo_root
             .canonicalize()
             .unwrap_or_else(|_| repo_root.to_path_buf())
             .to_string_lossy()
             .into_owned();
-        let profile = profile_for(&root, hidden);
+        let profile = profile_for(&root, c.offline, hidden);
         vec![
             "sandbox-exec".into(),
             "-p".into(),
@@ -57,8 +63,16 @@ fn sbpl_escape(s: &str) -> String {
 /// Build the SBPL profile confining writes to `root` (+ temp) while allowing
 /// reads and network, minus reads of `hidden`. Later SBPL rules take precedence,
 /// so the denies follow the broad `(allow file-read*)`.
-fn profile_for(root: &str, hidden: &[PathBuf]) -> String {
+/// `offline` replaces the open network rule with loopback-only rules.
+fn profile_for(root: &str, offline: bool, hidden: &[PathBuf]) -> String {
     let esc = sbpl_escape(root);
+    let network = if offline {
+        "(allow network-outbound (remote ip \"localhost:*\"))\n\
+         (allow network-inbound (local ip \"localhost:*\"))\n\
+         (allow network-bind (local ip \"localhost:*\"))"
+    } else {
+        "(allow network*)"
+    };
     let mut denies = String::new();
     for p in hidden {
         let kind = if p.is_dir() { "subpath" } else { "literal" };
@@ -76,7 +90,7 @@ fn profile_for(root: &str, hidden: &[PathBuf]) -> String {
 (allow sysctl-read)
 (allow mach-lookup)
 (allow ipc-posix-shm)
-(allow network*)
+{network}
 (allow file-read*)
 (allow file-write*
   (subpath "{esc}")
@@ -115,11 +129,10 @@ fn probe() -> bool {
 #[cfg(test)]
 mod tests {
     use super::profile_for;
-    use std::path::PathBuf;
 
     #[test]
     fn profile_confines_writes_to_root_and_tmp() {
-        let p = profile_for("/Users/me/proj", &[]);
+        let p = profile_for("/Users/me/proj", false, &[]);
         assert!(p.contains("(deny default)"));
         assert!(p.contains("(allow file-read*)"));
         assert!(p.contains("(subpath \"/Users/me/proj\")"));
@@ -130,8 +143,15 @@ mod tests {
     }
 
     #[test]
+    fn offline_profile_is_loopback_only() {
+        let p = profile_for("/Users/me/proj", true, &[]);
+        assert!(!p.contains("(allow network*)"));
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
+    }
+
+    #[test]
     fn profile_escapes_quotes_in_path() {
-        let p = profile_for("/tmp/we\"ird", &[]);
+        let p = profile_for("/tmp/we\"ird", false, &[]);
         assert!(p.contains("we\\\"ird"));
     }
 
@@ -142,7 +162,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let file = d.path().join(".netrc");
         std::fs::write(&file, "x").unwrap();
-        let p = profile_for("/Users/me/proj", &[dir.clone(), file.clone()]);
+        let p = profile_for("/Users/me/proj", false, &[dir.clone(), file.clone()]);
         let allow = p.find("(allow file-read*)").unwrap();
         let deny_dir = p
             .find(&format!(

@@ -512,3 +512,16 @@ fn parse_phase_when() {
         .when
         .is_none());
 }
+
+#[test]
+fn parse_phase_bash_offline_and_expose() {
+    let p = parse_phase_yaml(
+        "name: build\ntools:\n  bash:\n    allowed: [\"make*\"]\n    offline: true\n    expose_credentials: true\n",
+    )
+    .unwrap();
+    let bash = p.tools.bash.unwrap();
+    assert!(bash.offline && bash.expose_credentials);
+    let p = parse_phase_yaml("name: b\ntools:\n  bash:\n    allowed: []\n").unwrap();
+    let bash = p.tools.bash.unwrap();
+    assert!(!bash.offline && !bash.expose_credentials);
+}

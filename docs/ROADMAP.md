@@ -33,6 +33,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 
 - Conditional phases: `when:` run-if expressions over prior artifacts; skipped phases are recorded, shown as `⊘`, and count as done for DAG dependents.
 - `web_search` backends `brave` (Brave Search API) and `serper` (Google via Serper), keyed by config or `BRAVE_API_KEY` / `SERPER_API_KEY`.
+- `tools.bash.offline: true` runs a phase's shell commands without network (loopback only).
 - Sandbox hides credential stores under `~` (ssh, gpg, cloud CLIs, forge tokens, registry creds, browsers, flows' own API-key config); `tools.bash.expose_credentials` opts out per phase.
 
 ## Next
@@ -46,7 +47,6 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 ### Sandbox & tools
 
 - **macOS sandbox IPC parity** — the Seatbelt profile allows `network*` (including unix sockets) and all `mach-lookup`, so a sandboxed command may reach launchd/host services. Linux denies unix sockets via seccomp; macOS needs `(allow network* (remote ip))`-style rules and a mach-lookup allowlist, verified on a Mac.
-- **Optional network isolation** for shell commands (opt-in `--unshare-net`).
 
 ### Pipelines
 

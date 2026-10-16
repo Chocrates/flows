@@ -337,6 +337,60 @@ fn real_sandbox_normal_command_unaffected_by_limits() {
     assert_eq!(out.trim(), "ok");
 }
 
+// -- offline (no network) ---------------------------------------------------
+
+#[test]
+#[cfg(target_os = "linux")]
+fn wrap_unshares_net_only_when_offline() {
+    let d = tempdir().unwrap();
+    let on = flows_tools::sandbox::wrap_command_with(d.path(), "true", &Confinement::default());
+    assert!(!on.iter().any(|a| a == "--unshare-net"));
+    let off = flows_tools::sandbox::wrap_command_with(
+        d.path(),
+        "true",
+        &Confinement {
+            offline: true,
+            ..Confinement::default()
+        },
+    );
+    assert!(off.iter().any(|a| a == "--unshare-net"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn real_sandbox_offline_cuts_host_network_keeps_loopback() {
+    if !sandbox_available() || !python3_available() {
+        eprintln!(
+            "SKIP real_sandbox_offline_cuts_host_network_keeps_loopback: needs bwrap + python3"
+        );
+        return;
+    }
+    // A host listener on 127.0.0.1 is reachable through the shared network
+    // namespace by default, and not from an offline sandbox (its own loopback).
+    let host = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = host.local_addr().unwrap().port();
+    let probe = format!(
+        "python3 -c \"import socket\ntry:\n  socket.create_connection(('127.0.0.1', {port}), 2); print('HOST-REACHED')\nexcept OSError as e: print('BLOCKED', e)\ns=socket.socket(); s.bind(('127.0.0.1', 0)); s.listen(1)\nc=socket.create_connection(s.getsockname(), 2); print('LOOPBACK-OK')\""
+    );
+    let d = tempdir().unwrap();
+    let online = run_confined(&probe, d.path(), 30, 10_000, &Confinement::default()).unwrap();
+    assert!(online.contains("HOST-REACHED"), "{online}");
+    let offline = run_confined(
+        &probe,
+        d.path(),
+        30,
+        10_000,
+        &Confinement {
+            offline: true,
+            ..Confinement::default()
+        },
+    )
+    .unwrap();
+    assert!(!offline.contains("HOST-REACHED"), "{offline}");
+    assert!(offline.contains("BLOCKED"), "{offline}");
+    assert!(offline.contains("LOOPBACK-OK"), "{offline}");
+}
+
 // -- credential masking ------------------------------------------------------
 
 #[test]
@@ -349,7 +403,8 @@ fn wrap_masks_before_repo_bind() {
     let repo = home.join("repo");
     std::fs::create_dir(&repo).unwrap();
     let hidden = flows_tools::sandbox::hidden_paths_in(&home, false);
-    let argv = flows_tools::sandbox::backend().wrap(&repo, "true", &hidden);
+    let argv =
+        flows_tools::sandbox::backend().wrap(&repo, "true", &Confinement::default(), &hidden);
     let ssh = home.join(".ssh").display().to_string();
     let netrc = home.join(".netrc").display().to_string();
     let tmpfs = argv.windows(2).position(|w| w == ["--tmpfs", ssh.as_str()]);

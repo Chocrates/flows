@@ -39,6 +39,8 @@ pub struct Confinement {
     pub limits: Limits,
     /// Re-expose [`CREDENTIAL_PATHS`] (flows' own secrets stay hidden).
     pub expose_credentials: bool,
+    /// No network: loopback only (and no DNS).
+    pub offline: bool,
 }
 
 impl Confinement {
@@ -47,6 +49,7 @@ impl Confinement {
         Confinement {
             limits: Limits::from_bash(cfg),
             expose_credentials: cfg.expose_credentials,
+            offline: cfg.offline,
         }
     }
 }
@@ -151,9 +154,15 @@ pub trait Sandbox: Send + Sync {
     fn name(&self) -> &'static str;
     /// True if this backend can set up a working sandbox on this host.
     fn available(&self) -> bool;
-    /// The argv that runs `command` confined to `repo_root`, with each of
-    /// `hidden` (existing, canonical paths) unreadable.
-    fn wrap(&self, repo_root: &Path, command: &str, hidden: &[PathBuf]) -> Vec<String>;
+    /// The argv that runs `command` confined to `repo_root` under `c`, with
+    /// each of `hidden` (existing, canonical paths) unreadable.
+    fn wrap(
+        &self,
+        repo_root: &Path,
+        command: &str,
+        c: &Confinement,
+        hidden: &[PathBuf],
+    ) -> Vec<String>;
     /// Message shown when [`available`](Self::available) is false.
     fn unavailable_reason(&self) -> &'static str;
     /// Last-moment setup on the spawn (e.g. handing the child a seccomp program
@@ -286,7 +295,7 @@ pub fn wrap_command(repo_root: &Path, command: &str) -> Vec<String> {
 
 /// The confined argv for `command` under `repo_root` (delegates to the backend).
 pub fn wrap_command_with(repo_root: &Path, command: &str, c: &Confinement) -> Vec<String> {
-    backend().wrap(repo_root, command, &hidden_paths(c))
+    backend().wrap(repo_root, command, c, &hidden_paths(c))
 }
 
 /// Name of the active backend (`bwrap`, `seatbelt`, or `none`).
@@ -457,7 +466,13 @@ impl Sandbox for NoSandbox {
     fn available(&self) -> bool {
         false
     }
-    fn wrap(&self, _repo_root: &Path, command: &str, _hidden: &[PathBuf]) -> Vec<String> {
+    fn wrap(
+        &self,
+        _repo_root: &Path,
+        command: &str,
+        _c: &Confinement,
+        _hidden: &[PathBuf],
+    ) -> Vec<String> {
         vec!["/bin/sh".into(), "-c".into(), command.into()]
     }
     fn unavailable_reason(&self) -> &'static str {
@@ -485,7 +500,11 @@ pub mod testing {
             return Err(ToolError::new(backend().unavailable_reason()));
         }
         let hidden = hidden_paths_in(home, expose_credentials);
-        let argv = backend().wrap(repo_root, command, &hidden);
+        let c = Confinement {
+            expose_credentials,
+            ..Confinement::default()
+        };
+        let argv = backend().wrap(repo_root, command, &c, &hidden);
         let limits = Limits::default();
         let out = spawn_with_timeout(&argv, repo_root, 30, &limits)
             .map_err(|e| ToolError::new(format!("sandbox exec failed: {e}")))?;

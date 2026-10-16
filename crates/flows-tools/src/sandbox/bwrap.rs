@@ -6,7 +6,8 @@
 //! directory, `/dev/null` over a file), and a seccomp filter (see `seccomp`) denies unix
 //! sockets so the command can't reach host services (session bus, container
 //! engines, display server) that would run code outside the sandbox. Network is
-//! left shared so package/build commands can fetch dependencies. Requires
+//! left shared so package/build commands can fetch dependencies, unless the
+//! phase is `offline` (`--unshare-net`: loopback only). Requires
 //! unprivileged user namespaces.
 
 use std::os::unix::process::CommandExt;
@@ -14,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use super::{minimal_env, seccomp, tool_cache_dir, which, Sandbox};
+use super::{minimal_env, seccomp, tool_cache_dir, which, Confinement, Sandbox};
 
 pub struct BwrapSandbox;
 
@@ -36,7 +37,13 @@ impl Sandbox for BwrapSandbox {
         *PROBE.get_or_init(probe)
     }
 
-    fn wrap(&self, repo_root: &Path, command: &str, hidden: &[PathBuf]) -> Vec<String> {
+    fn wrap(
+        &self,
+        repo_root: &Path,
+        command: &str,
+        c: &Confinement,
+        hidden: &[PathBuf],
+    ) -> Vec<String> {
         let root = repo_root
             .canonicalize()
             .unwrap_or_else(|_| repo_root.to_path_buf())
@@ -65,6 +72,10 @@ impl Sandbox for BwrapSandbox {
         .iter()
         .map(|s| s.to_string())
         .collect();
+
+        if c.offline {
+            argv.push("--unshare-net".into());
+        }
 
         // Credential masks go before the repo/cache binds: later mounts win, and
         // bwrap creates their mount points inside a mask's tmpfs, so a repo that
