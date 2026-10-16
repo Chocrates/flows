@@ -9,7 +9,7 @@ use minijinja::{Environment, Value as JinjaValue};
 use serde_json::Value;
 
 use crate::error::{ToolError, ToolResult};
-use crate::sandbox::{run_confined, DEFAULT_MAX_OUTPUT, DEFAULT_TIMEOUT_SECS};
+use crate::sandbox::{run_confined, Limits, DEFAULT_MAX_OUTPUT, DEFAULT_TIMEOUT_SECS};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginToolDef {
@@ -102,5 +102,6 @@ pub fn run_plugin_tool(defn: &PluginToolDef, args: &Value, repo_root: &Path) -> 
         repo_root,
         DEFAULT_TIMEOUT_SECS,
         DEFAULT_MAX_OUTPUT,
+        &Limits::default(),
     )
 }

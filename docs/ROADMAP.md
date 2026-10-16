@@ -25,6 +25,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Push context for models without tool calling.
 - `flows eval`: fixture × model × context-config matrix, results store, report, deterministic retrieval recall/MRR (`eval-harness`, `context-eval`).
 - Agent stall guards: no-op write streaks, empty-response nudges (fail after 3), max-round limit.
+- Sandbox hardening: unix sockets denied via seccomp (closes a session-bus escape); per-command memory/process caps via systemd scopes.
 - Symbol-aware retrieval chunks and window-scaled injection (rag MRR 0.34 → 1.00 on the fixture corpus).
 - `flows run --context map+rag` per-run override; global and project `context:` blocks merge key-by-key.
 
@@ -40,7 +41,6 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 
 - **macOS sandbox IPC parity** — the Seatbelt profile allows `network*` (including unix sockets) and all `mach-lookup`, so a sandboxed command may reach launchd/host services. Linux denies unix sockets via seccomp; macOS needs `(allow network* (remote ip))`-style rules and a mach-lookup allowlist, verified on a Mac.
 - **Home-directory secrets are readable** — the sandbox binds `/` read-only, so `~/.ssh`, `~/.aws`, `~/.config/gh`, etc. can be read (and with shared network, exfiltrated). Consider masking known credential dirs with tmpfs.
-- **Resource limits** in the sandbox (memory / pids / CPU via rlimits or cgroups).
 - **Optional network isolation** for shell commands (opt-in `--unshare-net`).
 - **Brave / Serper** keyed web-search backends.
 

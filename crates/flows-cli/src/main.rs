@@ -450,6 +450,14 @@ fn check_sandbox() {
     let name = flows_tools::sandbox::backend_name();
     if flows_tools::sandbox::sandbox_available() {
         println!("  sandbox:   OK ({name})");
+        let mode = flows_tools::sandbox::limits_mode();
+        let defaults = flows_tools::sandbox::Limits::default();
+        println!(
+            "  limits:    {} (defaults {} MB / {} procs; override with tools.bash.memory_mb / max_procs)",
+            mode.describe(),
+            defaults.memory_mb,
+            defaults.max_procs
+        );
         return;
     }
     println!("  sandbox:   {name} NOT usable — shell commands (bash/plugin) fail closed.");

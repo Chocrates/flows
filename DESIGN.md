@@ -322,6 +322,7 @@ Every tool that runs a shell command — the `bash` tool and plugin tools — ex
 This is the *actual* containment boundary. An allowlist alone cannot confine a shell command: once an interpreter (`python`, `make`, `npm`, …) is permitted it can touch anything the process can reach, and `cwd=repo_root` does nothing against an absolute path or a `..`. (Demonstrated: with only `python*` allowed, `python3 -c "open('/tmp/pwn','w')…"` wrote outside the repo.) The allowlist restricts *which* programs may run; the sandbox restricts *where* they may act — both are needed.
 
 - **No host IPC:** a read-only bind doesn't stop `connect()` on unix sockets, and the user's session bus alone is a full escape (`systemd-run --user` runs commands outside the sandbox). bwrap therefore gets a seccomp filter (`sandbox/seccomp.rs`, hand-assembled BPF handed over via `--seccomp FD`) that denies `socket(AF_UNIX)`, `io_uring_setup`, and foreign-ABI syscalls. `socketpair()` and inet sockets stay allowed, so builds, dependency fetches, and in-process IPC work. macOS doesn't have this yet (see ROADMAP).
+- **Resource limits:** each command tree runs in a transient `systemd-run --user --scope` with `MemoryMax` (default 8 GB, no swap) and `TasksMax` (1024), overridable per phase (`tools.bash.memory_mb` / `max_procs`). A probe reads the limits back from the scope's cgroup, so hosts that don't delegate the memory/pids controllers aren't mistaken for limited. Without a scope: per-process `RLIMIT_DATA` (Linux) or nothing (macOS). Limits never block a command; a phase note and `flows doctor` report the weaker mode. `systemd-run` runs *outside* bwrap with only the bus env it needs; bwrap clears it and seccomp blocks the bus for the command.
 - **Fails closed:** if `bwrap` (with unprivileged user namespaces) isn't available, shell commands refuse to run rather than run unconfined. Probe result is cached (`sandbox_available`).
 - **Network** is left shared so package/build commands can fetch dependencies; only filesystem writes are confined.
 - Real end-to-end containment is verified by `test_sandbox_confines_writes_to_repo`, which is `skipif`-gated on a functional `bwrap` (nested sandboxes that block user namespaces skip it; a normal Linux host runs it). Unit tests cover the argv, the availability probe, fail-closed behaviour, and output handling by mocking the sandbox seam.
@@ -626,7 +627,6 @@ Cross-cutting: background worker + signal files (answer/advance/cancel), desktop
 
 ## What's next
 
-- **Resource limits** on the sandbox (memory/pids/CPU via rlimits or cgroups).
 - **Optional network isolation** for the shell sandbox (`--unshare-net`, opt-in for dep fetching).
 - **Pipeline composition**: `include` another pipeline as a phase.
 - **Conditional phases**: skip based on prior artifact content.

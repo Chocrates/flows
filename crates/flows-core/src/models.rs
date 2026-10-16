@@ -31,6 +31,14 @@ pub struct BashConfig {
     /// overridable per phase/template via `tools.bash.timeout_secs`.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Memory cap (MB) for each command's whole process tree. `None` → the
+    /// sandbox default (8192); `Some(0)` → unlimited.
+    #[serde(default)]
+    pub memory_mb: Option<u64>,
+    /// Process/thread cap for each command. `None` → the sandbox default (1024);
+    /// `Some(0)` → unlimited.
+    #[serde(default)]
+    pub max_procs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,6 +93,7 @@ fn bash_allow(patterns: &[&str]) -> Option<BashConfig> {
         allowed: patterns.iter().map(|s| s.to_string()).collect(),
         unrestricted: false,
         timeout_secs: None,
+        ..BashConfig::default()
     })
 }
 
@@ -227,6 +236,7 @@ pub fn resolve_preset(name: &str) -> Option<ToolsConfig> {
                 allowed: Vec::new(),
                 unrestricted: true,
                 timeout_secs: None,
+                ..BashConfig::default()
             }),
             ..ToolsConfig::default()
         },
@@ -262,11 +272,14 @@ pub fn resolve_tools(raw: Option<&Value>) -> Result<ToolsConfig, ModelError> {
                     allowed: Vec::new(),
                     unrestricted: true,
                     timeout_secs: None,
+                    ..BashConfig::default()
                 }),
                 Some(bm @ Value::Mapping(_)) => Some(BashConfig {
                     allowed: as_str_list(bm.get("allowed")),
                     unrestricted: as_bool(bm.get("unrestricted")).unwrap_or(false),
                     timeout_secs: bm.get("timeout_secs").and_then(Value::as_u64),
+                    memory_mb: bm.get("memory_mb").and_then(Value::as_u64),
+                    max_procs: bm.get("max_procs").and_then(Value::as_u64),
                 }),
                 _ => None,
             };

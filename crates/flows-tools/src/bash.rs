@@ -12,7 +12,7 @@ use regex::Regex;
 use flows_core::models::BashConfig;
 
 use crate::error::{ToolError, ToolResult};
-use crate::sandbox::{run_confined, DEFAULT_MAX_OUTPUT, DEFAULT_TIMEOUT_SECS};
+use crate::sandbox::{run_confined, Limits, DEFAULT_MAX_OUTPUT, DEFAULT_TIMEOUT_SECS};
 
 /// Compile a static pattern table once. The patterns are compile-time constants,
 /// so an invalid one is a programmer bug (panics, never reached at runtime).
@@ -228,5 +228,11 @@ pub fn run_bash_with(
     check_blocked(command)?;
     check_network(command)?;
     check_allowlist(command, config)?;
-    run_confined(command, repo_root, timeout_secs, max_output)
+    run_confined(
+        command,
+        repo_root,
+        timeout_secs,
+        max_output,
+        &Limits::from_bash(config),
+    )
 }

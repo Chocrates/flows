@@ -183,6 +183,19 @@ fn resolve_tools_inline_mapping_with_bash_allowlist() {
 }
 
 #[test]
+fn resolve_tools_bash_resource_limits() {
+    let yaml = "bash:\n  allowed: [\"cargo*\"]\n  memory_mb: 16384\n  max_procs: 0\n";
+    let v = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(yaml).unwrap();
+    let bash = resolve_tools(Some(&v)).unwrap().bash.unwrap();
+    assert_eq!(bash.memory_mb, Some(16384));
+    assert_eq!(bash.max_procs, Some(0));
+    // Unset → None (sandbox defaults apply).
+    let v = serde_yaml_ng::from_str::<serde_yaml_ng::Value>("bash:\n  allowed: []\n").unwrap();
+    let bash = resolve_tools(Some(&v)).unwrap().bash.unwrap();
+    assert_eq!((bash.memory_mb, bash.max_procs), (None, None));
+}
+
+#[test]
 fn resolve_tools_bash_true_is_unrestricted() {
     let v = serde_yaml_ng::from_str::<serde_yaml_ng::Value>("bash: true\n").unwrap();
     let t = resolve_tools(Some(&v)).unwrap();

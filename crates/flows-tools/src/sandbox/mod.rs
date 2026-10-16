@@ -22,10 +22,13 @@ use crate::error::{ToolError, ToolResult};
 
 #[cfg(target_os = "linux")]
 mod bwrap;
+pub mod limits;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 #[cfg(target_os = "linux")]
 pub mod seccomp;
+
+pub use limits::{limits_mode, LimitMode, Limits};
 
 // Cold compiles are the long pole: a first Bevy build pulls a large dependency
 // tree and can run well past 120s. Default generously (15 min) so builds don't
@@ -190,7 +193,13 @@ pub fn format_output(output: &Output, max_output: usize) -> String {
     match output.status.code() {
         Some(0) => {}
         Some(code) => combined.push_str(&format!("\n[exit code: {code}]")),
-        None => combined.push_str("\n[exit code: killed by signal]"),
+        None => {
+            use std::os::unix::process::ExitStatusExt;
+            match output.status.signal() {
+                Some(sig) => combined.push_str(&format!("\n[exit code: killed by signal {sig}]")),
+                None => combined.push_str("\n[exit code: killed by signal]"),
+            }
+        }
     }
     if combined.is_empty() {
         "(no output)".to_string()
@@ -205,6 +214,7 @@ fn run_confined_inner<F>(
     command: &str,
     repo_root: &Path,
     max_output: usize,
+    limits: &Limits,
     available: bool,
     exec: F,
 ) -> ToolResult<String>
@@ -216,36 +226,74 @@ where
     }
     let argv = wrap_command(repo_root, command);
     let output = exec(&argv).map_err(|e| ToolError::new(format!("sandbox exec failed: {e}")))?;
-    Ok(format_output(&output, max_output))
+    let mut text = format_output(&output, max_output);
+    if was_sigkilled(&output) {
+        if let Some(hint) = limits::kill_hint(limits) {
+            text.push('\n');
+            text.push_str(&hint);
+        }
+    }
+    Ok(text)
 }
 
-/// Run `command` in the platform sandbox. Fails closed if unavailable.
+/// Killed the way the memory cap kills: SIGKILL from the OOM killer, or SIGTERM
+/// when systemd then stops the scope — directly, or as reported by `sh`
+/// (exit 128 + signal). Our own timeout is reported separately, as an error.
+fn was_sigkilled(output: &Output) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    matches!(output.status.signal(), Some(9 | 15))
+        || matches!(output.status.code(), Some(137 | 143))
+}
+
+/// Run `command` in the platform sandbox under `limits`. Fails closed if the
+/// sandbox is unavailable; resource limits degrade (see [`limits`]).
 pub fn run_confined(
     command: &str,
     repo_root: &Path,
     timeout_secs: u64,
     max_output: usize,
+    limits: &Limits,
 ) -> ToolResult<String> {
     run_confined_inner(
         command,
         repo_root,
         max_output,
+        limits,
         sandbox_available(),
-        |argv| spawn_with_timeout(argv, repo_root, timeout_secs),
+        |argv| spawn_with_timeout(argv, repo_root, timeout_secs, limits),
     )
 }
 
-fn spawn_with_timeout(argv: &[String], cwd: &Path, timeout_secs: u64) -> std::io::Result<Output> {
+fn spawn_with_timeout(
+    argv: &[String],
+    cwd: &Path,
+    timeout_secs: u64,
+    limits: &Limits,
+) -> std::io::Result<Output> {
+    let use_cgroup = !limits.is_unlimited() && limits_mode() == LimitMode::Cgroup;
+    let argv: Vec<String> = if use_cgroup {
+        limits::cgroup_prefix(limits)
+            .into_iter()
+            .chain(argv.iter().cloned())
+            .collect()
+    } else {
+        argv.to_vec()
+    };
     let mut cmd = Command::new(&argv[0]);
     backend().prepare(&mut cmd);
+    // Clear the host env and inject only the minimal set. On Linux bwrap also
+    // --clearenv's (defense in depth); on macOS this is the sole env control,
+    // since Seatbelt profiles don't scrub the environment.
+    cmd.env_clear().envs(minimal_env());
+    if use_cgroup {
+        // For the outer systemd-run only; bwrap clears it before the command.
+        cmd.envs(limits::bus_env());
+    } else if limits_mode() == LimitMode::PerProcess {
+        limits::apply_rlimits(&mut cmd, limits);
+    }
     let mut child = cmd
         .args(&argv[1..])
         .current_dir(cwd)
-        // Clear the host env and inject only the minimal set. On Linux bwrap
-        // also --clearenv's (defense in depth); on macOS this is the sole env
-        // control, since Seatbelt profiles don't scrub the environment.
-        .env_clear()
-        .envs(minimal_env())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -323,6 +371,13 @@ pub mod testing {
     where
         F: FnOnce(&[String]) -> std::io::Result<Output>,
     {
-        super::run_confined_inner(command, repo_root, max_output, available, exec)
+        super::run_confined_inner(
+            command,
+            repo_root,
+            max_output,
+            &Limits::default(),
+            available,
+            exec,
+        )
     }
 }

@@ -83,11 +83,18 @@ tools:
     allowed: ["make*", "cargo*"]   # fnmatch allowlist
     # unrestricted: true            # allow any command (still sandboxed)
     # timeout_secs: 1800            # per-command timeout (default 900s; cold builds are slow)
+    # memory_mb: 16384              # memory cap per command tree (default 8192; 0 = none)
+    # max_procs: 2048               # process/thread cap per command (default 1024; 0 = none)
   http_get: true           # GET public URLs (SSRF-guarded)
   web_search: true         # DuckDuckGo or SearXNG (see configuration.md)
   lookup: true             # crates.io / docs.rs / stackexchange / wikipedia / github
   plugins: ["my_tool"]     # custom plugin tools from ~/.flows/plugins
 ```
+
+Resource limits use a per-command systemd user scope (cgroup) on Linux. Without
+one they fall back to a per-process memory rlimit, and on macOS they aren't
+enforced. Commands always still run; `flows doctor` shows which mode applies.
+A command killed by the memory cap says so in its output.
 
 ## `script` phase
 

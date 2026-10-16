@@ -815,6 +815,18 @@ fn append_transcript_round(
 ///
 /// Returns "" when neither is enabled/available. Retrieval failures degrade to an
 /// empty retrieval section (logged to stderr) rather than aborting the phase.
+/// One-line warning when this phase's shell commands run with weaker resource
+/// limits than configured (no per-command cgroup on this host). Commands still
+/// run — filesystem confinement is the hard boundary; limits degrade.
+fn limits_note(bash: Option<&flows_core::models::BashConfig>) -> Option<String> {
+    use flows_tools::sandbox::{limits_mode, LimitMode, Limits};
+    let limits = Limits::from_bash(bash?);
+    if limits.is_unlimited() || limits_mode() == LimitMode::Cgroup {
+        return None;
+    }
+    Some(format!("⚠ resource limits: {}", limits_mode().describe()))
+}
+
 /// Context window (tokens) assumed for `model`: the known window, else the
 /// configured `unknown_window_tokens`. Shared by loop budgeting and retrieval.
 fn window_tokens(model: &str, context: &ContextConfig) -> u64 {
@@ -1035,6 +1047,9 @@ your context small.",
     // No-progress guard (write-capable phases only): once the agent has written
     // code, count rounds with no successful `write_file`; abort if it thrashes.
     let can_write = phase.tools.files && !phase.tools.read_only;
+    if let Some(note) = limits_note(phase.tools.bash.as_ref()) {
+        callbacks.on_note(&note);
+    }
     let mut has_written = false;
     let mut rounds_without_write = 0u32;
     // Consecutive rounds whose only write was a no-op (unchanged bytes); drives the
@@ -1793,5 +1808,33 @@ mod retrieval_budget_tests {
             ..ContextConfig::default()
         };
         assert_eq!(retrieval_budget("my-local-model-xyz", &ctx), 4000);
+    }
+}
+
+#[cfg(test)]
+mod limits_note_tests {
+    use super::limits_note;
+    use flows_core::models::BashConfig;
+    use flows_tools::sandbox::{limits_mode, LimitMode};
+
+    #[test]
+    fn no_note_without_bash_or_when_unlimited() {
+        assert!(limits_note(None).is_none());
+        let unlimited = BashConfig {
+            memory_mb: Some(0),
+            max_procs: Some(0),
+            ..BashConfig::default()
+        };
+        assert!(limits_note(Some(&unlimited)).is_none());
+    }
+
+    #[test]
+    fn note_matches_host_mode() {
+        let note = limits_note(Some(&BashConfig::default()));
+        assert_eq!(
+            note.is_some(),
+            limits_mode() != LimitMode::Cgroup,
+            "{note:?}"
+        );
     }
 }

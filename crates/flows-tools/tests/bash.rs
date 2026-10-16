@@ -8,6 +8,7 @@ fn allowed(patterns: &[&str]) -> BashConfig {
         allowed: patterns.iter().map(|s| s.to_string()).collect(),
         unrestricted: false,
         timeout_secs: None,
+        ..BashConfig::default()
     }
 }
 
@@ -64,6 +65,7 @@ fn unrestricted_allows_anything() {
         allowed: vec![],
         unrestricted: true,
         timeout_secs: None,
+        ..BashConfig::default()
     };
     assert!(check_allowlist("rm -rf /tmp/x", &cfg).is_ok());
 }

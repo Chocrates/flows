@@ -5,7 +5,7 @@ use std::process::{ExitStatus, Output};
 
 use flows_tools::sandbox::{
     format_output, run_confined, sandbox_available, testing::run_confined_inner_for_test,
-    wrap_command,
+    wrap_command, Limits,
 };
 use tempfile::tempdir;
 
@@ -143,7 +143,14 @@ fn real_sandbox_confines_writes_to_repo() {
     let repo = d.path().join("repo");
     std::fs::create_dir(&repo).unwrap();
 
-    run_confined("echo hi > inside.txt", &repo, 30, 20_000).unwrap();
+    run_confined(
+        "echo hi > inside.txt",
+        &repo,
+        30,
+        20_000,
+        &Limits::default(),
+    )
+    .unwrap();
     assert_eq!(
         std::fs::read_to_string(repo.join("inside.txt"))
             .unwrap()
@@ -157,12 +164,19 @@ fn real_sandbox_confines_writes_to_repo() {
         &repo,
         30,
         20_000,
+        &Limits::default(),
     );
     assert!(!outside.exists(), "write outside repo should be blocked");
 
     let victim = d.path().join("victim.txt");
     std::fs::write(&victim, "keep").unwrap();
-    let _ = run_confined(&format!("rm -f {}", victim.display()), &repo, 30, 20_000);
+    let _ = run_confined(
+        &format!("rm -f {}", victim.display()),
+        &repo,
+        30,
+        20_000,
+        &Limits::default(),
+    );
     assert!(victim.exists(), "delete outside repo should be blocked");
 }
 
@@ -203,6 +217,7 @@ fn real_sandbox_blocks_unix_socket_connect() {
         d.path(),
         30,
         10_000,
+        &Limits::default(),
     )
     .unwrap();
     assert!(!out.contains("CONNECTED"), "unix socket reachable: {out}");
@@ -222,10 +237,90 @@ fn real_sandbox_keeps_socketpair_and_inet() {
         d.path(),
         30,
         10_000,
+        &Limits::default(),
     )
     .unwrap();
     assert!(
         out.contains("ok") && out.contains("INET"),
         "unexpected: {out}"
     );
+}
+
+// -- resource limits ---------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+fn cgroup_limits() -> bool {
+    sandbox_available()
+        && flows_tools::sandbox::limits_mode() == flows_tools::sandbox::LimitMode::Cgroup
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn real_sandbox_memory_cap_kills_hog() {
+    if !cgroup_limits() || !python3_available() {
+        eprintln!(
+            "SKIP real_sandbox_memory_cap_kills_hog: needs bwrap + systemd user scope + python3"
+        );
+        return;
+    }
+    let d = tempdir().unwrap();
+    let limits = Limits {
+        memory_mb: 64,
+        max_procs: 0,
+    };
+    let out = run_confined(
+        "python3 -c \"b = bytearray(512 * 1024 * 1024); print('ALLOCATED')\"",
+        d.path(),
+        60,
+        10_000,
+        &limits,
+    )
+    .unwrap();
+    assert!(!out.contains("ALLOCATED"), "hog survived: {out}");
+    assert!(out.contains("tools.bash.memory_mb"), "missing hint: {out}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn real_sandbox_task_cap_contains_fork_bomb() {
+    if !cgroup_limits() || !python3_available() {
+        eprintln!("SKIP real_sandbox_task_cap_contains_fork_bomb: needs bwrap + systemd user scope + python3");
+        return;
+    }
+    let d = tempdir().unwrap();
+    let limits = Limits {
+        memory_mb: 0,
+        max_procs: 20,
+    };
+    // Try to start 100 sleepers; the cap stops it well short (spawns fail with
+    // EAGAIN, which `sh` treats as fatal, hence python).
+    let out = run_confined(
+        "python3 -c \"import subprocess as s\nn=0\nfor _ in range(100):\n  try: s.Popen(['sleep','5']); n+=1\n  except OSError: pass\nprint('running=%d' % n)\"",
+        d.path(),
+        60,
+        10_000,
+        &limits,
+    )
+    .unwrap();
+    let running: usize = out
+        .lines()
+        .find_map(|l| l.strip_prefix("running="))
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or_else(|| panic!("unexpected: {out}"));
+    assert!(
+        running <= 20,
+        "task cap not enforced ({running} procs): {out}"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn real_sandbox_normal_command_unaffected_by_limits() {
+    if !sandbox_available() {
+        eprintln!("SKIP real_sandbox_normal_command_unaffected_by_limits: needs bwrap");
+        return;
+    }
+    let d = tempdir().unwrap();
+    let out = run_confined("echo ok", d.path(), 30, 1_000, &Limits::default()).unwrap();
+    assert_eq!(out.trim(), "ok");
 }
