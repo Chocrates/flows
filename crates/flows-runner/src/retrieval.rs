@@ -1,5 +1,6 @@
-//! Semantic retrieval (Tier 3): embed the repo's source in line-window chunks and
-//! the phase idea, then inject the top-k most similar chunks into the prompt. This
+//! Semantic retrieval (Tier 3): embed the repo's source in symbol-aware chunks
+//! (see `chunker`) and the phase idea, then inject the most similar chunks that fit
+//! the phase's token budget into the prompt. This
 //! is a **push** path — the model receives relevant code up front, so it works for
 //! models that cannot call tools (many reasoning models).
 //!
@@ -14,8 +15,8 @@
 //! `retrieval_reindex_threshold` — then it is rebuilt in full (D11). Only the
 //! per-idea query vector is embedded on each retrieve call.
 //!
-//! Follow-ups: tree-sitter symbol chunking (currently line windows); a
-//! content-addressed vector cache to avoid re-embedding on branch switches.
+//! Follow-up: a content-addressed vector cache to avoid re-embedding on branch
+//! switches.
 
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use ignore::WalkBuilder;
@@ -27,7 +28,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::repo_context::DENY;
 
 /// Bump when chunk boundaries change (invalidates every persisted index).
-const CHUNKER_VERSION: u32 = 1;
+const CHUNKER_VERSION: u32 = 2;
 
 /// Process-wide cache of loaded embedders, keyed by model name. Loading an ONNX
 /// model is expensive (and downloads on first use), so we keep one per model for
@@ -74,12 +75,20 @@ const SOURCE_EXTS: &[&str] = &[
     "php", "swift", "kt", "scala", "sh", "toml", "yaml", "yml", "md", "sql",
 ];
 
-/// Lines per chunk (~50 lines ≈ a few hundred tokens — a reasonable retrieval
-/// granularity without symbol-aware splitting).
-const CHUNK_LINES: usize = 50;
-/// Hard cap on chunks embedded per run, so a huge repo can't explode the number
-/// of embedding inputs. Chunks past this are dropped (retrieval stays best-effort).
-const MAX_CHUNKS_EMBEDDED: usize = 600;
+/// Hard cap on chunks embedded per index build, so a huge repo can't explode the
+/// number of embedding inputs. Code is indexed before docs/config, so the cap
+/// drops the least useful files first; dropped files are reported as a warning.
+const MAX_CHUNKS_EMBEDDED: usize = 1500;
+
+/// Docs/config extensions: indexed only after all code, so they are the first to
+/// go when a repo exceeds [`MAX_CHUNKS_EMBEDDED`].
+const DOC_EXTS: &[&str] = &["md", "toml", "yaml", "yml", "sql"];
+
+fn is_doc(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| DOC_EXTS.contains(&e))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chunk {
@@ -87,6 +96,20 @@ pub struct Chunk {
     pub start_line: usize,
     pub end_line: usize,
     pub text: String,
+    /// Enclosing context (e.g. `impl Foo for Bar {`) for a piece of a larger
+    /// definition. Embedded, not injected.
+    pub header: Option<String>,
+}
+
+impl Chunk {
+    /// What gets embedded: the path (so path words match the idea, as they do for
+    /// the repo map), any enclosing header, then the source.
+    fn embed_text(&self) -> String {
+        match &self.header {
+            Some(h) => format!("{}\n{h}\n{}", self.path, self.text),
+            None => format!("{}\n{}", self.path, self.text),
+        }
+    }
 }
 
 /// Source files under `repo_root` worth indexing: `.gitignore`- and deny-list-
@@ -137,35 +160,45 @@ fn source_file_hashes(repo_root: &Path) -> BTreeMap<String, String> {
     map
 }
 
-/// Split every source file into line-window chunks. Capped at
+/// Split every source file into symbol-aware chunks (see `chunker`). Capped at
 /// [`MAX_CHUNKS_EMBEDDED`].
 pub fn chunk_repo(repo_root: &Path) -> Vec<Chunk> {
+    chunk_repo_capped(repo_root, MAX_CHUNKS_EMBEDDED).0
+}
+
+/// Chunk code files first, then docs/config, stopping at `cap` chunks. Returns
+/// the chunks and the repo-relative paths of files left (wholly or partly)
+/// unindexed.
+fn chunk_repo_capped(repo_root: &Path, cap: usize) -> (Vec<Chunk>, Vec<String>) {
+    let mut files = source_files(repo_root);
+    files.sort_by_key(|(_, abs)| is_doc(abs)); // stable: code first, path order kept
     let mut chunks = Vec::new();
-    for (rel_str, abs) in source_files(repo_root) {
-        if chunks.len() >= MAX_CHUNKS_EMBEDDED {
-            break;
+    let mut dropped = Vec::new();
+    for (rel_str, abs) in files {
+        if chunks.len() >= cap {
+            dropped.push(rel_str);
+            continue;
         }
         let Ok(text) = std::fs::read_to_string(&abs) else {
             continue; // skip unreadable / non-utf8
         };
         let lines: Vec<&str> = text.lines().collect();
-        for (i, window) in lines.chunks(CHUNK_LINES).enumerate() {
-            if window.iter().all(|l| l.trim().is_empty()) {
-                continue; // skip blank windows
-            }
-            let start = i * CHUNK_LINES + 1;
-            chunks.push(Chunk {
-                path: rel_str.clone(),
-                start_line: start,
-                end_line: start + window.len() - 1,
-                text: window.join("\n"),
-            });
-            if chunks.len() >= MAX_CHUNKS_EMBEDDED {
+        let ext = abs.extension().and_then(|e| e.to_str());
+        for piece in crate::chunker::chunk_source(ext, &text) {
+            if chunks.len() >= cap {
+                dropped.push(rel_str.clone());
                 break;
             }
+            chunks.push(Chunk {
+                path: rel_str.clone(),
+                start_line: piece.start + 1,
+                end_line: piece.end + 1,
+                text: lines[piece.start..=piece.end].join("\n"),
+                header: piece.header,
+            });
         }
     }
-    chunks
+    (chunks, dropped)
 }
 
 /// Cosine similarity. Returns 0 for a zero-length or mismatched vector.
@@ -199,17 +232,42 @@ pub fn rank_top_k(query: &[f32], chunk_embs: &[Vec<f32>], k: usize) -> Vec<usize
     scored.into_iter().take(k).map(|(i, _)| i).collect()
 }
 
+/// One chunk as injected: a `### path:start-end` header plus a fenced block.
+fn format_chunk(c: &Chunk) -> String {
+    format!(
+        "### {}:{}-{}\n```\n{}\n```\n\n",
+        c.path, c.start_line, c.end_line, c.text
+    )
+}
+
 /// Format selected chunks as a labeled, injectable block.
 fn format_chunks(chunks: &[Chunk], picks: &[usize]) -> String {
-    let mut s = String::new();
-    for &i in picks {
-        let c = &chunks[i];
-        s.push_str(&format!(
-            "### {}:{}-{}\n```\n{}\n```\n\n",
-            c.path, c.start_line, c.end_line, c.text
-        ));
-    }
+    let s: String = picks.iter().map(|&i| format_chunk(&chunks[i])).collect();
     s.trim_end().to_string()
+}
+
+/// Best-first packing: walk `ranked` (most relevant first) and keep each chunk
+/// whose formatted size fits the remaining `budget_tokens`, skipping ones that
+/// don't (so one huge top hit can't starve the rest). Stops at `max_chunks`.
+pub fn pack_chunks(
+    chunks: &[Chunk],
+    ranked: &[usize],
+    max_chunks: usize,
+    budget_tokens: usize,
+) -> Vec<usize> {
+    let mut picks = Vec::new();
+    let mut left = budget_tokens;
+    for &i in ranked {
+        if picks.len() >= max_chunks || left == 0 {
+            break;
+        }
+        let cost = crate::budget::est_str(&format_chunk(&chunks[i]));
+        if cost <= left {
+            picks.push(i);
+            left -= cost;
+        }
+    }
+    picks
 }
 
 /// A chunk plus its embedding — the persisted unit.
@@ -279,15 +337,27 @@ fn churn(old: &BTreeMap<String, String>, new: &BTreeMap<String, String>) -> f64 
 
 impl RepoIndex {
     /// Embed the whole repo and assemble a fresh index. Blocking.
-    fn build(repo_root: &Path, model: &str) -> Result<RepoIndex, String> {
-        let chunks = chunk_repo(repo_root);
+    fn build(
+        repo_root: &Path,
+        model: &str,
+        warnings: &mut Vec<String>,
+    ) -> Result<RepoIndex, String> {
+        let (chunks, dropped) = chunk_repo_capped(repo_root, MAX_CHUNKS_EMBEDDED);
+        if !dropped.is_empty() {
+            warnings.push(format!(
+                "retrieval index capped at {MAX_CHUNKS_EMBEDDED} chunks; {} file(s) not \
+                 fully indexed (e.g. {})",
+                dropped.len(),
+                dropped[0]
+            ));
+        }
         let files = source_file_hashes(repo_root);
         let vectors = if chunks.is_empty() {
             Vec::new()
         } else {
             embed_local(
                 model,
-                &chunks.iter().map(|c| c.text.clone()).collect::<Vec<_>>(),
+                &chunks.iter().map(Chunk::embed_text).collect::<Vec<_>>(),
             )?
         };
         let stored = chunks
@@ -363,7 +433,7 @@ fn load_or_build_index(
     let index = match reuse {
         Some(idx) => idx,
         None => {
-            let idx = RepoIndex::build(repo_root, model)?;
+            let idx = RepoIndex::build(repo_root, model, warnings)?;
             persist_index(&idx, &path, warnings);
             idx
         }
@@ -373,19 +443,21 @@ fn load_or_build_index(
     Ok(index)
 }
 
-/// Retrieve the top-`max_chunks` chunks most relevant to `idea` as an injectable
-/// string (empty when nothing to retrieve). Uses the per-flow persisted index for
-/// chunk vectors; only the idea is embedded here. Blocking — run off the runtime.
-/// Non-fatal problems are appended to `warnings`.
+/// Retrieve the chunks most relevant to `idea` as an injectable string (empty
+/// when nothing to retrieve), packed best-first into `budget_tokens` and capped at
+/// `max_chunks`. Uses the per-flow persisted index for chunk vectors; only the
+/// idea is embedded here. Blocking — run off the runtime. Non-fatal problems are
+/// appended to `warnings`.
 pub fn retrieve(
     repo_root: &Path,
     idea: &str,
     model: &str,
     max_chunks: usize,
+    budget_tokens: usize,
     reindex_threshold: f64,
     warnings: &mut Vec<String>,
 ) -> Result<String, String> {
-    if max_chunks == 0 {
+    if max_chunks == 0 || budget_tokens == 0 {
         return Ok(String::new());
     }
     let index = load_or_build_index(repo_root, model, reindex_threshold, warnings)?;
@@ -396,7 +468,7 @@ pub fn retrieve(
         .pop()
         .ok_or_else(|| "empty query embedding".to_string())?;
     let chunk_embs: Vec<Vec<f32>> = index.chunks.iter().map(|c| c.vector.clone()).collect();
-    let picks = rank_top_k(&query, &chunk_embs, max_chunks);
+    let ranked = rank_top_k(&query, &chunk_embs, chunk_embs.len());
     let chunks: Vec<Chunk> = index
         .chunks
         .iter()
@@ -405,8 +477,10 @@ pub fn retrieve(
             start_line: c.start_line,
             end_line: c.end_line,
             text: c.text.clone(),
+            header: None,
         })
         .collect();
+    let picks = pack_chunks(&chunks, &ranked, max_chunks, budget_tokens);
     Ok(format_chunks(&chunks, &picks))
 }
 
@@ -459,6 +533,53 @@ mod tests {
         }
     }
 
+    fn chunk_of(len: usize) -> Chunk {
+        Chunk {
+            path: "f.rs".into(),
+            start_line: 1,
+            end_line: 1,
+            text: "x".repeat(len),
+            header: None,
+        }
+    }
+
+    fn cost(c: &Chunk) -> usize {
+        crate::budget::est_str(&format_chunk(c))
+    }
+
+    #[test]
+    fn pack_stops_at_chunk_cap() {
+        let chunks: Vec<Chunk> = (0..5).map(|_| chunk_of(40)).collect();
+        assert_eq!(
+            pack_chunks(&chunks, &[4, 3, 2, 1, 0], 2, usize::MAX),
+            vec![4, 3]
+        );
+    }
+
+    #[test]
+    fn pack_stays_within_token_budget() {
+        let chunks: Vec<Chunk> = (0..5).map(|_| chunk_of(400)).collect();
+        let budget = cost(&chunks[0]) * 2 + 1;
+        let picks = pack_chunks(&chunks, &[0, 1, 2, 3, 4], 10, budget);
+        assert_eq!(picks, vec![0, 1]);
+        let used: usize = picks.iter().map(|&i| cost(&chunks[i])).sum();
+        assert!(used <= budget);
+    }
+
+    #[test]
+    fn pack_skips_oversized_top_hit() {
+        // The best hit alone exceeds the budget; smaller lower-ranked chunks still fit.
+        let chunks = vec![chunk_of(4000), chunk_of(40), chunk_of(40)];
+        let budget = cost(&chunks[1]) * 2;
+        assert_eq!(pack_chunks(&chunks, &[0, 1, 2], 10, budget), vec![1, 2]);
+    }
+
+    #[test]
+    fn pack_with_zero_budget_is_empty() {
+        let chunks = vec![chunk_of(10)];
+        assert!(pack_chunks(&chunks, &[0], 10, 0).is_empty());
+    }
+
     #[test]
     fn persist_failure_is_a_warning_not_an_error() {
         // Parent "directory" is a regular file, so create_dir_all fails.
@@ -500,6 +621,7 @@ mod tests {
             "how are auth tokens validated?",
             "",
             1,
+            usize::MAX,
             0.4,
             &mut Vec::new(),
         )
@@ -528,13 +650,31 @@ mod tests {
 
         // Build.
         reset();
-        retrieve(r, "how does login work?", "", 1, 0.4, &mut Vec::new()).unwrap();
+        retrieve(
+            r,
+            "how does login work?",
+            "",
+            1,
+            usize::MAX,
+            0.4,
+            &mut Vec::new(),
+        )
+        .unwrap();
         let built = EMBED_COUNT.load(Ordering::Relaxed);
         assert!(built >= 3, "build embeds 2 chunks + query, got {built}");
 
         // Reuse from disk (memo cleared, repo unchanged) → only the query embeds.
         reset();
-        retrieve(r, "how does login work?", "", 1, 0.4, &mut Vec::new()).unwrap();
+        retrieve(
+            r,
+            "how does login work?",
+            "",
+            1,
+            usize::MAX,
+            0.4,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert_eq!(
             EMBED_COUNT.load(Ordering::Relaxed),
             1,
@@ -544,7 +684,16 @@ mod tests {
         // High churn (1 of 2 files changed = 0.5 ≥ 0.4) → rebuild.
         std::fs::write(r.join("a.rs"), "fn login() { verify OTP and password now }").unwrap();
         reset();
-        retrieve(r, "how does login work?", "", 1, 0.4, &mut Vec::new()).unwrap();
+        retrieve(
+            r,
+            "how does login work?",
+            "",
+            1,
+            usize::MAX,
+            0.4,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert!(
             EMBED_COUNT.load(Ordering::Relaxed) >= 3,
             "high churn should rebuild (re-embed chunks)"
@@ -595,17 +744,57 @@ mod tests {
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(r.join("a.rs"), &body).unwrap();
+        std::fs::write(r.join("a.md"), &body).unwrap();
         std::fs::write(r.join("data.bin"), "not source").unwrap();
         std::fs::create_dir_all(r.join("target")).unwrap();
         std::fs::write(r.join("target/skip.rs"), "ignored").unwrap();
 
         let chunks = chunk_repo(r);
-        assert_eq!(chunks.len(), 3, "3 windows from a.rs, nothing else");
-        assert!(chunks.iter().all(|c| c.path == "a.rs"));
+        assert_eq!(chunks.len(), 3, "3 windows from a.md, nothing else");
+        assert!(chunks.iter().all(|c| c.path == "a.md"));
         assert_eq!(chunks[0].start_line, 1);
         assert_eq!(chunks[1].start_line, 51);
         assert_eq!(chunks[2].start_line, 101);
         assert_eq!(chunks[2].end_line, 120);
+    }
+
+    #[test]
+    fn cap_drops_docs_before_code_and_reports_them() {
+        let d = tempdir().unwrap();
+        let r = d.path();
+        // `a_notes.md` sorts first by path but must be dropped before code.
+        std::fs::write(r.join("a_notes.md"), "# notes\nsome docs\n").unwrap();
+        std::fs::write(r.join("b.rs"), "fn b() {}\n").unwrap();
+        std::fs::write(r.join("c.py"), "def c():\n    pass\n").unwrap();
+        let (chunks, dropped) = chunk_repo_capped(r, 2);
+        let paths: Vec<&str> = chunks.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, vec!["b.rs", "c.py"]);
+        assert_eq!(dropped, vec!["a_notes.md".to_string()]);
+        let (all, none) = chunk_repo_capped(r, 10);
+        assert_eq!(all.len(), 3);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn rust_files_chunk_at_symbols_with_1_based_lines() {
+        let d = tempdir().unwrap();
+        let r = d.path();
+        let big = |name: &str| {
+            let body: String = (0..40)
+                .map(|i| format!("    let v{i} = {i}; // padding padding padding\n"))
+                .collect();
+            format!("fn {name}() {{\n{body}}}\n")
+        };
+        std::fs::write(r.join("lib.rs"), format!("{}\n{}", big("one"), big("two"))).unwrap();
+        let chunks = chunk_repo(r);
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
+        assert_eq!(chunks[0].start_line, 1);
+        assert!(chunks[0].text.starts_with("fn one()"));
+        assert!(chunks[1].text.trim_start().starts_with("fn two()"));
+        assert_eq!(
+            chunks[1].text.lines().count(),
+            chunks[1].end_line - chunks[1].start_line + 1
+        );
+        assert!(chunks[0].embed_text().starts_with("lib.rs\nfn one()"));
     }
 }

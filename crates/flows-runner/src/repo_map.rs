@@ -22,7 +22,7 @@ fn est_tokens(s: &str) -> usize {
 }
 
 #[derive(Clone, Copy)]
-enum Lang {
+pub(crate) enum Lang {
     Rust,
     Python,
     JavaScript,
@@ -31,7 +31,7 @@ enum Lang {
 }
 
 impl Lang {
-    fn from_ext(ext: &str) -> Option<Lang> {
+    pub(crate) fn from_ext(ext: &str) -> Option<Lang> {
         Some(match ext {
             "rs" => Lang::Rust,
             "py" => Lang::Python,
@@ -42,7 +42,7 @@ impl Lang {
         })
     }
 
-    fn ts_language(self) -> tree_sitter::Language {
+    pub(crate) fn ts_language(self) -> tree_sitter::Language {
         match self {
             Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
             Lang::Python => tree_sitter_python::LANGUAGE.into(),

@@ -25,15 +25,15 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Push context for models without tool calling.
 - `flows eval`: fixture × model × context-config matrix, results store, report, deterministic retrieval recall/MRR (`eval-harness`, `context-eval`).
 - Agent stall guards: no-op write streaks, empty-response nudges (fail after 3), max-round limit.
+- Symbol-aware retrieval chunks and window-scaled injection (rag MRR 0.34 → 1.00 on the fixture corpus).
 - `flows run --context map+rag` per-run override; global and project `context:` blocks merge key-by-key.
 
 ## Next
 
 ### Context delivery follow-ups
 
-- **Symbol-aware retrieval chunks** — chunk by tree-sitter definitions (reuse `repo_map`) instead of ~50-line windows.
-- **Window-scaled retrieval** — size `retrieval_max_chunks` from the model's context window, like `budget_fraction`.
 - **Git-recency ranking** — rank the repo map with git history instead of file mtime.
+- **Broader retrieval eval corpus** — all six fixtures come from this repo and most tasks name their target file path, which inflates path-matching rankers. Add path-free tasks and fixtures from other repos/languages.
 - **Retrieval index hygiene** — content-addressed vector cache so switching branches doesn't trigger a rebuild; eviction cap for `~/.flows/index/`.
 
 ### Sandbox & tools

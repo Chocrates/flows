@@ -497,6 +497,11 @@ pub struct ContextConfig {
     /// Max retrieved chunks injected when `retrieval` is on.
     #[serde(default = "default_max_chunks")]
     pub retrieval_max_chunks: usize,
+    /// Share of the phase model's context window that retrieved code may use
+    /// (`retrieval_max_chunks` still caps the count). Unknown window →
+    /// `unknown_window_tokens`.
+    #[serde(default = "default_retrieval_budget_fraction")]
+    pub retrieval_budget_fraction: f64,
     /// Fraction of files that must change before the persisted retrieval index is
     /// rebuilt in full (else it is reused as-is). 0.0 = always rebuild.
     #[serde(default = "default_reindex_threshold")]
@@ -516,6 +521,10 @@ pub struct ContextConfig {
 
 fn default_max_chunks() -> usize {
     8
+}
+
+fn default_retrieval_budget_fraction() -> f64 {
+    0.25
 }
 
 fn default_reindex_threshold() -> f64 {
@@ -547,6 +556,7 @@ impl Default for ContextConfig {
             oracle: false,
             retrieval_model: String::new(),
             retrieval_max_chunks: default_max_chunks(),
+            retrieval_budget_fraction: default_retrieval_budget_fraction(),
             retrieval_reindex_threshold: default_reindex_threshold(),
             budget_fraction: default_budget_fraction(),
             unknown_window_tokens: default_unknown_window(),

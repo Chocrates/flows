@@ -282,7 +282,7 @@ small window — some **pull** (a tool the model calls), some **push** (injected
 - **slim tree** (push) — bounded, gitignore-aware repo tree (`repo_context::build_slim_tree`).
 - **repo map** (push) — tree-sitter symbol signatures per file, ranked by task overlap, token-bounded (`repo_map`).
 - **budgeting** — before each send, trim oldest tool-result bodies once estimated tokens exceed `budget_fraction × window` (`budget`), preserving system prompt + task + recent turns.
-- **retrieval** (push) — local in-process embeddings (`fastembed`/ONNX) of line-window chunks; top-k by cosine to the task, injected up front (`retrieval`). The index is built once per flow, persisted at `~/.flows/index/<repo-hash>/<model>.json`, and rebuilt only when ≥ `retrieval_reindex_threshold` of files change.
+- **retrieval** (push) — local in-process embeddings (`fastembed`/ONNX) of **symbol-aware chunks** (`flows-runner::chunker`: tree-sitter top-level nodes, comments attached to the next definition, oversized nodes split into members with the enclosing header as embedding context, small neighbours merged; line windows for other languages). Each chunk is embedded with its path. Chunks are ranked by cosine to the task and packed best-first into `retrieval_budget_fraction` (0.25) of the phase model's window, capped at `retrieval_max_chunks` (`retrieval`). The index (≤ 1500 chunks, code before docs/config, truncation reported) is built once per flow, persisted at `~/.flows/index/<repo-hash>/<model>.json`, and rebuilt only when ≥ `retrieval_reindex_threshold` of files change or the chunker version changes.
 
 Push features (repo map, retrieval) and tool-gating make the agent usable by
 reasoning models that can't function-call. Feature usefulness is meant to be a

@@ -451,6 +451,10 @@ pub fn parse_context_block(raw: &Value) -> ContextConfig {
         retrieval_max_chunks: get_u32(&ctx_raw, "retrieval_max_chunks")
             .map(|n| n as usize)
             .unwrap_or(d.retrieval_max_chunks),
+        retrieval_budget_fraction: ctx_raw
+            .get("retrieval_budget_fraction")
+            .and_then(Value::as_f64)
+            .unwrap_or(d.retrieval_budget_fraction),
         retrieval_reindex_threshold: ctx_raw
             .get("retrieval_reindex_threshold")
             .and_then(Value::as_f64)
@@ -704,15 +708,17 @@ mod context_tests {
     #[test]
     fn context_block_parses_retrieval_settings() {
         let raw: Value = serde_yaml_ng::from_str(
-            "context:\n  retrieval: true\n  retrieval_model: bge-m3\n  retrieval_max_chunks: 4\n",
+            "context:\n  retrieval: true\n  retrieval_model: bge-m3\n  retrieval_max_chunks: 4\n  retrieval_budget_fraction: 0.1\n",
         )
         .unwrap();
         let c = parse_context_block(&raw);
         assert!(c.retrieval);
         assert_eq!(c.retrieval_model, "bge-m3");
         assert_eq!(c.retrieval_max_chunks, 4);
-        // Default when omitted.
+        assert_eq!(c.retrieval_budget_fraction, 0.1);
+        // Defaults when omitted.
         let empty: Value = serde_yaml_ng::from_str("{}").unwrap();
         assert_eq!(parse_context_block(&empty).retrieval_max_chunks, 8);
+        assert_eq!(parse_context_block(&empty).retrieval_budget_fraction, 0.25);
     }
 }

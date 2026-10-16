@@ -695,7 +695,8 @@ tools:
 #   range_reads: false               # allow reading line ranges of files
 #   retrieval: false                 # local embedding retrieval of relevant chunks
 #   retrieval_model: ""              # fastembed model (default all-MiniLM-L6-v2)
-#   retrieval_max_chunks: 12
+#   retrieval_max_chunks: 8         # hard cap on injected chunks
+#   retrieval_budget_fraction: 0.25  # share of the model's window for retrieved code
 #   retrieval_reindex_threshold: 0.4 # repo churn fraction that forces a reindex
 #   budgeting: false                 # trim old tool results when near the window
 #   budget_fraction: 0.6

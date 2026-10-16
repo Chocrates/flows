@@ -143,7 +143,8 @@ context:
   retrieval: true            # local embedding retrieval of relevant chunks (push)
   # tuning:
   retrieval_model: minilm            # local embed model (empty → all-MiniLM-L6-v2)
-  retrieval_max_chunks: 8
+  retrieval_max_chunks: 8            # hard cap on injected chunks
+  retrieval_budget_fraction: 0.25    # retrieved code ≤ this × the model's window
   retrieval_reindex_threshold: 0.4   # ≥40% files changed → rebuild the index
   budget_fraction: 0.6               # trim when est. tokens exceed this × window
   unknown_window_tokens: 8000        # assumed window when the model's is unknown
@@ -159,6 +160,10 @@ context:
   tuning keys still come from config.
 - A `supports_tools: false` model gets **no** tool schemas — only push context —
   so it never wastes turns trying to call tools.
+- **Retrieval injects whole definitions.** Code is chunked at function/type
+  boundaries (Rust, Python, JS/TS, Go; other files use 50-line windows) and the
+  best matches are packed into `retrieval_budget_fraction` of the model's
+  context window (or `unknown_window_tokens`), at most `retrieval_max_chunks`.
 - **Retrieval is fully local.** Embeddings run in-process (`fastembed`/ONNX, a
   small model downloaded once) — no server, no cloud, no key. The index is built
   once per flow, persisted under `~/.flows/index/`, and rebuilt only when enough

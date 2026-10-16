@@ -815,10 +815,22 @@ fn append_transcript_round(
 ///
 /// Returns "" when neither is enabled/available. Retrieval failures degrade to an
 /// empty retrieval section (logged to stderr) rather than aborting the phase.
+/// Context window (tokens) assumed for `model`: the known window, else the
+/// configured `unknown_window_tokens`. Shared by loop budgeting and retrieval.
+fn window_tokens(model: &str, context: &ContextConfig) -> u64 {
+    flows_core::pricing::context_window(model).unwrap_or(context.unknown_window_tokens as u64)
+}
+
+/// Token budget for retrieved code: `retrieval_budget_fraction` of the window.
+fn retrieval_budget(model: &str, context: &ContextConfig) -> usize {
+    (window_tokens(model, context) as f64 * context.retrieval_budget_fraction).max(0.0) as usize
+}
+
 async fn build_pushed_context(
     context: &ContextConfig,
     repo_root: &Path,
     idea: &str,
+    llm_model: &str,
     callbacks: &dyn AgentCallbacks,
 ) -> String {
     let mut out = String::new();
@@ -847,6 +859,7 @@ async fn build_pushed_context(
             context.retrieval_max_chunks,
             context.retrieval_reindex_threshold,
         );
+        let budget = retrieval_budget(llm_model, context);
         let (result, warnings) = tokio::task::spawn_blocking(move || {
             let mut warnings = Vec::new();
             let r = crate::retrieval::retrieve(
@@ -854,6 +867,7 @@ async fn build_pushed_context(
                 &idea_s,
                 &model,
                 max_chunks,
+                budget,
                 threshold,
                 &mut warnings,
             );
@@ -943,7 +957,8 @@ pub async fn run_agent_phase(
     // that can't call tools still gets grounding. Two sources feed one variable:
     // the eval oracle (labeled reference files) and semantic retrieval (top-k
     // embedded chunks). Concatenated when both are on.
-    let pushed_context = build_pushed_context(context, repo_root, idea, callbacks).await;
+    let pushed_context =
+        build_pushed_context(context, repo_root, idea, &llm.model, callbacks).await;
     ctx.insert("pushed_context".into(), json!(pushed_context));
     // Per-phase scoping (2.6): expose prior artifacts exactly **once**, as the
     // `prior_artifacts` map. Templates self-select what they need (`.get('plan')`,
@@ -1065,12 +1080,10 @@ your context small.",
         // the request approaches the window. Preserves system prompt, task, and the
         // most recent turns. No-op unless the `budgeting` flag is on.
         if context.budgeting {
-            let window = flows_core::pricing::context_window(&model)
-                .unwrap_or(context.unknown_window_tokens as u64);
             crate::budget::trim_to_budget(
                 &mut messages,
                 &system_prompt,
-                window,
+                window_tokens(&model, context),
                 context.budget_fraction,
                 BUDGET_RECENT_KEEP,
             );
@@ -1749,5 +1762,36 @@ mod stream_filter_tests {
     fn short_prose_flushes_on_finish() {
         let out = collect(&["hi there"]); // under 30 chars, never classified
         assert_eq!(out, "hi there");
+    }
+}
+
+#[cfg(test)]
+mod retrieval_budget_tests {
+    use super::retrieval_budget;
+    use flows_core::models::ContextConfig;
+
+    #[test]
+    fn budget_is_fraction_of_known_window() {
+        let ctx = ContextConfig::default(); // fraction 0.25
+        assert_eq!(retrieval_budget("claude-sonnet-4-6", &ctx), 50_000);
+    }
+
+    #[test]
+    fn unknown_model_uses_unknown_window_tokens() {
+        let ctx = ContextConfig {
+            unknown_window_tokens: 8000,
+            ..ContextConfig::default()
+        };
+        assert_eq!(retrieval_budget("my-local-model-xyz", &ctx), 2000);
+    }
+
+    #[test]
+    fn fraction_is_configurable() {
+        let ctx = ContextConfig {
+            unknown_window_tokens: 8000,
+            retrieval_budget_fraction: 0.5,
+            ..ContextConfig::default()
+        };
+        assert_eq!(retrieval_budget("my-local-model-xyz", &ctx), 4000);
     }
 }

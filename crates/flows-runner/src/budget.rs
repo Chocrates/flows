@@ -11,8 +11,9 @@
 
 use flows_llm::types::{Message, Role};
 
-/// Rough token estimate for a string (~4 chars/token, rounded up).
-fn est_str(s: &str) -> usize {
+/// Rough token estimate for a string (~4 chars/token, rounded up). Shared with
+/// retrieval packing so both budgets use the same yardstick.
+pub fn est_str(s: &str) -> usize {
     s.len() / 4 + 1
 }
 

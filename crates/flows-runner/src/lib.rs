@@ -11,6 +11,7 @@ pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 pub mod agent;
 pub mod budget;
+mod chunker;
 pub mod prompts;
 pub mod repo_context;
 pub mod repo_map;
