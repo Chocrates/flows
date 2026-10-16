@@ -45,7 +45,8 @@ phases:
 - **human** — a review gate; approve or send feedback.
 
 Phases can **loop back** on a condition (bounded by `max_loop_iterations`),
-**retry** on failure, and run as a **DAG** via `depends_on`.
+**retry** on failure, run **conditionally** via `when`, and run as a **DAG** via
+`depends_on`.
 
 ## Common phase fields (all types)
 
@@ -58,6 +59,7 @@ Phases can **loop back** on a condition (bounded by `max_loop_iterations`),
 | `loop_back_to` | — | phase to jump back to when `loop_condition` is true |
 | `loop_condition` | — | MiniJinja expression over `content` (the phase's artifact); loop while true |
 | `max_loop_iterations` | `3` | cap on `loop_back_to` iterations |
+| `when` | — | MiniJinja expression over `artifacts.<phase>` and `idea`; the phase runs only when it is true (see below) |
 
 ## `agent` phase
 
@@ -132,6 +134,37 @@ At a gate, press **Enter** to approve or type feedback; feedback is available to
   `.startswith(...)`, `x in (...)`, and the `tojson` filter.
 - `content` in a `loop_condition` is the phase's artifact content (a map).
 - `{{ idea }}` (the run's idea text) is available in `script` commands.
+
+## Conditional phases (`when`)
+
+A phase with `when` runs only if the expression is true when the phase is
+reached. The expression sees `artifacts` — every phase recorded so far, by name,
+mapped to its artifact content — and `idea`:
+
+```yaml
+- name: review
+  type: agent
+  tools: files_and_test
+- name: fix
+  type: agent
+  when: "artifacts.review.verdict not in ('approved', 'approved_with_suggestions')"
+- name: migrate
+  type: script
+  command: "make migrate"
+  when: "artifacts.plan.get('schema_change')"
+- name: notify
+  type: script
+  command: "echo skipped tests"
+  when: "artifacts.test.skipped"       # a skipped phase's content is {skipped: true, reason}
+```
+
+- Script artifacts are `{stdout, stderr, exit_code}`, so `"'FAIL' in artifacts.test.stdout"` works.
+- A missing phase or field is undefined, which is false, so check spelling:
+  `artifacts.review.verdikt != 'approved'` is always true.
+- A skipped phase counts as done. Its DAG dependents still run, and the TUI marks it `⊘`.
+- Inside a `loop_back_to` range the condition is re-evaluated on every pass.
+- A `when` that doesn't parse fails `flows plan` and run start. One that fails while
+  being evaluated stops the run; the phase is never silently skipped or run.
 
 ---
 

@@ -32,6 +32,7 @@ impl Provider for Mock {
 struct Cb {
     started: Mutex<Vec<String>>,
     completed: Mutex<Vec<String>>,
+    skipped: Mutex<Vec<String>>,
 }
 #[async_trait]
 impl RunnerCallbacks for Cb {
@@ -46,6 +47,9 @@ impl RunnerCallbacks for Cb {
     }
     fn on_run_complete(&self, _id: &str, phases: &[String]) {
         *self.completed.lock().unwrap() = phases.to_vec();
+    }
+    fn on_phase_skipped(&self, phase: &str, _reason: &str) {
+        self.skipped.lock().unwrap().push(phase.into());
     }
 }
 
@@ -159,4 +163,54 @@ async fn dag_independent_phases_both_run_before_join() {
     let order = run(&phases, &cb, d.path(), &store).await.unwrap();
     assert_eq!(order.len(), 3);
     assert_eq!(order.last().unwrap(), "c"); // join runs last
+}
+
+#[tokio::test]
+async fn dag_skipped_phase_counts_as_satisfied() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    // a → b (skipped) → c ; c also sees the skip marker.
+    let mut b = script("b", "echo b", &["a"]);
+    b.when = Some("'go' in artifacts.a.stdout".into());
+    let mut c = script("c", "echo c", &["b"]);
+    c.when = Some("artifacts.b.skipped".into());
+    let phases = vec![script("a", "echo stop", &[]), b, c];
+    let cb = Cb::default();
+    let order = run(&phases, &cb, d.path(), &store).await.unwrap();
+    assert_eq!(order, vec!["a", "b", "c"]);
+    assert_eq!(*cb.skipped.lock().unwrap(), vec!["b"]);
+    assert!(cb.started.lock().unwrap().contains(&"c".to_string()));
+    let st = store.read_state("r1").unwrap().unwrap();
+    assert_eq!(st.status, RunStatus::Completed);
+    assert_eq!(st.skipped_phases, vec!["b"]);
+}
+
+#[tokio::test]
+async fn dag_root_skip_with_nothing_in_flight_continues() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    // The only ready phase is skipped while nothing runs: the scheduler must
+    // re-scan instead of awaiting an empty set and ending early.
+    let mut a = script("a", "echo a", &[]);
+    a.when = Some("false".into());
+    let phases = vec![a, script("b", "echo b", &["a"])];
+    let cb = Cb::default();
+    let order = run(&phases, &cb, d.path(), &store).await.unwrap();
+    assert_eq!(order, vec!["a", "b"]);
+}
+
+#[tokio::test]
+async fn dag_when_error_fails_run() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    let mut b = script("b", "echo b", &["a"]);
+    b.when = Some("no_such_fn()".into());
+    let phases = vec![script("a", "echo a", &[]), b];
+    let cb = Cb::default();
+    let err = run(&phases, &cb, d.path(), &store).await.unwrap_err();
+    assert!(matches!(err, RunError::Failed { ref phase, .. } if phase == "b"));
+    assert_eq!(
+        store.read_state("r1").unwrap().unwrap().status,
+        RunStatus::Failed
+    );
 }

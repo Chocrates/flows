@@ -64,6 +64,16 @@ fn phase_names(store: &Store, run_id: &str) -> Vec<String> {
 }
 
 /// Read new bytes of a file past `offset`, advancing it. Handles truncation.
+/// Mark the phases a run's state has recorded: completed → ✓, skipped → ⊘.
+pub fn mark_recorded_phases(panel: &mut crate::PhasePanel, st: &flows_core::models::RunState) {
+    for done in &st.completed_phases {
+        panel.set_status(done, PhaseStatus::Done);
+    }
+    for skipped in &st.skipped_phases {
+        panel.set_status(skipped, PhaseStatus::Skipped);
+    }
+}
+
 fn tail_from(path: &Path, offset: &mut u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = std::fs::File::open(path) else {
@@ -174,9 +184,7 @@ fn attach_loop<B: ratatui::backend::Backend>(
     loop {
         // --- poll run state → phases / status / cost / input prompts ---------
         if let Ok(Some(st)) = store.read_state(run_id) {
-            for done in &st.completed_phases {
-                app.phases.set_status(done, PhaseStatus::Done);
-            }
+            mark_recorded_phases(&mut app.phases, &st);
             match st.status {
                 RunStatus::Failed => {
                     app.phases

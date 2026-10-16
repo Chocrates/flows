@@ -10,6 +10,8 @@ pub enum PhaseStatus {
     Looping,
     Done,
     Failed,
+    /// `when` condition was false; the phase did not run.
+    Skipped,
 }
 
 impl PhaseStatus {
@@ -21,6 +23,7 @@ impl PhaseStatus {
             PhaseStatus::Looping => '↻',
             PhaseStatus::Done => '✓',
             PhaseStatus::Failed => '✗',
+            PhaseStatus::Skipped => '⊘',
         }
     }
 }

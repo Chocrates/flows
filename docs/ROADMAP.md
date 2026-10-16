@@ -29,6 +29,10 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Symbol-aware retrieval chunks and window-scaled injection (rag MRR 0.34 → 1.00 on the fixture corpus).
 - `flows run --context map+rag` per-run override; global and project `context:` blocks merge key-by-key.
 
+### Unreleased
+
+- Conditional phases: `when:` run-if expressions over prior artifacts; skipped phases are recorded, shown as `⊘`, and count as done for DAG dependents.
+
 ## Next
 
 ### Context delivery follow-ups
@@ -47,7 +51,6 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 ### Pipelines
 
 - **Pipeline composition** — `include` another pipeline as a phase.
-- **Conditional phases** — skip a phase based on prior artifact content.
 - **Template registry** — share/import community templates.
 
 ### Later / maybe
@@ -56,4 +59,4 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 
 ## Tech debt
 
-- `DESIGN.md` still has Python-era details in places (e.g. `_run_linear` / `asyncio.wait` in "Runner architecture", `flows/prompts/` paths in "Prompt loading").
+- `DESIGN.md`'s TUI section still describes the Textual implementation (`RichLog`, `_follow`, `CopyableRichLog`, compositor offsets); the Rust `OutputPane` (`crates/flows-tui/src/output.rs`) works differently and the section needs a rewrite.

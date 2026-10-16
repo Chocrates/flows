@@ -447,3 +447,38 @@ fn round_event_sets_readout_and_phase_start_clears_it() {
     });
     assert!(a.round.is_empty(), "round should reset on phase start");
 }
+
+#[test]
+fn phase_skipped_marks_skipped_and_logs_reason() {
+    let mut a = app();
+    a.handle_ui_event(UiEvent::PhaseSkipped {
+        name: "implement".into(),
+        reason: "when condition \"x\" is false".into(),
+    });
+    assert_eq!(a.phases.status_of("implement"), Some(PhaseStatus::Skipped));
+    assert_eq!(PhaseStatus::Skipped.glyph(), '⊘');
+    assert!(a
+        .output
+        .visible_lines()
+        .iter()
+        .any(|l| l.contains("implement skipped")));
+}
+
+#[test]
+fn attach_marks_skipped_from_state() {
+    let mut a = app();
+    let st = flows_core::models::RunState {
+        run_id: "r".into(),
+        status: Default::default(),
+        current_phase: String::new(),
+        current_phase_index: 0,
+        round: 0,
+        questions: vec![],
+        error: None,
+        completed_phases: vec!["plan".into(), "implement".into()],
+        skipped_phases: vec!["implement".into()],
+    };
+    flows_tui::attach::mark_recorded_phases(&mut a.phases, &st);
+    assert_eq!(a.phases.status_of("plan"), Some(PhaseStatus::Done));
+    assert_eq!(a.phases.status_of("implement"), Some(PhaseStatus::Skipped));
+}

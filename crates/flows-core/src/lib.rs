@@ -1,6 +1,7 @@
 //! flows-core — data models and (soon) config/state/templates for the Rust port
 //! of `flows`. Pure logic, no I/O beyond the filesystem.
 
+pub mod condition;
 pub mod config;
 pub mod detect;
 pub mod dryrun;

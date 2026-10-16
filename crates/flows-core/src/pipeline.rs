@@ -10,6 +10,13 @@ pub fn validate_pipeline(phases: &[PhaseConfig]) -> Result<(), String> {
     let names: HashSet<&str> = phases.iter().map(|p| p.name.as_str()).collect();
     let is_dag = phases.iter().any(|p| !p.depends_on.is_empty());
 
+    for p in phases {
+        if let Some(cond) = &p.when {
+            crate::condition::check_when(cond)
+                .map_err(|e| format!("Phase {:?}: invalid when condition {cond:?}: {e}", p.name))?;
+        }
+    }
+
     if is_dag {
         for p in phases {
             for dep in &p.depends_on {

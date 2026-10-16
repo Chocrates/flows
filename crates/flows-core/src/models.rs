@@ -362,6 +362,10 @@ pub struct PhaseConfig {
     pub max_loop_iterations: u32,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Run-if condition (MiniJinja over `artifacts.<phase>` + `idea`); the phase
+    /// is skipped when it is false. See `flows_core::condition`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
 }
 
 impl PhaseConfig {
@@ -384,6 +388,7 @@ impl PhaseConfig {
             loop_condition: String::new(),
             max_loop_iterations: 3,
             depends_on: Vec::new(),
+            when: None,
         }
     }
 }
@@ -755,6 +760,9 @@ pub struct RunState {
     pub error: Option<String>,
     #[serde(default)]
     pub completed_phases: Vec<String>,
+    /// Phases whose `when` condition was false (also in `completed_phases`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_phases: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

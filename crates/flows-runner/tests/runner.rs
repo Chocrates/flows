@@ -60,6 +60,7 @@ struct Cb {
     completed: Mutex<Vec<String>>,
     loops: Mutex<Vec<(String, String)>>,
     gates: Mutex<Vec<String>>,
+    skipped: Mutex<Vec<String>>,
 }
 #[async_trait]
 impl RunnerCallbacks for Cb {
@@ -75,6 +76,9 @@ impl RunnerCallbacks for Cb {
     }
     fn on_run_complete(&self, _id: &str, phases: &[String]) {
         *self.completed.lock().unwrap() = phases.to_vec();
+    }
+    fn on_phase_skipped(&self, phase: &str, _reason: &str) {
+        self.skipped.lock().unwrap().push(phase.into());
     }
     fn on_loop_back(&self, from: &str, to: &str, _it: u32, _max: u32) {
         self.loops.lock().unwrap().push((from.into(), to.into()));
@@ -488,4 +492,153 @@ async fn auto_test_resolves_and_runs_for_detected_stack() {
     let cb = Cb::default();
     let completed = run(&phases, provider, &cb, d.path(), &store).await.unwrap();
     assert!(completed.contains(&"test".to_string()));
+}
+
+// -- when conditions ---------------------------------------------------------
+
+fn when(mut p: PhaseConfig, cond: &str) -> PhaseConfig {
+    p.when = Some(cond.into());
+    p
+}
+
+#[tokio::test]
+async fn when_false_skips_phase_and_records_it() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    let phases = vec![
+        script("check", "echo clean"),
+        // would need a mock response if it ran — the empty mock panics
+        when(agent("fix"), "'dirty' in artifacts.check.stdout"),
+        script("after", "echo after"),
+    ];
+    let cb = Cb::default();
+    let completed = run(&phases, Mock::new(vec![]), &cb, d.path(), &store)
+        .await
+        .unwrap();
+    assert_eq!(completed, vec!["check", "fix", "after"]);
+    assert_eq!(*cb.skipped.lock().unwrap(), vec!["fix"]);
+    assert!(!cb.started.lock().unwrap().contains(&"fix".to_string()));
+
+    let st = store.read_state("r1").unwrap().unwrap();
+    assert_eq!(st.status, RunStatus::Completed);
+    assert_eq!(st.skipped_phases, vec!["fix"]);
+    let a: serde_json::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(store.artifact_path("r1", "fix")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(a["content"]["skipped"], true);
+    assert!(a["content"]["reason"].as_str().unwrap().contains("dirty"));
+}
+
+#[tokio::test]
+async fn when_true_runs_phase() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    let phases = vec![
+        script("check", "echo dirty"),
+        when(agent("fix"), "'dirty' in artifacts.check.stdout"),
+    ];
+    let cb = Cb::default();
+    run(
+        &phases,
+        Mock::new(vec![artifact("{}")]),
+        &cb,
+        d.path(),
+        &store,
+    )
+    .await
+    .unwrap();
+    assert!(cb.skipped.lock().unwrap().is_empty());
+    assert!(cb.started.lock().unwrap().contains(&"fix".to_string()));
+    assert!(store
+        .read_state("r1")
+        .unwrap()
+        .unwrap()
+        .skipped_phases
+        .is_empty());
+}
+
+#[tokio::test]
+async fn when_sees_earlier_skip_and_missing_is_falsy() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    let phases = vec![
+        when(script("a", "echo a"), "artifacts.nope.flag"),
+        when(script("b", "echo b"), "artifacts.a.skipped"),
+    ];
+    let cb = Cb::default();
+    run(&phases, Mock::new(vec![]), &cb, d.path(), &store)
+        .await
+        .unwrap();
+    assert_eq!(*cb.skipped.lock().unwrap(), vec!["a"]);
+    assert!(cb.started.lock().unwrap().contains(&"b".to_string()));
+}
+
+#[tokio::test]
+async fn when_runtime_error_fails_run() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    let phases = vec![
+        script("a", "echo a"),
+        when(script("b", "echo b"), "no_such_fn()"),
+    ];
+    let cb = Cb::default();
+    let err = run(&phases, Mock::new(vec![]), &cb, d.path(), &store)
+        .await
+        .unwrap_err();
+    match err {
+        RunError::Failed { phase, error } => {
+            assert_eq!(phase, "b");
+            assert!(error.contains("no_such_fn()"), "{error}");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    assert!(!cb.started.lock().unwrap().contains(&"b".to_string()));
+    assert!(cb.skipped.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn when_syntax_error_fails_validation() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    let phases = vec![script("a", "echo a"), when(script("b", "echo b"), "x ==")];
+    let cb = Cb::default();
+    let err = run(&phases, Mock::new(vec![]), &cb, d.path(), &store)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RunError::Validation(_)), "{err:?}");
+    assert!(cb.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn when_reevaluated_after_loop_back() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    // review rejects, then approves. `fix` runs only after a rejection; `gate`
+    // loops back to review once. Pass 1: fix runs. Pass 2: fix is skipped.
+    let mut gate = script("gate", "echo gate");
+    gate.loop_back_to = Some("review".into());
+    gate.loop_condition = "content.get('exit_code') == 0".into();
+    gate.max_loop_iterations = 1;
+    let phases = vec![
+        agent("review"),
+        when(
+            script("fix", "echo fix"),
+            "artifacts.review.verdict != 'approved'",
+        ),
+        gate,
+    ];
+    let provider = Mock::new(vec![
+        artifact(r#"{"verdict": "rejected"}"#),
+        artifact(r#"{"verdict": "approved"}"#),
+    ]);
+    let cb = Cb::default();
+    run(&phases, provider, &cb, d.path(), &store).await.unwrap();
+    let started = cb.started.lock().unwrap();
+    assert_eq!(started.iter().filter(|p| *p == "fix").count(), 1);
+    assert_eq!(*cb.skipped.lock().unwrap(), vec!["fix"]);
+    assert_eq!(
+        store.read_state("r1").unwrap().unwrap().skipped_phases,
+        vec!["fix"]
+    );
 }

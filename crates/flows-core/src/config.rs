@@ -331,6 +331,7 @@ fn parse_phase(p: &Value) -> Result<PhaseConfig> {
         loop_condition: get_str(p, "loop_condition").unwrap_or_default(),
         max_loop_iterations: max_loop,
         depends_on: get_str_list(p, "depends_on").unwrap_or_default(),
+        when: get_str(p, "when").filter(|w| !w.trim().is_empty()),
     })
 }
 

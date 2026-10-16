@@ -497,3 +497,18 @@ fn context_override_rejects_unknown_token() {
     let err = apply_context_override(&g, &mut p, "map+bogus").unwrap_err();
     assert!(err.contains("bogus"), "{err}");
 }
+
+#[test]
+fn parse_phase_when() {
+    let p =
+        parse_phase_yaml("name: fix\nwhen: \"artifacts.review.verdict != 'approved'\"\n").unwrap();
+    assert_eq!(
+        p.when.as_deref(),
+        Some("artifacts.review.verdict != 'approved'")
+    );
+    assert!(parse_phase_yaml("name: fix\n").unwrap().when.is_none());
+    assert!(parse_phase_yaml("name: fix\nwhen: \"  \"\n")
+        .unwrap()
+        .when
+        .is_none());
+}

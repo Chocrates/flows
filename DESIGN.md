@@ -248,14 +248,16 @@ reasoning): add `thinking: false` under that phase in the template YAML.
 
 `run_pipeline()` in `runner.rs` is the core execution engine:
 
-1. Validates pipeline config (`_validate_pipeline`)
+1. Validates pipeline config (`flows_core::pipeline::validate_pipeline`, including `when` syntax)
 2. Writes `RunMeta` and `RunState` to `~/.flows/runs/{run_id}/`
-3. Merges LLM config (global → project)
+3. Merges LLM config (global → project) and resolves per-phase model profiles
 4. Detects execution mode:
-   - **Linear**: no phase has `depends_on` → `_run_linear()` (sequential, supports loops + retry)
-   - **DAG**: any phase has `depends_on` → `_run_dag()` (parallel, `asyncio.wait(FIRST_COMPLETED)`)
-5. Calls `_run_phase()` for individual phase execution (agent / script / human)
-6. Fires `RunnerCallbacks` events throughout
+   - **Linear**: no phase has `depends_on` → `run_linear()` (sequential, supports loops + retry)
+   - **DAG**: any phase has `depends_on` → `run_dag()` (ready phases run concurrently on a `FuturesUnordered`)
+5. Before each phase, evaluates its `when` condition (`flows_core::condition`); a false
+   condition records a `{skipped: true}` artifact and fires `on_phase_skipped`
+6. Calls `execute_phase()` for individual phase execution (agent / script / human)
+7. Fires `RunnerCallbacks` events throughout
 
 All UI (TUI, foreground print, background notify) is implemented via `RunnerCallbacks`. Core modules never print to stdout.
 
@@ -349,10 +351,10 @@ Lookup order for phase `implement` in template `feature` (first match wins):
 1. `phase.prompt` field (explicit path or key)
 2. `<repo>/.flows/prompts/feature/implement.md` (project override)
 3. `~/.flows/prompts/feature/implement.md` (global user override)
-4. `flows/prompts/feature/implement.md` (builtin)
+4. builtin `crates/flows-runner/assets/prompts/feature/implement.md` (embedded)
 5. `<repo>/.flows/prompts/implement.md` (project generic)
 6. `~/.flows/prompts/implement.md` (global user generic)
-7. `flows/prompts/implement.md` (builtin generic)
+7. builtin generic `crates/flows-runner/assets/prompts/implement.md` (embedded)
 8. Auto-generated fallback
 
 `flows init` copies the chosen template's prompts into `<repo>/.flows/prompts/<template>/`
@@ -416,11 +418,11 @@ ratatui immediate-mode full-screen terminal application. Architecture:
 
 - `App` — the shared TUI model, used by both a live run and a reattach
 - `ChannelCallbacks(RunnerCallbacks)` — bridges runner events to `UiEvent`s over a channel
-- `PhasePanel(Static)` — left sidebar with live phase status icons
+- `PhasePanel` — left sidebar with live phase status icons (○ ▶ ↻ ✓ ✗ ⊘)
 - the pipeline runs on a tokio task; a foreground run streams events over a channel, a reattach polls the run's files (state.json / output.log / llm.jsonl)
-- Human input: `asyncio.Event` — worker awaits it; app's `on_input_submitted` sets it
+- Human input: the runner's `on_questions` / `on_human_gate` send a `UiEvent::NeedInput` carrying a `oneshot` sender; the input box replies on it
 
-Token streaming: buffered in `_token_buf`, split on `\n`, complete lines written to `RichLog`. Partial trailing line held until next newline or phase boundary. All dynamic content is `rich.markup.escape()`d before writing.
+Token streaming: `OutputPane::push_token` appends to the current line per `Category` (normal / thinking / JSON / tool / system / meta); complete lines join the scrollback. Follow sticks to the bottom unless the user scrolled up or has an active selection.
 
 Structured-response handling: `StreamFilter` (flows-runner::agent) buffers the first ~30 chars of a streamed response; if it begins with a `questions` JSON envelope, those tokens are dropped from `on_token` so raw clarification JSON never reaches the output pane. Artifact JSON is still streamed.
 
@@ -629,7 +631,6 @@ Cross-cutting: background worker + signal files (answer/advance/cancel), desktop
 
 - **Optional network isolation** for the shell sandbox (`--unshare-net`, opt-in for dep fetching).
 - **Pipeline composition**: `include` another pipeline as a phase.
-- **Conditional phases**: skip based on prior artifact content.
 - **Brave / Serper** web-search backends (keyed).
 - **Template registry**: community-shared templates.
 

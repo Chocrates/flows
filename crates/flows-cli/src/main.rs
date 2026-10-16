@@ -1097,6 +1097,9 @@ impl RunnerCallbacks for Foreground {
     fn on_phase_end(&self, phase: &str, _artifact: Option<&Artifact>) {
         println!("  ✓ {phase} done");
     }
+    fn on_phase_skipped(&self, phase: &str, reason: &str) {
+        println!("  ⊘ {phase} skipped — {reason}");
+    }
     fn on_run_complete(&self, _run_id: &str, phases: &[String]) {
         println!("\n✓ complete: {}", phases.join(" → "));
     }
@@ -1234,6 +1237,9 @@ impl RunnerCallbacks for Waiting {
             "m",
             &format!("━━ phase {}/{}: {phase} ━━", index + 1, total),
         );
+    }
+    fn on_phase_skipped(&self, phase: &str, reason: &str) {
+        self.emit("m", &format!("⊘ {phase} skipped — {reason}"));
     }
     fn on_token(&self, _phase: &str, token: &str) {
         self.emit("n", token);
@@ -1408,6 +1414,7 @@ fn spawn_background(
         questions: vec![],
         error: None,
         completed_phases: vec![],
+        skipped_phases: vec![],
     });
 
     let log = store.run_dir(run_id).join("worker.log");
@@ -1860,6 +1867,7 @@ mod waiting_tests {
                 questions: vec![],
                 error: None,
                 completed_phases: vec![],
+                skipped_phases: vec![],
             })
             .unwrap();
     }

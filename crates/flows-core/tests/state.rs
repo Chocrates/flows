@@ -33,6 +33,7 @@ fn state(run_id: &str) -> RunState {
         questions: vec![],
         error: None,
         completed_phases: vec![],
+        skipped_phases: vec![],
     }
 }
 

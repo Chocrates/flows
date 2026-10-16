@@ -66,6 +66,10 @@ pub enum UiEvent {
     PhaseEnd {
         name: String,
     },
+    PhaseSkipped {
+        name: String,
+        reason: String,
+    },
     LoopBack {
         from: String,
         to: String,
@@ -223,6 +227,13 @@ impl RunnerCallbacks for ChannelCallbacks {
     fn on_phase_end(&self, phase: &str, _artifact: Option<&Artifact>) {
         self.send(UiEvent::PhaseEnd { name: phase.into() });
     }
+    fn on_phase_skipped(&self, phase: &str, reason: &str) {
+        self.log("m", &format!("⊘ {phase} skipped — {reason}"));
+        self.send(UiEvent::PhaseSkipped {
+            name: phase.into(),
+            reason: reason.into(),
+        });
+    }
     fn on_loop_back(&self, from: &str, to: &str, iteration: u32, _max: u32) {
         self.send(UiEvent::LoopBack {
             from: from.into(),
@@ -375,6 +386,11 @@ impl App {
             UiEvent::ScriptResult { exit_code } => self
                 .output
                 .push_line(Category::Meta, format!("script exited {exit_code}")),
+            UiEvent::PhaseSkipped { name, reason } => {
+                self.phases.set_status(&name, PhaseStatus::Skipped);
+                self.output
+                    .push_line(Category::Meta, format!("⊘ {name} skipped — {reason}"));
+            }
             UiEvent::PhaseEnd { name } => {
                 if self.phases.status_of(&name) != Some(PhaseStatus::Failed) {
                     self.phases.set_status(&name, PhaseStatus::Done);

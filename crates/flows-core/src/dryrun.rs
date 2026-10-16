@@ -7,6 +7,13 @@ use crate::estimate::{estimate_pipeline, PhaseEstimate};
 use crate::models::{GlobalConfig, PhaseConfig, ProjectConfig};
 use crate::pipeline::{is_dag, validate_pipeline};
 
+fn when_suffix(p: &PhaseConfig) -> String {
+    p.when
+        .as_deref()
+        .map(|w| format!("  when: {w}"))
+        .unwrap_or_default()
+}
+
 /// Human-readable lines describing execution order.
 pub fn build_plan_lines(phases: &[PhaseConfig]) -> Vec<String> {
     let mut lines = Vec::with_capacity(phases.len());
@@ -18,19 +25,21 @@ pub fn build_plan_lines(phases: &[PhaseConfig]) -> Vec<String> {
                 format!("  deps: {}", p.depends_on.join(", "))
             };
             lines.push(format!(
-                "  {:<20} [{}]{}",
+                "  {:<20} [{}]{}{}",
                 p.name,
                 p.phase_type.as_str(),
-                dep_str
+                dep_str,
+                when_suffix(p)
             ));
         }
     } else {
         for (i, p) in phases.iter().enumerate() {
             lines.push(format!(
-                "  {}. {:<20} [{}]",
+                "  {}. {:<20} [{}]{}",
                 i + 1,
                 p.name,
-                p.phase_type.as_str()
+                p.phase_type.as_str(),
+                when_suffix(p)
             ));
         }
     }

@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use minijinja::{context, Environment};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
@@ -70,6 +69,9 @@ pub trait RunnerCallbacks: Send + Sync {
     fn on_tool_result(&self, _phase: &str, _name: &str, _summary: &str, _is_error: bool) {}
     fn on_phase_start(&self, _phase: &str, _index: usize, _total: usize) {}
     fn on_phase_end(&self, _phase: &str, _artifact: Option<&Artifact>) {}
+    /// The phase's `when` condition was false; it did not run. Fired instead of
+    /// `on_phase_start` / `on_phase_end`.
+    fn on_phase_skipped(&self, _phase: &str, _reason: &str) {}
     fn on_loop_back(&self, _from: &str, _to: &str, _iteration: u32, _max: u32) {}
     fn on_script_result(&self, _phase: &str, _exit_code: i32, _stdout: &str, _stderr: &str) {}
     fn on_run_complete(&self, _run_id: &str, _completed_phases: &[String]) {}
@@ -184,32 +186,7 @@ fn idea_to_slug(idea: &str) -> String {
         .to_string()
 }
 
-/// Python tuple literals `(a, b)` aren't MiniJinja syntax; the loop conditions
-/// use `... in ('approved', 'approved_with_suggestions')`. Rewrite only the
-/// tuple that follows `in` into a list literal — NOT call-args like
-/// `.get('answer', '')`, which also look like `(x, y)`.
-fn tuples_to_lists(condition: &str) -> String {
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"(\bin\s*)\(([^()]*)\)").unwrap());
-    re.replace_all(condition, "${1}[$2]").into_owned()
-}
-
-/// Evaluate a loop condition (a boolean Jinja expression over `content`).
-/// pycompat resolves `.get()`/`.strip()` etc; tuple literals are rewritten to
-/// lists so `not in (...)` works.
-pub fn eval_loop_condition(condition: &str, content: &Value) -> bool {
-    if condition.trim().is_empty() {
-        return false;
-    }
-    let expr = tuples_to_lists(condition);
-    let mut env = Environment::new();
-    env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-    let template = format!("{{{{ {expr} }}}}");
-    match env.render_str(&template, context! { content => content }) {
-        Ok(s) => s.trim() == "true",
-        Err(_) => false,
-    }
-}
+pub use flows_core::condition::eval_loop_condition;
 
 fn index_of(phases: &[PhaseConfig], name: &str) -> Option<usize> {
     phases.iter().position(|p| p.name == name)
@@ -373,6 +350,53 @@ fn persist(ctx: &Ctx<'_>, prior: &mut Map<String, Value>, artifact: &Artifact) {
     ctx.callbacks.on_phase_end(&artifact.phase, Some(&artifact));
 }
 
+/// Evaluate a phase's `when` condition against the artifacts recorded so far.
+/// `Ok(None)` → run it; `Ok(Some(reason))` → skip it; `Err` → fail the run.
+fn when_skip(
+    ctx: &Ctx<'_>,
+    phase: &PhaseConfig,
+    artifacts: &Map<String, Value>,
+) -> Result<Option<String>, String> {
+    let Some(cond) = phase.when.as_deref() else {
+        return Ok(None);
+    };
+    match flows_core::condition::eval_when(cond, artifacts, ctx.idea) {
+        Ok(true) => Ok(None),
+        Ok(false) => Ok(Some(format!("when condition {cond:?} is false"))),
+        Err(e) => Err(format!(
+            "Phase {:?}: when condition {cond:?} failed to evaluate: {e}",
+            phase.name
+        )),
+    }
+}
+
+/// Record a skipped phase: a `{skipped, reason}` artifact (so prompts and later
+/// conditions see it) and the `on_phase_skipped` event.
+fn record_skip(
+    ctx: &Ctx<'_>,
+    prior: &mut Map<String, Value>,
+    state: &mut RunState,
+    phase: &PhaseConfig,
+    reason: &str,
+) {
+    let artifact = Artifact {
+        phase: phase.name.clone(),
+        run_id: ctx.run_id.to_string(),
+        idea: ctx.idea.into(),
+        content: json!({ "skipped": true, "reason": reason }),
+        ..Artifact::default()
+    };
+    prior.insert(
+        phase.name.clone(),
+        serde_json::to_value(&artifact).unwrap_or(Value::Null),
+    );
+    write_artifact_file(ctx.store, ctx.run_id, &phase.name, &artifact);
+    if !state.skipped_phases.contains(&phase.name) {
+        state.skipped_phases.push(phase.name.clone());
+    }
+    ctx.callbacks.on_phase_skipped(&phase.name, reason);
+}
+
 /// Run a pipeline to completion. Returns the list of completed phase names.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_pipeline(
@@ -421,6 +445,7 @@ pub async fn run_pipeline(
         questions: vec![],
         error: None,
         completed_phases: vec![],
+        skipped_phases: vec![],
     };
     let _ = store.write_state(&state);
 
@@ -479,6 +504,24 @@ async fn run_linear(
 
     while idx < phases.len() {
         let phase = &phases[idx];
+        match when_skip(ctx, phase, &prior_artifacts) {
+            Err(error) => {
+                state.current_phase = phase.name.clone();
+                state.current_phase_index = idx as i64;
+                return fail_run(ctx, state, &phase.name, error);
+            }
+            Ok(Some(reason)) => {
+                record_skip(ctx, &mut prior_artifacts, state, phase, &reason);
+                if !completed.contains(&phase.name) {
+                    completed.push(phase.name.clone());
+                }
+                state.completed_phases = completed.clone();
+                let _ = ctx.store.write_state(state);
+                idx += 1;
+                continue;
+            }
+            Ok(None) => state.skipped_phases.retain(|n| n != &phase.name),
+        }
         ctx.callbacks.on_phase_start(&phase.name, idx, total);
         state.current_phase = phase.name.clone();
         state.current_phase_index = idx as i64;
@@ -572,6 +615,7 @@ async fn run_linear(
                             phases[t..=idx].iter().map(|p| p.name.as_str()).collect();
                         completed.retain(|n| !redo.contains(n.as_str()));
                         state.completed_phases = completed.clone();
+                        state.skipped_phases.retain(|n| !redo.contains(n.as_str()));
                         let _ = ctx.store.write_state(state);
                         idx = t;
                         continue;
@@ -657,7 +701,26 @@ async fn run_dag(
             break;
         }
 
+        // A skip changes readiness without a task completing; re-scan before
+        // awaiting in-flight work.
+        let mut skipped_any = false;
         for phase in ready {
+            match when_skip(ctx, phase, &artifacts) {
+                Err(error) => {
+                    state.current_phase = phase.name.clone();
+                    return fail_run(ctx, state, &phase.name, error);
+                }
+                Ok(Some(reason)) => {
+                    record_skip(ctx, &mut artifacts, state, phase, &reason);
+                    completed.insert(phase.name.clone());
+                    completed_order.push(phase.name.clone());
+                    state.completed_phases = completed_order.clone();
+                    let _ = ctx.store.write_state(state);
+                    skipped_any = true;
+                    continue;
+                }
+                Ok(None) => {}
+            }
             // Human phases serialize: don't start one while others are in flight.
             if matches!(phase.phase_type, PhaseType::Human) && !in_flight.is_empty() {
                 break;
@@ -683,6 +746,9 @@ async fn run_dag(
                     execute_phase(ctx, phase, &snapshot, prior_cost).await;
                 (phase.name.clone(), artifact, cost, err, fatal)
             });
+        }
+        if skipped_any {
+            continue;
         }
 
         let Some((name, artifact, cost, failed_error, fatal)) = running.next().await else {

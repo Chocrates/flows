@@ -20,6 +20,7 @@ fn status_style(status: PhaseStatus) -> Style {
         PhaseStatus::Looping => base.fg(Color::Magenta),
         PhaseStatus::Done => base.fg(Color::Green),
         PhaseStatus::Failed => base.fg(Color::Red),
+        PhaseStatus::Skipped => base.fg(Color::DarkGray).add_modifier(Modifier::DIM),
     }
 }
 

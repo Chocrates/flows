@@ -129,3 +129,31 @@ fn dry_run_produces_report_with_estimates() {
     assert!(report.total_cost_high >= report.total_cost_low);
     assert!(report.total_cost_low > 0.0); // the agent phase costs something
 }
+
+// -- when conditions ---------------------------------------------------------
+
+#[test]
+fn invalid_when_rejected_with_phase_name() {
+    let mut b = agent("fix");
+    b.when = Some("artifacts.review.verdict ==".into());
+    let err = validate_pipeline(&[agent("review"), b]).unwrap_err();
+    assert!(err.contains("\"fix\"") && err.contains("when"), "{err}");
+}
+
+#[test]
+fn valid_when_accepted_in_linear_and_dag() {
+    let mut b = agent("fix");
+    b.when = Some("artifacts.review.verdict not in ('approved', 'ok')".into());
+    assert!(validate_pipeline(&[agent("review"), b.clone()]).is_ok());
+    b.depends_on = vec!["review".into()];
+    assert!(validate_pipeline(&[agent("review"), b]).is_ok());
+}
+
+#[test]
+fn plan_lines_show_when() {
+    let mut b = agent("fix");
+    b.when = Some("artifacts.review.bad".into());
+    let lines = build_plan_lines(&[agent("review"), b]);
+    assert!(lines[1].contains("when: artifacts.review.bad"), "{lines:?}");
+    assert!(!lines[0].contains("when:"));
+}
