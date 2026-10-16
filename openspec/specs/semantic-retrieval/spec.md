@@ -87,7 +87,9 @@ Python, JavaScript, TypeScript, Go) into chunks aligned to top-level definition
 boundaries found by tree-sitter, so a chunk never starts or ends in the middle of
 a definition unless that definition alone exceeds the maximum chunk size. Adjacent
 small definitions SHALL be merged up to the target chunk size; a definition larger
-than the maximum SHALL be split into consecutive line windows; code between
+than the maximum SHALL be split into its member definitions (e.g. the methods of
+an `impl` or class, keeping the enclosing header as embedding context) or, when
+that does not reduce it, into consecutive size-bounded line windows; code between
 definitions (imports, top-level statements) SHALL be chunked as well, so no
 non-blank source line is left unindexed. Files in other languages, or that fail
 to parse, SHALL fall back to fixed line windows.
