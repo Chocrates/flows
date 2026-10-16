@@ -10,18 +10,17 @@
 //!
 //! The chunk index is built **once per flow** (memoized per process, keyed by repo
 //! path + model) and **persisted** at `~/.flows/index/<repo-hash>/<model>.json`.
-//! At flow start the persisted index is reused unless it is absent, the model or
-//! `CHUNKER_VERSION` changed, or the fraction of changed files meets
-//! `retrieval_reindex_threshold` — then it is rebuilt in full (D11). Only the
-//! per-idea query vector is embedded on each retrieve call.
-//!
-//! Follow-up: a content-addressed vector cache to avoid re-embedding on branch
-//! switches.
+//! At flow start it is synced with the repo: vectors are content-addressed by the
+//! embedded text, so only new or changed chunks are embedded, and vectors of
+//! chunks that disappear wait in a bounded spare pool (cheap branch switches).
+//! A model or `CHUNKER_VERSION` change discards them. The index directory is
+//! kept under a size cap (orphans first, then LRU). Only the per-idea query
+//! vector is embedded on each retrieve call.
 
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -34,11 +33,6 @@ const CHUNKER_VERSION: u32 = 2;
 /// model is expensive (and downloads on first use), so we keep one per model for
 /// the lifetime of the process. `embed` needs `&mut self`, hence the Mutex.
 static EMBEDDERS: OnceLock<Mutex<HashMap<String, TextEmbedding>>> = OnceLock::new();
-
-/// Total texts embedded this process — lets tests assert that a reused index does
-/// not re-embed chunks (only the per-idea query).
-#[cfg(test)]
-static EMBED_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Map a config model name to a fastembed model. Unknown/empty → a small, fast
 /// default (all-MiniLM-L6-v2, 384-dim). Kept small so first-run download + CPU
@@ -61,8 +55,6 @@ fn embed_local(model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
             .map_err(|e| format!("load embedding model `{model}`: {e}"))?;
         map.insert(model.to_string(), emb);
     }
-    #[cfg(test)]
-    EMBED_COUNT.fetch_add(texts.len(), std::sync::atomic::Ordering::Relaxed);
     let emb = map.get_mut(model).expect("just inserted");
     emb.embed(texts, None)
         .map_err(|e| format!("embed failed: {e}"))
@@ -149,7 +141,8 @@ pub(crate) fn source_files(repo_root: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// blake3 content hash per source file, `path -> hex`. Drives the churn check.
+/// blake3 content hash per source file, `path -> hex`. An unchanged map lets a
+/// persisted index skip re-chunking.
 fn source_file_hashes(repo_root: &Path) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for (rel, abs) in source_files(repo_root) {
@@ -270,24 +263,47 @@ pub fn pack_chunks(
     picks
 }
 
-/// A chunk plus its embedding — the persisted unit.
+/// A chunk plus its embedding — the persisted unit. `key` is the blake3 of the
+/// exact text embedded, so a vector is reused only for identical input.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredChunk {
     path: String,
     start_line: usize,
     end_line: usize,
     text: String,
+    #[serde(default)]
+    key: String,
     vector: Vec<f32>,
 }
 
-/// The persisted repo index: chunk vectors plus the per-file hashes used to decide
-/// whether to reuse or rebuild.
+/// A vector kept after its chunk left the repo (e.g. on a branch switch), so the
+/// same text coming back needs no re-embedding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SpareVector {
+    key: String,
+    vector: Vec<f32>,
+}
+
+/// Vectors kept in the spare pool (most recently dropped first).
+const MAX_SPARE_VECTORS: usize = MAX_CHUNKS_EMBEDDED;
+
+/// Size cap for `~/.flows/index/`, enforced after each save.
+const INDEX_CACHE_MAX_BYTES: u64 = 1 << 30;
+
+/// Marker in each repo-hash dir holding the canonical repo path, so pruning can
+/// spot deleted checkouts without parsing (large) index files.
+const REPO_MARKER: &str = "repo";
+
+/// The persisted repo index: chunk vectors, the per-file hashes that let an
+/// unchanged repo skip re-chunking, and the spare vector pool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoIndex {
     chunker_version: u32,
     model: String,
     files: BTreeMap<String, String>,
     chunks: Vec<StoredChunk>,
+    #[serde(default)]
+    spare: Vec<SpareVector>,
 }
 
 /// Process-wide memo of built indexes, keyed by `canonical-repo-path|model`, so a
@@ -301,87 +317,132 @@ fn flows_index_root() -> PathBuf {
     home.join(".flows").join("index")
 }
 
-/// On-disk location: `~/.flows/index/<repo-hash>/<model>.json`, repo-hash from the
+/// On-disk location: `<index_root>/<repo-hash>/<model>.json`, repo-hash from the
 /// canonical path so different checkouts of the same path share, and moves don't.
-fn index_path(repo_root: &Path, model: &str) -> PathBuf {
-    let canon = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-    let repo_hash = blake3::hash(canon.to_string_lossy().as_bytes()).to_hex();
+fn index_path_in(index_root: &Path, canon_repo: &Path, model: &str) -> PathBuf {
+    let repo_hash = blake3::hash(canon_repo.to_string_lossy().as_bytes()).to_hex();
     let safe_model = if model.trim().is_empty() {
         "default"
     } else {
         model
     };
-    flows_index_root()
+    index_root
         .join(&repo_hash.as_str()[..16])
         .join(format!("{safe_model}.json"))
 }
 
-/// Fraction of files that differ between two hash maps:
-/// `(changed + added + removed) / max(|old|, |new|)`. 0 when both are empty.
-fn churn(old: &BTreeMap<String, String>, new: &BTreeMap<String, String>) -> f64 {
-    let added = new.keys().filter(|k| !old.contains_key(*k)).count();
-    let removed = old.keys().filter(|k| !new.contains_key(*k)).count();
-    let changed = new
-        .iter()
-        .filter(|(k, v)| old.get(*k).is_some_and(|ov| ov != *v))
-        .count();
-    let denom = old.len().max(new.len());
-    if denom == 0 {
-        0.0
-    } else {
-        (added + removed + changed) as f64 / denom as f64
+fn chunk_key(embed_text: &str) -> String {
+    blake3::hash(embed_text.as_bytes()).to_hex().to_string()
+}
+
+/// Bring `old` up to date with the repo: keep vectors whose key still appears,
+/// embed only new/changed chunks (one `embed` call), and move vectors of chunks
+/// that disappeared to the spare pool. `old` from another model or chunker
+/// version is ignored. Unchanged file hashes return `old` untouched.
+fn sync_index<E>(
+    repo_root: &Path,
+    model: &str,
+    old: Option<RepoIndex>,
+    warnings: &mut Vec<String>,
+    embed: E,
+) -> Result<RepoIndex, String>
+where
+    E: FnOnce(&[String]) -> Result<Vec<Vec<f32>>, String>,
+{
+    let old = old.filter(|o| o.chunker_version == CHUNKER_VERSION && o.model == model);
+    let files = source_file_hashes(repo_root);
+    if let Some(o) = old.as_ref().filter(|o| o.files == files) {
+        return Ok(o.clone());
     }
+    let (chunks, dropped) = chunk_repo_capped(repo_root, MAX_CHUNKS_EMBEDDED);
+    if !dropped.is_empty() {
+        warnings.push(format!(
+            "retrieval index capped at {MAX_CHUNKS_EMBEDDED} chunks; {} file(s) not \
+             fully indexed (e.g. {})",
+            dropped.len(),
+            dropped[0]
+        ));
+    }
+
+    // Every vector we already have: current chunks first, then the spare pool.
+    // Legacy chunks (saved before keys existed) can't be matched and drop out.
+    let mut pool: Vec<(String, Vec<f32>)> = Vec::new();
+    if let Some(o) = old {
+        pool.extend(o.chunks.into_iter().map(|c| (c.key, c.vector)));
+        pool.extend(o.spare.into_iter().map(|s| (s.key, s.vector)));
+    }
+    pool.retain(|(k, _)| !k.is_empty());
+    let mut known: HashMap<String, Vec<f32>> = HashMap::new();
+    for (k, v) in &pool {
+        known.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+
+    let texts: Vec<String> = chunks.iter().map(Chunk::embed_text).collect();
+    let keys: Vec<String> = texts.iter().map(|t| chunk_key(t)).collect();
+    let mut missing: Vec<usize> = Vec::new();
+    let mut queued = HashSet::new();
+    for (i, k) in keys.iter().enumerate() {
+        if !known.contains_key(k) && queued.insert(k.as_str()) {
+            missing.push(i);
+        }
+    }
+    if !missing.is_empty() {
+        let batch: Vec<String> = missing.iter().map(|&i| texts[i].clone()).collect();
+        let vectors = embed(&batch)?;
+        if vectors.len() != batch.len() {
+            return Err(format!(
+                "embedder returned {} vectors for {} chunks",
+                vectors.len(),
+                batch.len()
+            ));
+        }
+        for (&i, v) in missing.iter().zip(vectors) {
+            known.insert(keys[i].clone(), v);
+        }
+    }
+
+    let used: HashSet<&str> = keys.iter().map(String::as_str).collect();
+    let mut spare = Vec::new();
+    let mut seen = HashSet::new();
+    for (key, vector) in pool {
+        if spare.len() >= MAX_SPARE_VECTORS {
+            break;
+        }
+        if !used.contains(key.as_str()) && seen.insert(key.clone()) {
+            spare.push(SpareVector { key, vector });
+        }
+    }
+
+    let stored = chunks
+        .into_iter()
+        .zip(keys)
+        .map(|(c, key)| StoredChunk {
+            vector: known[&key].clone(),
+            path: c.path,
+            start_line: c.start_line,
+            end_line: c.end_line,
+            text: c.text,
+            key,
+        })
+        .collect();
+    Ok(RepoIndex {
+        chunker_version: CHUNKER_VERSION,
+        model: model.to_string(),
+        files,
+        chunks: stored,
+        spare,
+    })
 }
 
 impl RepoIndex {
-    /// Embed the whole repo and assemble a fresh index. Blocking.
-    fn build(
-        repo_root: &Path,
-        model: &str,
-        warnings: &mut Vec<String>,
-    ) -> Result<RepoIndex, String> {
-        let (chunks, dropped) = chunk_repo_capped(repo_root, MAX_CHUNKS_EMBEDDED);
-        if !dropped.is_empty() {
-            warnings.push(format!(
-                "retrieval index capped at {MAX_CHUNKS_EMBEDDED} chunks; {} file(s) not \
-                 fully indexed (e.g. {})",
-                dropped.len(),
-                dropped[0]
-            ));
-        }
-        let files = source_file_hashes(repo_root);
-        let vectors = if chunks.is_empty() {
-            Vec::new()
-        } else {
-            embed_local(
-                model,
-                &chunks.iter().map(Chunk::embed_text).collect::<Vec<_>>(),
-            )?
-        };
-        let stored = chunks
-            .into_iter()
-            .zip(vectors)
-            .map(|(c, vector)| StoredChunk {
-                path: c.path,
-                start_line: c.start_line,
-                end_line: c.end_line,
-                text: c.text,
-                vector,
-            })
-            .collect();
-        Ok(RepoIndex {
-            chunker_version: CHUNKER_VERSION,
-            model: model.to_string(),
-            files,
-            chunks: stored,
-        })
-    }
-
+    /// Load and mark as recently used (mtime drives LRU eviction).
     fn load(path: &Path) -> Option<RepoIndex> {
         let bytes = std::fs::read(path).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        let idx = serde_json::from_slice(&bytes).ok()?;
+        if let Ok(f) = std::fs::File::options().write(true).open(path) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+        Some(idx)
     }
 
     /// Atomic save: write a sibling temp file then rename.
@@ -404,16 +465,86 @@ fn persist_index(idx: &RepoIndex, path: &Path, warnings: &mut Vec<String>) {
     }
 }
 
-/// Load-or-build the repo index, memoized per process (once per flow) and persisted
-/// to disk. Rebuilds when there is no usable persisted index or churn ≥ threshold.
+/// Keep the index cache bounded: delete repo dirs whose marked repo no longer
+/// exists, then the least-recently-used index files until the total is within
+/// `max_bytes`. `keep` (the current repo's dir) is never touched. Best effort.
+fn prune_index_cache(index_root: &Path, keep: &Path, max_bytes: u64) {
+    let Ok(entries) = std::fs::read_dir(index_root) else {
+        return;
+    };
+    let mut candidates: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+    let mut total = 0u64;
+    for dir in entries.flatten().map(|e| e.path()) {
+        if !dir.is_dir() {
+            continue;
+        }
+        if dir != keep {
+            if let Ok(repo) = std::fs::read_to_string(dir.join(REPO_MARKER)) {
+                if !Path::new(repo.trim_end()).exists() {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    continue;
+                }
+            }
+        }
+        let Ok(inner) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for f in inner.flatten() {
+            let Ok(meta) = f.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            total += meta.len();
+            let p = f.path();
+            if dir != keep && p.extension().is_some_and(|e| e == "json") {
+                let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                candidates.push((mtime, meta.len(), p));
+            }
+        }
+    }
+    candidates.sort_by_key(|(mtime, _, _)| *mtime);
+    for (_, len, path) in candidates {
+        if total <= max_bytes {
+            break;
+        }
+        if std::fs::remove_file(&path).is_err() {
+            continue;
+        }
+        total = total.saturating_sub(len);
+        let Some(dir) = path.parent() else { continue };
+        let only_marker = std::fs::read_dir(dir)
+            .map(|d| d.flatten().all(|e| e.file_name() == REPO_MARKER))
+            .unwrap_or(false);
+        if only_marker {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Load-or-sync the repo index, memoized per process (once per flow) and
+/// persisted to disk. Only new/changed chunks are embedded (see [`sync_index`]).
 /// Non-fatal problems (e.g. the index couldn't be persisted) are pushed onto
 /// `warnings` for the caller to surface — this module never prints.
 fn load_or_build_index(
     repo_root: &Path,
     model: &str,
-    threshold: f64,
     warnings: &mut Vec<String>,
 ) -> Result<Arc<RepoIndex>, String> {
+    load_or_build_index_in(&flows_index_root(), repo_root, model, warnings, |t| {
+        embed_local(model, t)
+    })
+}
+
+fn load_or_build_index_in<E>(
+    index_root: &Path,
+    repo_root: &Path,
+    model: &str,
+    warnings: &mut Vec<String>,
+    embed: E,
+) -> Result<Arc<RepoIndex>, String>
+where
+    E: FnOnce(&[String]) -> Result<Vec<Vec<f32>>, String>,
+{
     let canon = repo_root
         .canonicalize()
         .unwrap_or_else(|_| repo_root.to_path_buf());
@@ -424,20 +555,21 @@ fn load_or_build_index(
         return Ok(existing.clone());
     }
 
-    let path = index_path(repo_root, model);
-    let reuse = RepoIndex::load(&path).filter(|idx| {
-        idx.chunker_version == CHUNKER_VERSION
-            && idx.model == model
-            && churn(&idx.files, &source_file_hashes(repo_root)) < threshold
-    });
-    let index = match reuse {
-        Some(idx) => idx,
-        None => {
-            let idx = RepoIndex::build(repo_root, model, warnings)?;
-            persist_index(&idx, &path, warnings);
-            idx
+    let path = index_path_in(index_root, &canon, model);
+    let old = RepoIndex::load(&path);
+    let stamp = |i: &RepoIndex| (i.chunker_version, i.model.clone(), i.files.clone());
+    let on_disk = old.as_ref().map(stamp);
+    let index = sync_index(repo_root, model, old, warnings, embed)?;
+    if on_disk != Some(stamp(&index)) {
+        persist_index(&index, &path, warnings);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::write(
+                dir.join(REPO_MARKER),
+                format!("{}\n", canon.to_string_lossy()),
+            );
+            prune_index_cache(index_root, dir, INDEX_CACHE_MAX_BYTES);
         }
-    };
+    }
     let index = Arc::new(index);
     memo.insert(key, index.clone());
     Ok(index)
@@ -454,13 +586,12 @@ pub fn retrieve(
     model: &str,
     max_chunks: usize,
     budget_tokens: usize,
-    reindex_threshold: f64,
     warnings: &mut Vec<String>,
 ) -> Result<String, String> {
     if max_chunks == 0 || budget_tokens == 0 {
         return Ok(String::new());
     }
-    let index = load_or_build_index(repo_root, model, reindex_threshold, warnings)?;
+    let index = load_or_build_index(repo_root, model, warnings)?;
     if index.chunks.is_empty() {
         return Ok(String::new());
     }
@@ -491,10 +622,9 @@ pub fn rank_paths(
     repo_root: &Path,
     idea: &str,
     model: &str,
-    reindex_threshold: f64,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<String>, String> {
-    let index = load_or_build_index(repo_root, model, reindex_threshold, warnings)?;
+    let index = load_or_build_index(repo_root, model, warnings)?;
     if index.chunks.is_empty() {
         return Ok(Vec::new());
     }
@@ -522,6 +652,7 @@ pub fn rank_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use tempfile::tempdir;
 
     fn empty_index() -> RepoIndex {
@@ -530,6 +661,7 @@ mod tests {
             model: String::new(),
             files: BTreeMap::new(),
             chunks: Vec::new(),
+            spare: Vec::new(),
         }
     }
 
@@ -622,7 +754,6 @@ mod tests {
             "",
             1,
             usize::MAX,
-            0.4,
             &mut Vec::new(),
         )
         .unwrap();
@@ -630,91 +761,172 @@ mod tests {
         assert!(!out.contains("math.rs"));
     }
 
-    /// Persisted index: first flow builds (embeds chunks), a later flow with an
-    /// unchanged repo reuses it (embeds only the query), and a high-churn edit
-    /// forces a rebuild. Ignored (downloads the model on first run).
-    #[test]
-    #[ignore]
-    fn persisted_index_reused_until_churn() {
-        use std::sync::atomic::Ordering;
-        let reset = || {
-            if let Some(m) = INDEXES.get() {
-                crate::lock(m).clear();
-            }
-            EMBED_COUNT.store(0, Ordering::Relaxed);
-        };
-        let d = tempdir().unwrap();
-        let r = d.path();
-        std::fs::write(r.join("a.rs"), "fn login() { check password }").unwrap();
-        std::fs::write(r.join("b.rs"), "fn parse() { read tokens }").unwrap();
+    /// Fake embedder: records every text it is asked to embed.
+    fn fake_embed(
+        log: &RefCell<Vec<String>>,
+    ) -> impl FnOnce(&[String]) -> Result<Vec<Vec<f32>>, String> + '_ {
+        move |texts: &[String]| {
+            log.borrow_mut().extend(texts.iter().cloned());
+            Ok(texts.iter().map(|t| vec![t.len() as f32, 1.0]).collect())
+        }
+    }
 
-        // Build.
-        reset();
-        retrieve(
-            r,
-            "how does login work?",
-            "",
-            1,
-            usize::MAX,
-            0.4,
-            &mut Vec::new(),
-        )
-        .unwrap();
-        let built = EMBED_COUNT.load(Ordering::Relaxed);
-        assert!(built >= 3, "build embeds 2 chunks + query, got {built}");
+    /// One sync through the real load/persist path, with the memo cleared so each
+    /// call behaves like a new flow. Returns the texts embedded.
+    fn sync_once(index_root: &Path, repo: &Path, model: &str) -> (Arc<RepoIndex>, Vec<String>) {
+        if let Some(m) = INDEXES.get() {
+            crate::lock(m).clear();
+        }
+        let log = RefCell::new(Vec::new());
+        let idx =
+            load_or_build_index_in(index_root, repo, model, &mut Vec::new(), fake_embed(&log))
+                .unwrap();
+        (idx, log.into_inner())
+    }
 
-        // Reuse from disk (memo cleared, repo unchanged) → only the query embeds.
-        reset();
-        retrieve(
-            r,
-            "how does login work?",
-            "",
-            1,
-            usize::MAX,
-            0.4,
-            &mut Vec::new(),
-        )
-        .unwrap();
-        assert_eq!(
-            EMBED_COUNT.load(Ordering::Relaxed),
-            1,
-            "reuse should embed only the query"
-        );
-
-        // High churn (1 of 2 files changed = 0.5 ≥ 0.4) → rebuild.
-        std::fs::write(r.join("a.rs"), "fn login() { verify OTP and password now }").unwrap();
-        reset();
-        retrieve(
-            r,
-            "how does login work?",
-            "",
-            1,
-            usize::MAX,
-            0.4,
-            &mut Vec::new(),
-        )
-        .unwrap();
-        assert!(
-            EMBED_COUNT.load(Ordering::Relaxed) >= 3,
-            "high churn should rebuild (re-embed chunks)"
-        );
+    fn fn_src(name: &str) -> String {
+        format!("fn {name}() {{\n    let x = 1;\n}}\n")
     }
 
     #[test]
-    fn churn_counts_add_remove_change() {
-        let mut old = BTreeMap::new();
-        old.insert("a".into(), "h1".to_string());
-        old.insert("b".into(), "h2".to_string());
-        // unchanged repo → 0.
-        assert_eq!(churn(&old, &old), 0.0);
-        // change b, add c → (1 changed + 1 added) / max(2,3) = 2/3.
-        let mut new = BTreeMap::new();
-        new.insert("a".into(), "h1".to_string());
-        new.insert("b".into(), "h2-mod".to_string());
-        new.insert("c".into(), "h3".to_string());
-        assert!((churn(&old, &new) - 2.0 / 3.0).abs() < 1e-9);
-        // both empty → 0 (no divide-by-zero).
-        assert_eq!(churn(&BTreeMap::new(), &BTreeMap::new()), 0.0);
+    fn sync_embeds_only_new_or_changed_chunks() {
+        let home = tempdir().unwrap();
+        let d = tempdir().unwrap();
+        let r = d.path();
+        std::fs::write(r.join("a.rs"), fn_src("login")).unwrap();
+        std::fs::write(r.join("b.rs"), fn_src("parse")).unwrap();
+
+        let (idx, embedded) = sync_once(home.path(), r, "m");
+        assert_eq!(embedded.len(), 2);
+        assert!(idx.chunks.iter().all(|c| !c.key.is_empty()));
+
+        // New flow, unchanged repo: nothing embedded.
+        let (_, embedded) = sync_once(home.path(), r, "m");
+        assert!(embedded.is_empty(), "{embedded:?}");
+
+        // Edit one file: only its chunk is embedded, and the index sees the edit.
+        std::fs::write(r.join("a.rs"), fn_src("login_with_otp")).unwrap();
+        let (idx, embedded) = sync_once(home.path(), r, "m");
+        assert_eq!(embedded.len(), 1);
+        assert!(embedded[0].contains("login_with_otp"));
+        assert!(idx.chunks.iter().any(|c| c.text.contains("login_with_otp")));
+        assert!(!idx.chunks.iter().any(|c| c.text.contains("fn login()")));
+
+        // "Switch back": the old text returns from the spare pool, no embedding.
+        std::fs::write(r.join("a.rs"), fn_src("login")).unwrap();
+        let (idx, embedded) = sync_once(home.path(), r, "m");
+        assert!(embedded.is_empty(), "{embedded:?}");
+        assert!(idx.chunks.iter().any(|c| c.text.contains("fn login()")));
+        assert!(idx.spare.len() == 1, "otp version now spare");
+
+        // Different model: everything is embedded again.
+        let (_, embedded) = sync_once(home.path(), r, "other");
+        assert_eq!(embedded.len(), 2);
+    }
+
+    #[test]
+    fn legacy_index_without_keys_is_reembedded_once() {
+        let home = tempdir().unwrap();
+        let d = tempdir().unwrap();
+        let r = d.path();
+        std::fs::write(r.join("a.rs"), fn_src("login")).unwrap();
+        let canon = r.canonicalize().unwrap();
+        let path = index_path_in(home.path(), &canon, "m");
+        // Saved by an older flows: no `key` / `spare`, files hash stale.
+        let legacy = serde_json::json!({
+            "chunker_version": CHUNKER_VERSION,
+            "model": "m",
+            "files": {"a.rs": "stale"},
+            "chunks": [{"path": "a.rs", "start_line": 1, "end_line": 3,
+                        "text": "fn login() {", "vector": [1.0, 2.0]}],
+        });
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, legacy.to_string()).unwrap();
+        let (_, embedded) = sync_once(home.path(), r, "m");
+        assert_eq!(embedded.len(), 1);
+        let (_, embedded) = sync_once(home.path(), r, "m");
+        assert!(embedded.is_empty());
+    }
+
+    #[test]
+    fn chunker_version_change_is_persisted() {
+        let home = tempdir().unwrap();
+        let d = tempdir().unwrap();
+        let r = d.path();
+        std::fs::write(r.join("a.rs"), fn_src("login")).unwrap();
+        sync_once(home.path(), r, "m");
+        let path = index_path_in(home.path(), &r.canonicalize().unwrap(), "m");
+        let mut idx = RepoIndex::load(&path).unwrap();
+        idx.chunker_version = CHUNKER_VERSION - 1;
+        idx.save(&path).unwrap();
+        let (_, embedded) = sync_once(home.path(), r, "m");
+        assert_eq!(embedded.len(), 1);
+        assert_eq!(
+            RepoIndex::load(&path).unwrap().chunker_version,
+            CHUNKER_VERSION
+        );
+    }
+
+    fn cache_entry(root: &Path, name: &str, repo: &Path, bytes: usize, age_secs: u64) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(REPO_MARKER), format!("{}\n", repo.display())).unwrap();
+        let f = dir.join("default.json");
+        std::fs::write(&f, vec![b'x'; bytes]).unwrap();
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+        dir
+    }
+
+    #[test]
+    fn prune_removes_orphans_then_lru_but_keeps_current() {
+        let root = tempdir().unwrap();
+        let live = tempdir().unwrap();
+        let gone = live.path().join("deleted-checkout");
+        let orphan = cache_entry(root.path(), "orphan", &gone, 10, 0);
+        let oldest = cache_entry(root.path(), "oldest", live.path(), 1000, 300);
+        let middle = cache_entry(root.path(), "middle", live.path(), 1000, 200);
+        let newest = cache_entry(root.path(), "newest", live.path(), 1000, 100);
+        // The current repo is the oldest of all, but must survive.
+        let current = cache_entry(root.path(), "current", live.path(), 1000, 400);
+
+        // Cap fits roughly three entries (markers count too).
+        prune_index_cache(root.path(), &current, 3200);
+        assert!(!orphan.exists(), "orphan pruned");
+        assert!(!oldest.exists(), "LRU evicted first");
+        assert!(middle.exists() && newest.exists() && current.exists());
+
+        // Under the cap: nothing else goes.
+        prune_index_cache(root.path(), &current, 1 << 20);
+        assert!(middle.exists() && newest.exists());
+    }
+
+    #[test]
+    fn load_marks_index_recently_used() {
+        let root = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let dir = cache_entry(root.path(), "x", repo.path(), 0, 1000);
+        let f = dir.join("default.json");
+        empty_index().save(&f).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(1000))
+            .unwrap();
+        assert!(RepoIndex::load(&f).is_some());
+        let age = std::fs::metadata(&f)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap();
+        assert!(age.as_secs() < 60);
     }
 
     #[test]

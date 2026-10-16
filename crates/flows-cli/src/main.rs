@@ -728,7 +728,6 @@ tools:
 #   retrieval_model: ""              # fastembed model (default all-MiniLM-L6-v2)
 #   retrieval_max_chunks: 8         # hard cap on injected chunks
 #   retrieval_budget_fraction: 0.25  # share of the model's window for retrieved code
-#   retrieval_reindex_threshold: 0.4 # repo churn fraction that forces a reindex
 #   budgeting: false                 # trim old tool results when near the window
 #   budget_fraction: 0.6
 #   unknown_window_tokens: 8000      # assumed window when a model's is unknown

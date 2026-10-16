@@ -531,8 +531,8 @@ pub struct ContextConfig {
     /// `unknown_window_tokens`.
     #[serde(default = "default_retrieval_budget_fraction")]
     pub retrieval_budget_fraction: f64,
-    /// Fraction of files that must change before the persisted retrieval index is
-    /// rebuilt in full (else it is reused as-is). 0.0 = always rebuild.
+    /// Deprecated and ignored: the retrieval index now re-embeds only changed
+    /// chunks on every flow. Still parsed so existing configs keep loading.
     #[serde(default = "default_reindex_threshold")]
     pub retrieval_reindex_threshold: f64,
     /// When `budgeting` is on, trim old tool results once estimated request tokens

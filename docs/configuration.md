@@ -154,7 +154,6 @@ context:
   retrieval_model: minilm            # local embed model (empty → all-MiniLM-L6-v2)
   retrieval_max_chunks: 8            # hard cap on injected chunks
   retrieval_budget_fraction: 0.25    # retrieved code ≤ this × the model's window
-  retrieval_reindex_threshold: 0.4   # ≥40% files changed → rebuild the index
   budget_fraction: 0.6               # trim when est. tokens exceed this × window
   unknown_window_tokens: 8000        # assumed window when the model's is unknown
   repo_map_max_tokens: 1500
@@ -174,8 +173,10 @@ context:
   best matches are packed into `retrieval_budget_fraction` of the model's
   context window (or `unknown_window_tokens`), at most `retrieval_max_chunks`.
 - **Retrieval is fully local.** Embeddings run in-process (`fastembed`/ONNX, a
-  small model downloaded once) — no server, no cloud, no key. The index is built
-  once per flow, persisted under `~/.flows/index/`, and rebuilt only when enough
-  files change.
+  small model downloaded once) — no server, no cloud, no key. The index is synced
+  once per flow and persisted under `~/.flows/index/`: only new or changed code
+  is re-embedded, and switching back to a recently indexed branch is free. The
+  directory is capped at 1 GiB (indexes of deleted checkouts go first, then the
+  least recently used). `retrieval_reindex_threshold` is deprecated and ignored.
 - **Measure before enabling.** Use [`flows eval`](./eval.md) to A/B a config
   against baseline on your model. "Useful" is a measured delta, not an assumption.

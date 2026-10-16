@@ -872,12 +872,11 @@ async fn build_pushed_context(
     if context.retrieval {
         // Local ONNX embedding — blocking CPU work (and a first-run model
         // download), so run it off the async runtime.
-        let (root, idea_s, model, max_chunks, threshold) = (
+        let (root, idea_s, model, max_chunks) = (
             repo_root.to_path_buf(),
             idea.to_string(),
             context.retrieval_model.clone(),
             context.retrieval_max_chunks,
-            context.retrieval_reindex_threshold,
         );
         let budget = retrieval_budget(llm_model, context);
         let (result, warnings) = tokio::task::spawn_blocking(move || {
@@ -888,7 +887,6 @@ async fn build_pushed_context(
                 &model,
                 max_chunks,
                 budget,
-                threshold,
                 &mut warnings,
             );
             (r, warnings)
