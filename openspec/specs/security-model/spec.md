@@ -30,6 +30,32 @@ process secrets are not exposed to the command.
 - **WHEN** a sandboxed command attempts to write outside the repository root
 - **THEN** the write is denied by the sandbox.
 
+### Requirement: No host IPC from the sandbox
+
+On Linux the system SHALL deny creation of unix (`AF_UNIX`) sockets and
+io_uring instances inside the sandbox with a seccomp filter, and deny syscalls
+made through a foreign ABI, while still allowing `socketpair()` and inet sockets
+so builds, package fetches, and in-process IPC keep working. A read-only
+filesystem does not stop a process from connecting to a unix socket, and host
+services reachable that way (the systemd/D-Bus session bus, container engines,
+the display server, abstract-namespace sockets) can run code outside the
+sandbox.
+
+#### Scenario: Session-bus escape attempt
+
+- **WHEN** a sandboxed command tries to reach the user's session bus (e.g. `systemd-run --user …`) or any other unix socket on the host
+- **THEN** socket creation fails with a permission error and nothing runs outside the sandbox.
+
+#### Scenario: Builds and IPC still work
+
+- **WHEN** a sandboxed command fetches dependencies over the network or uses `socketpair()`-based IPC
+- **THEN** it succeeds as before.
+
+#### Scenario: macOS parity (known gap)
+
+- **WHEN** commands run under the macOS Seatbelt backend
+- **THEN** unix sockets and mach-lookup are currently still allowed by the profile; closing this requires a profile change verified on macOS and is tracked on the roadmap.
+
 ### Requirement: Repository-scoped file tools
 
 The system SHALL confine the `read_file`, `write_file`, `list_files`, and

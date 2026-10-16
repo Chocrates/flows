@@ -38,6 +38,8 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 
 ### Sandbox & tools
 
+- **macOS sandbox IPC parity** — the Seatbelt profile allows `network*` (including unix sockets) and all `mach-lookup`, so a sandboxed command may reach launchd/host services. Linux denies unix sockets via seccomp; macOS needs `(allow network* (remote ip))`-style rules and a mach-lookup allowlist, verified on a Mac.
+- **Home-directory secrets are readable** — the sandbox binds `/` read-only, so `~/.ssh`, `~/.aws`, `~/.config/gh`, etc. can be read (and with shared network, exfiltrated). Consider masking known credential dirs with tmpfs.
 - **Resource limits** in the sandbox (memory / pids / CPU via rlimits or cgroups).
 - **Optional network isolation** for shell commands (opt-in `--unshare-net`).
 - **Brave / Serper** keyed web-search backends.

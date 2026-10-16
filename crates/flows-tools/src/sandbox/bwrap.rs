@@ -2,16 +2,28 @@
 //!
 //! The whole filesystem is bound read-only, the repo re-bound read-write and
 //! made the working directory, `/tmp` a private tmpfs, and user/ipc/pid/uts/
-//! cgroup namespaces unshared. Network is left shared so package/build commands
-//! can fetch dependencies. Requires unprivileged user namespaces.
+//! cgroup namespaces unshared, and a seccomp filter (see `seccomp`) denies unix
+//! sockets so the command can't reach host services (session bus, container
+//! engines, display server) that would run code outside the sandbox. Network is
+//! left shared so package/build commands can fetch dependencies. Requires
+//! unprivileged user namespaces.
 
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use super::{minimal_env, tool_cache_dir, which, Sandbox};
+use super::{minimal_env, seccomp, tool_cache_dir, which, Sandbox};
 
 pub struct BwrapSandbox;
+
+/// Child-side fd number the seccomp program is handed to bwrap on.
+const SECCOMP_FD: i32 = 999;
+
+fn seccomp_program() -> Option<&'static [u8]> {
+    static PROG: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+    PROG.get_or_init(seccomp::program).as_deref()
+}
 
 impl Sandbox for BwrapSandbox {
     fn name(&self) -> &'static str {
@@ -72,12 +84,50 @@ impl Sandbox for BwrapSandbox {
             argv.push(v);
         }
 
+        if seccomp_program().is_some() {
+            argv.push("--seccomp".into());
+            argv.push(SECCOMP_FD.to_string());
+        }
+
         argv.extend(
             ["--", "/bin/sh", "-c", command]
                 .iter()
                 .map(|s| s.to_string()),
         );
         argv
+    }
+
+    fn prepare(&self, cmd: &mut Command) {
+        let Some(prog) = seccomp_program() else {
+            return;
+        };
+        // SAFETY: runs in the forked child before exec; only async-signal-safe
+        // syscalls (memfd_create/write/lseek/dup2/close) on a pre-built buffer.
+        unsafe {
+            cmd.pre_exec(move || {
+                let fd = libc::memfd_create(c"flows-seccomp".as_ptr(), 0);
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut off = 0;
+                while off < prog.len() {
+                    let n = libc::write(fd, prog[off..].as_ptr().cast(), prog.len() - off);
+                    if n <= 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    off += n as usize;
+                }
+                if libc::lseek(fd, 0, libc::SEEK_SET) < 0
+                    || (fd != SECCOMP_FD && libc::dup2(fd, SECCOMP_FD) < 0)
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if fd != SECCOMP_FD {
+                    libc::close(fd);
+                }
+                Ok(())
+            });
+        }
     }
 
     fn unavailable_reason(&self) -> &'static str {

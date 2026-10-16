@@ -165,3 +165,67 @@ fn real_sandbox_confines_writes_to_repo() {
     let _ = run_confined(&format!("rm -f {}", victim.display()), &repo, 30, 20_000);
     assert!(victim.exists(), "delete outside repo should be blocked");
 }
+
+// -- seccomp: no unix sockets inside the sandbox -----------------------------
+
+#[cfg(target_os = "linux")]
+fn python3_available() -> bool {
+    std::process::Command::new("python3")
+        .arg("-c")
+        .arg("pass")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn wrap_command_applies_seccomp() {
+    let d = tempdir().unwrap();
+    let argv = wrap_command(d.path(), "true");
+    if flows_tools::sandbox::seccomp::SUPPORTED {
+        assert_eq!(arg_after(&argv, "--seccomp", 1), ["999"]);
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn real_sandbox_blocks_unix_socket_connect() {
+    if !sandbox_available() || !python3_available() {
+        eprintln!("SKIP real_sandbox_blocks_unix_socket_connect: needs bwrap + python3");
+        return;
+    }
+    let d = tempdir().unwrap();
+    // A listening socket the host can reach — the sandbox must not.
+    let _listener = std::os::unix::net::UnixListener::bind(d.path().join("host.sock")).unwrap();
+    let out = run_confined(
+        "python3 -c \"import socket; s=socket.socket(socket.AF_UNIX); s.connect('host.sock'); print('CONNECTED')\"",
+        d.path(),
+        30,
+        10_000,
+    )
+    .unwrap();
+    assert!(!out.contains("CONNECTED"), "unix socket reachable: {out}");
+    assert!(out.contains("PermissionError"), "unexpected: {out}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn real_sandbox_keeps_socketpair_and_inet() {
+    if !sandbox_available() || !python3_available() {
+        eprintln!("SKIP real_sandbox_keeps_socketpair_and_inet: needs bwrap + python3");
+        return;
+    }
+    let d = tempdir().unwrap();
+    let out = run_confined(
+        "python3 -c \"import socket; a,b=socket.socketpair(); a.send(b'ok'); print(b.recv(2).decode()); socket.socket(socket.AF_INET).close(); print('INET')\"",
+        d.path(),
+        30,
+        10_000,
+    )
+    .unwrap();
+    assert!(
+        out.contains("ok") && out.contains("INET"),
+        "unexpected: {out}"
+    );
+}

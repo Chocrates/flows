@@ -24,6 +24,8 @@ use crate::error::{ToolError, ToolResult};
 mod bwrap;
 #[cfg(target_os = "macos")]
 mod seatbelt;
+#[cfg(target_os = "linux")]
+pub mod seccomp;
 
 // Cold compiles are the long pole: a first Bevy build pulls a large dependency
 // tree and can run well past 120s. Default generously (15 min) so builds don't
@@ -43,6 +45,9 @@ pub trait Sandbox: Send + Sync {
     fn wrap(&self, repo_root: &Path, command: &str) -> Vec<String>;
     /// Message shown when [`available`](Self::available) is false.
     fn unavailable_reason(&self) -> &'static str;
+    /// Last-moment setup on the spawn (e.g. handing the child a seccomp program
+    /// fd that [`wrap`](Self::wrap) referenced). Default: nothing.
+    fn prepare(&self, _cmd: &mut Command) {}
 }
 
 /// The backend for the current platform.
@@ -231,7 +236,9 @@ pub fn run_confined(
 }
 
 fn spawn_with_timeout(argv: &[String], cwd: &Path, timeout_secs: u64) -> std::io::Result<Output> {
-    let mut child = Command::new(&argv[0])
+    let mut cmd = Command::new(&argv[0]);
+    backend().prepare(&mut cmd);
+    let mut child = cmd
         .args(&argv[1..])
         .current_dir(cwd)
         // Clear the host env and inject only the minimal set. On Linux bwrap
