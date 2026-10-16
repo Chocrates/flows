@@ -326,12 +326,23 @@ impl RepoIndex {
     }
 }
 
+/// Best-effort save: a failure costs only cross-flow reuse, so it becomes a
+/// warning rather than an error.
+fn persist_index(idx: &RepoIndex, path: &Path, warnings: &mut Vec<String>) {
+    if let Err(e) = idx.save(path) {
+        warnings.push(format!("retrieval index save skipped: {e}"));
+    }
+}
+
 /// Load-or-build the repo index, memoized per process (once per flow) and persisted
 /// to disk. Rebuilds when there is no usable persisted index or churn ≥ threshold.
+/// Non-fatal problems (e.g. the index couldn't be persisted) are pushed onto
+/// `warnings` for the caller to surface — this module never prints.
 fn load_or_build_index(
     repo_root: &Path,
     model: &str,
     threshold: f64,
+    warnings: &mut Vec<String>,
 ) -> Result<Arc<RepoIndex>, String> {
     let canon = repo_root
         .canonicalize()
@@ -353,9 +364,7 @@ fn load_or_build_index(
         Some(idx) => idx,
         None => {
             let idx = RepoIndex::build(repo_root, model)?;
-            if let Err(e) = idx.save(&path) {
-                eprintln!("  retrieval index save skipped: {e}");
-            }
+            persist_index(&idx, &path, warnings);
             idx
         }
     };
@@ -367,17 +376,19 @@ fn load_or_build_index(
 /// Retrieve the top-`max_chunks` chunks most relevant to `idea` as an injectable
 /// string (empty when nothing to retrieve). Uses the per-flow persisted index for
 /// chunk vectors; only the idea is embedded here. Blocking — run off the runtime.
+/// Non-fatal problems are appended to `warnings`.
 pub fn retrieve(
     repo_root: &Path,
     idea: &str,
     model: &str,
     max_chunks: usize,
     reindex_threshold: f64,
+    warnings: &mut Vec<String>,
 ) -> Result<String, String> {
     if max_chunks == 0 {
         return Ok(String::new());
     }
-    let index = load_or_build_index(repo_root, model, reindex_threshold)?;
+    let index = load_or_build_index(repo_root, model, reindex_threshold, warnings)?;
     if index.chunks.is_empty() {
         return Ok(String::new());
     }
@@ -401,14 +412,15 @@ pub fn retrieve(
 
 /// Ranked, de-duplicated file paths (most relevant first) by best-scoring chunk —
 /// for the deterministic retrieval eval. Blocking (embeds the idea; builds/loads
-/// the index).
+/// the index). Non-fatal problems are appended to `warnings`.
 pub fn rank_paths(
     repo_root: &Path,
     idea: &str,
     model: &str,
     reindex_threshold: f64,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<String>, String> {
-    let index = load_or_build_index(repo_root, model, reindex_threshold)?;
+    let index = load_or_build_index(repo_root, model, reindex_threshold, warnings)?;
     if index.chunks.is_empty() {
         return Ok(Vec::new());
     }
@@ -438,6 +450,37 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn empty_index() -> RepoIndex {
+        RepoIndex {
+            chunker_version: CHUNKER_VERSION,
+            model: String::new(),
+            files: BTreeMap::new(),
+            chunks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn persist_failure_is_a_warning_not_an_error() {
+        // Parent "directory" is a regular file, so create_dir_all fails.
+        let d = tempdir().unwrap();
+        let blocker = d.path().join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        let mut warnings = Vec::new();
+        persist_index(&empty_index(), &blocker.join("idx.json"), &mut warnings);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("index save skipped"), "{warnings:?}");
+    }
+
+    #[test]
+    fn persist_success_leaves_no_warning() {
+        let d = tempdir().unwrap();
+        let path = d.path().join("sub").join("idx.json");
+        let mut warnings = Vec::new();
+        persist_index(&empty_index(), &path, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(RepoIndex::load(&path).is_some());
+    }
+
     /// End-to-end local embedding: downloads the default model on first run and
     /// ranks a query against real chunks. Ignored by default (network + ~90MB
     /// download + CPU); run with `cargo test -- --ignored retrieve_local`.
@@ -452,7 +495,15 @@ mod tests {
         )
         .unwrap();
         std::fs::write(r.join("math.rs"), "fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
-        let out = retrieve(r, "how are auth tokens validated?", "", 1, 0.4).unwrap();
+        let out = retrieve(
+            r,
+            "how are auth tokens validated?",
+            "",
+            1,
+            0.4,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert!(out.contains("auth.rs"), "expected auth chunk, got: {out}");
         assert!(!out.contains("math.rs"));
     }
@@ -477,13 +528,13 @@ mod tests {
 
         // Build.
         reset();
-        retrieve(r, "how does login work?", "", 1, 0.4).unwrap();
+        retrieve(r, "how does login work?", "", 1, 0.4, &mut Vec::new()).unwrap();
         let built = EMBED_COUNT.load(Ordering::Relaxed);
         assert!(built >= 3, "build embeds 2 chunks + query, got {built}");
 
         // Reuse from disk (memo cleared, repo unchanged) → only the query embeds.
         reset();
-        retrieve(r, "how does login work?", "", 1, 0.4).unwrap();
+        retrieve(r, "how does login work?", "", 1, 0.4, &mut Vec::new()).unwrap();
         assert_eq!(
             EMBED_COUNT.load(Ordering::Relaxed),
             1,
@@ -493,7 +544,7 @@ mod tests {
         // High churn (1 of 2 files changed = 0.5 ≥ 0.4) → rebuild.
         std::fs::write(r.join("a.rs"), "fn login() { verify OTP and password now }").unwrap();
         reset();
-        retrieve(r, "how does login work?", "", 1, 0.4).unwrap();
+        retrieve(r, "how does login work?", "", 1, 0.4, &mut Vec::new()).unwrap();
         assert!(
             EMBED_COUNT.load(Ordering::Relaxed) >= 3,
             "high churn should rebuild (re-embed chunks)"

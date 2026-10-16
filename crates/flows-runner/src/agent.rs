@@ -815,7 +815,12 @@ fn append_transcript_round(
 ///
 /// Returns "" when neither is enabled/available. Retrieval failures degrade to an
 /// empty retrieval section (logged to stderr) rather than aborting the phase.
-async fn build_pushed_context(context: &ContextConfig, repo_root: &Path, idea: &str) -> String {
+async fn build_pushed_context(
+    context: &ContextConfig,
+    repo_root: &Path,
+    idea: &str,
+    callbacks: &dyn AgentCallbacks,
+) -> String {
     let mut out = String::new();
 
     if context.oracle {
@@ -842,11 +847,23 @@ async fn build_pushed_context(context: &ContextConfig, repo_root: &Path, idea: &
             context.retrieval_max_chunks,
             context.retrieval_reindex_threshold,
         );
-        let result = tokio::task::spawn_blocking(move || {
-            crate::retrieval::retrieve(&root, &idea_s, &model, max_chunks, threshold)
+        let (result, warnings) = tokio::task::spawn_blocking(move || {
+            let mut warnings = Vec::new();
+            let r = crate::retrieval::retrieve(
+                &root,
+                &idea_s,
+                &model,
+                max_chunks,
+                threshold,
+                &mut warnings,
+            );
+            (r, warnings)
         })
         .await
-        .unwrap_or_else(|e| Err(format!("retrieval task panicked: {e}")));
+        .unwrap_or_else(|e| (Err(format!("retrieval task panicked: {e}")), Vec::new()));
+        for w in warnings {
+            callbacks.on_note(&format!("⚠ {w}"));
+        }
         match result {
             Ok(chunks) if !chunks.trim().is_empty() => {
                 out.push_str(
@@ -858,7 +875,7 @@ async fn build_pushed_context(context: &ContextConfig, repo_root: &Path, idea: &
                 out.push_str("\n\n");
             }
             Ok(_) => {}
-            Err(e) => eprintln!("  retrieval skipped: {e}"),
+            Err(e) => callbacks.on_note(&format!("⚠ retrieval skipped: {e}")),
         }
     }
 
@@ -926,7 +943,7 @@ pub async fn run_agent_phase(
     // that can't call tools still gets grounding. Two sources feed one variable:
     // the eval oracle (labeled reference files) and semantic retrieval (top-k
     // embedded chunks). Concatenated when both are on.
-    let pushed_context = build_pushed_context(context, repo_root, idea).await;
+    let pushed_context = build_pushed_context(context, repo_root, idea, callbacks).await;
     ctx.insert("pushed_context".into(), json!(pushed_context));
     // Per-phase scoping (2.6): expose prior artifacts exactly **once**, as the
     // `prior_artifacts` map. Templates self-select what they need (`.get('plan')`,

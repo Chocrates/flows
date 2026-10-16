@@ -1678,9 +1678,13 @@ pub fn cmd_retrieval(
             &targets,
             &mut agg,
         );
-        match retrieval::rank_paths(work.path(), &f.spec.task, model, 0.4) {
+        let mut warnings = Vec::new();
+        match retrieval::rank_paths(work.path(), &f.spec.task, model, 0.4, &mut warnings) {
             Ok(rr) => report_row(&f.name, "rag", &rr, &targets, &mut agg),
             Err(e) => eprintln!("  {} rag skipped: {e}", f.name),
+        }
+        for w in warnings {
+            eprintln!("  {}: {w}", f.name);
         }
     }
 
