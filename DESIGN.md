@@ -241,6 +241,11 @@ thinking tokens are billed as output tokens.
 
 Disable per-phase (e.g. a cheap fix-loop phase that doesn't need deep
 reasoning): add `thinking: false` under that phase in the template YAML.
+On OpenAI-compatible endpoints other than `api.openai.com`, an explicit
+`thinking: false` is sent as `chat_template_kwargs: {enable_thinking: false}`
+(honoured by Qwen-style chat templates; unknown kwargs are ignored by others).
+Budgets and `reasoning_effort` are not sent there — the probed vLLM server
+ignored both.
 
 ---
 

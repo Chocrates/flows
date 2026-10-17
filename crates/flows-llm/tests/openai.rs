@@ -13,6 +13,7 @@ fn req(messages: Vec<Message>) -> CompletionRequest {
         max_tokens: 4096,
         thinking_budget: None,
         no_tool_calls: false,
+        disable_thinking: false,
     }
 }
 
@@ -190,4 +191,29 @@ fn parse_reads_reasoning_content() {
     });
     let c = parse_response(&resp).unwrap();
     assert_eq!(c.reasoning.as_deref(), Some("hmm"));
+}
+
+#[test]
+fn thinking_off_only_reaches_local_servers() {
+    use flows_llm::openai::apply_endpoint_options;
+    let mut r = req(vec![Message::user("hi")]);
+    let local = "http://192.168.1.2:8000/v1";
+    let mut body = build_body(&r);
+    apply_endpoint_options(&mut body, &r, local);
+    assert!(
+        body.get("chat_template_kwargs").is_none(),
+        "default sends nothing"
+    );
+
+    r.disable_thinking = true;
+    let mut body = build_body(&r);
+    apply_endpoint_options(&mut body, &r, local);
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+
+    let mut body = build_body(&r);
+    apply_endpoint_options(&mut body, &r, "https://api.openai.com/v1");
+    assert!(
+        body.get("chat_template_kwargs").is_none(),
+        "official API rejects it"
+    );
 }

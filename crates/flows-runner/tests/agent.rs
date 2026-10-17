@@ -822,6 +822,7 @@ fn offline_bash_tells_the_model() {
 struct Seen {
     tools: Vec<String>,
     no_tool_calls: bool,
+    disable_thinking: bool,
     last: String,
 }
 
@@ -849,6 +850,7 @@ impl Provider for Recorder {
         self.seen.lock().unwrap().push(Seen {
             tools: req.tools.iter().map(|t| t.name.clone()).collect(),
             no_tool_calls: req.no_tool_calls,
+            disable_thinking: req.disable_thinking,
             last: req
                 .messages
                 .last()
@@ -1093,4 +1095,32 @@ async fn exploring_only_known_files_is_nudged_then_forced() {
     assert!(seen[..12].iter().all(|s| !s.no_tool_calls));
     assert!(seen[12].no_tool_calls, "{seen:?}");
     assert_eq!(seen.len(), 13);
+}
+
+#[tokio::test]
+async fn thinking_false_reaches_the_request() {
+    let mut phase = read_only_phase();
+    let provider = Recorder::new(vec![artifact_json(r#"{"ok": true}"#)]);
+    run_with(
+        &phase,
+        Path::new("/tmp"),
+        &provider,
+        &WebSearchConfig::default(),
+    )
+    .await;
+    assert!(
+        !provider.seen()[0].disable_thinking,
+        "default leaves thinking alone"
+    );
+
+    phase.thinking = Some(false);
+    let provider = Recorder::new(vec![artifact_json(r#"{"ok": true}"#)]);
+    run_with(
+        &phase,
+        Path::new("/tmp"),
+        &provider,
+        &WebSearchConfig::default(),
+    )
+    .await;
+    assert!(provider.seen()[0].disable_thinking);
 }

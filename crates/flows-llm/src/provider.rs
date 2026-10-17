@@ -205,7 +205,8 @@ impl OpenAiProvider {
 #[async_trait]
 impl Provider for OpenAiProvider {
     async fn complete(&self, req: &CompletionRequest) -> Result<Completion, LlmError> {
-        let body = crate::openai::build_body(req);
+        let mut body = crate::openai::build_body(req);
+        crate::openai::apply_endpoint_options(&mut body, req, &self.api_base);
         let url = format!("{}/chat/completions", self.api_base);
         let resp = send_with_retry(&self.retry, || {
             self.client
@@ -226,6 +227,7 @@ impl Provider for OpenAiProvider {
         on_thinking: Emit<'_>,
     ) -> Result<Completion, LlmError> {
         let mut body = crate::openai::build_body(req);
+        crate::openai::apply_endpoint_options(&mut body, req, &self.api_base);
         body.insert("stream".into(), Value::Bool(true));
         // Ask for usage in the final chunk (OpenAI honors; llama.cpp/others ignore).
         body.insert(

@@ -60,6 +60,11 @@ phases:
 - A profile carries its own `model` and optional `api_base`, `api_key`,
   `thinking`; omit `api_base` to inherit the default endpoint (two models on the
   same endpoint just need a `model:`).
+- `thinking: false` (on a profile, `llm`, or a phase) turns reasoning off. For
+  Anthropic models it drops the thinking budget; for a local OpenAI-compatible
+  server (vLLM, SGLang serving Qwen3-style models) it sends
+  `chat_template_kwargs: {enable_thinking: false}`. It is never sent to
+  `api.openai.com`. Useful for phases that over-deliberate, e.g. a small plan.
 - A `phase.model` / `llm.model` that **doesn't** name a profile is treated as a
   literal model string on the default endpoint.
 - Each profile's key is its explicit `api_key`, else the dialect default. `flows

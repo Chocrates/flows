@@ -144,6 +144,10 @@ pub struct CompletionRequest {
     /// Keep `tools` declared (history may hold tool calls) but forbid calling
     /// them this turn, so the model must answer in text.
     pub no_tool_calls: bool,
+    /// Thinking was explicitly turned off for this phase. Anthropic needs nothing
+    /// (no budget = no thinking); local OpenAI-compatible servers get it as a
+    /// chat-template switch.
+    pub disable_thinking: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

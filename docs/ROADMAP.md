@@ -43,6 +43,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Template registry: `flows templates install <git>[//path][@ref]` pins to a commit, reviews before writing, and confines untrusted templates (scripts sandboxed, no credential exposure).
 - Shared per-model vector cache (`~/.flows/vectors/`): worktrees, clones and eval temp dirs reuse embeddings.
 - Agent stall guards: replies cut off at `max_tokens` are nudged, then fail; rounds that bring nothing new nudge, then force a tool-less reply (read-only) or abort; an unreachable search backend drops `web_search` for the phase.
+- `thinking: false` turns reasoning off on local OpenAI-compatible servers (`chat_template_kwargs.enable_thinking`).
 
 ## Next
 

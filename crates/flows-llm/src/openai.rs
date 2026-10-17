@@ -12,6 +12,22 @@ fn is_reasoning_model(model: &str) -> bool {
 }
 
 /// Build the Chat Completions request body.
+/// Endpoint-specific additions to a built body. `chat_template_kwargs` turns
+/// reasoning off in Qwen-style chat templates (vLLM, SGLang); the official API
+/// rejects unknown fields, so it is never sent there.
+pub fn apply_endpoint_options(
+    body: &mut Map<String, Value>,
+    req: &CompletionRequest,
+    api_base: &str,
+) {
+    if req.disable_thinking && !api_base.contains("api.openai.com") {
+        body.insert(
+            "chat_template_kwargs".into(),
+            json!({"enable_thinking": false}),
+        );
+    }
+}
+
 pub fn build_body(req: &CompletionRequest) -> Map<String, Value> {
     let mut messages: Vec<Value> = Vec::new();
     if !req.system.is_empty() {

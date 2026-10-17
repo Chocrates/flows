@@ -1194,6 +1194,7 @@ your context small.",
             max_tokens: phase.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             thinking_budget,
             no_tool_calls: forced_reply,
+            disable_thinking: !thinking_enabled,
         };
         // Mark the outbound call so the LLM I/O is visible in the pane (the
         // response marker below closes it, with exact token usage).

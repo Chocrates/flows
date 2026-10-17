@@ -734,6 +734,7 @@ fn run_turn_trial(
             None
         },
         no_tool_calls: false,
+        disable_thinking: model_llm.thinking == Some(false),
     };
 
     let timed = rt.block_on(async {

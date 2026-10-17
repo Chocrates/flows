@@ -13,6 +13,7 @@ fn req(messages: Vec<Message>) -> CompletionRequest {
         max_tokens: 4096,
         thinking_budget: None,
         no_tool_calls: false,
+        disable_thinking: false,
     }
 }
 
