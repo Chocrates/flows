@@ -112,3 +112,31 @@ fn list_templates_project_first() {
     assert_eq!(names[0], "custom"); // project entries come first
     assert!(names.contains(&"feature".to_string()));
 }
+
+#[test]
+fn project_template_includes_builtin_and_project_config_too() {
+    let repo = tempdir().unwrap();
+    let flows = tempdir().unwrap();
+    let tdir = repo.path().join(".flows/templates");
+    std::fs::create_dir_all(&tdir).unwrap();
+    std::fs::write(
+        tdir.join("mine.yml"),
+        "phases:\n  - name: build\n    type: script\n    command: make\n  - include: review\n    as: r\n",
+    )
+    .unwrap();
+    let (phases, _) = load_template(Some("mine"), repo.path(), Some(flows.path())).unwrap();
+    let names: Vec<&str> = phases.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["build", "r.review", "r.approve"]);
+    assert_eq!(phases[1].origin.as_ref().unwrap().template, "review");
+
+    // .flows.yml phases resolve includes through the same lookup.
+    std::fs::write(
+        repo.path().join(".flows.yml"),
+        "phases:\n  - include: mine\n",
+    )
+    .unwrap();
+    let cfg = flows_core::config::load_project_config(repo.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(cfg.phases.len(), 3);
+}

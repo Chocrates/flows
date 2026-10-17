@@ -360,7 +360,8 @@ fn when_skip(
     let Some(cond) = phase.when.as_deref() else {
         return Ok(None);
     };
-    match flows_core::condition::eval_when(cond, artifacts, ctx.idea) {
+    let artifacts = flows_core::include::scoped_artifacts(phase, artifacts);
+    match flows_core::condition::eval_when_with_vars(cond, &artifacts, ctx.idea, &phase.vars()) {
         Ok(true) => Ok(None),
         Ok(false) => Ok(Some(format!("when condition {cond:?} is false"))),
         Err(e) => Err(format!(

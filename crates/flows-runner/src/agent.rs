@@ -982,10 +982,15 @@ pub async fn run_agent_phase(
     // `prior_artifacts` map. Templates self-select what they need (`.get('plan')`,
     // `['spec']`, `.items()`), so no phase is force-fed the whole history and the
     // old redundant per-key top-level injection is gone.
+    // An aliased include's phases also see its artifacts by their short names.
     ctx.insert(
         "prior_artifacts".into(),
-        Value::Object(prior_artifacts.clone()),
+        Value::Object(flows_core::include::scoped_artifacts(
+            phase,
+            prior_artifacts,
+        )),
     );
+    ctx.insert("vars".into(), Value::Object(phase.vars()));
     let mut system_prompt = crate::prompts::render_prompt(&prompt_template, &Value::Object(ctx))
         .unwrap_or(prompt_template);
 

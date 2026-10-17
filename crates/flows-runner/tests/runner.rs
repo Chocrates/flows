@@ -642,3 +642,39 @@ async fn when_reevaluated_after_loop_back() {
         vec!["fix"]
     );
 }
+
+// -- include ------------------------------------------------------------------
+
+#[tokio::test]
+async fn included_phases_get_vars_and_short_name_artifacts() {
+    const CHECKS: &str = "phases:\n  - name: lint\n    type: script\n    command: \"echo {{ vars.word }}\"\n  - name: fix\n    when: \"'oops' in artifacts.lint.stdout\"\n    tools: {files: false}\n";
+    let resolve = |name: &str| match name {
+        "checks" => Ok(CHECKS.to_string()),
+        other => Err(format!("unknown {other}")),
+    };
+    let phases = flows_core::config::parse_phases_from_yaml_with(
+        "phases:\n  - include: checks\n    as: a\n    with: {word: fine}\n  - include: checks\n    as: b\n    with: {word: oops}\n",
+        &resolve,
+    )
+    .unwrap();
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    let cb = Cb::default();
+    // Only b.fix runs (one mock response); a.fix's condition reads a.lint.
+    let completed = run(
+        &phases,
+        Mock::new(vec![artifact("{}")]),
+        &cb,
+        d.path(),
+        &store,
+    )
+    .await
+    .unwrap();
+    assert_eq!(completed, ["a.lint", "a.fix", "b.lint", "b.fix"]);
+    assert_eq!(*cb.skipped.lock().unwrap(), ["a.fix"]);
+    let lint: serde_json::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(store.artifact_path("r1", "b.lint")).unwrap(),
+    )
+    .unwrap();
+    assert!(lint["content"]["stdout"].as_str().unwrap().contains("oops"));
+}

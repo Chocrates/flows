@@ -71,6 +71,16 @@ pub fn check_when(expr: &str) -> Result<(), String> {
 /// Evaluate a `when` expression. `artifacts` maps phase name → recorded
 /// artifact (the full envelope; only `content` is exposed to the expression).
 pub fn eval_when(expr: &str, artifacts: &Map<String, Value>, idea: &str) -> Result<bool, String> {
+    eval_when_with_vars(expr, artifacts, idea, &Map::new())
+}
+
+/// [`eval_when`] with an include's `with:` values exposed as `vars`.
+pub fn eval_when_with_vars(
+    expr: &str,
+    artifacts: &Map<String, Value>,
+    idea: &str,
+    vars: &Map<String, Value>,
+) -> Result<bool, String> {
     let src = tuples_to_lists(expr);
     let env = when_env();
     let compiled = env.compile_expression(&src).map_err(|e| e.to_string())?;
@@ -79,7 +89,7 @@ pub fn eval_when(expr: &str, artifacts: &Map<String, Value>, idea: &str) -> Resu
         .map(|(k, v)| (k.clone(), v.get("content").cloned().unwrap_or(Value::Null)))
         .collect();
     compiled
-        .eval(context! { artifacts => contents, idea => idea })
+        .eval(context! { artifacts => contents, idea => idea, vars => vars })
         .map(|v| v.is_true())
         .map_err(|e| e.to_string())
 }
@@ -95,6 +105,17 @@ mod tests {
             .iter()
             .map(|(k, c)| (k.clone(), json!({ "phase": k, "content": c })))
             .collect()
+    }
+
+    #[test]
+    fn when_reads_vars() {
+        let mut vars = Map::new();
+        vars.insert("strict".into(), json!(true));
+        assert_eq!(
+            eval_when_with_vars("vars.strict", &Map::new(), "", &vars),
+            Ok(true)
+        );
+        assert_eq!(eval_when("vars.strict", &Map::new(), ""), Ok(false));
     }
 
     #[test]

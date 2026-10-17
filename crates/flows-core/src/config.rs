@@ -35,6 +35,8 @@ pub enum ConfigError {
         path: String,
         source: serde_yaml_ng::Error,
     },
+    #[error("{0}")]
+    Include(String),
 }
 
 type Result<T> = std::result::Result<T, ConfigError>;
@@ -71,7 +73,7 @@ fn expand_env_str(input: &str) -> String {
 
 /// Recursively expand env vars in string and mapping values. Sequences are left
 /// untouched — matches Python's `_expand_dict` (which only recurses str + dict).
-fn expand_value(v: &mut Value) {
+pub(crate) fn expand_value(v: &mut Value) {
     match v {
         Value::String(s) => *s = expand_env_str(s),
         Value::Mapping(m) => {
@@ -262,13 +264,32 @@ pub fn load_global_config(path: Option<&Path>) -> Result<GlobalConfig> {
 // Phase parsing
 // ---------------------------------------------------------------------------
 
+/// Parse a phases list. `include:` entries are an error here; use
+/// [`parse_phases_with`] with a template resolver to expand them.
 pub fn parse_phases(raw: &[Value]) -> Result<Vec<PhaseConfig>> {
-    raw.iter().map(parse_phase).collect()
+    parse_phases_with(raw, &crate::include::no_includes)
+}
+
+/// Parse a phases list, expanding `include:` entries via `resolve` (template
+/// name → YAML text). See [`crate::include`].
+pub fn parse_phases_with(
+    raw: &[Value],
+    resolve: &crate::include::Resolver<'_>,
+) -> Result<Vec<PhaseConfig>> {
+    crate::include::expand(raw, resolve)
 }
 
 /// Parse a template/pipeline YAML document's `phases:` list. Env-expands first,
 /// matching how templates and `.flows.yml` are loaded.
 pub fn parse_phases_from_yaml(text: &str) -> Result<Vec<PhaseConfig>> {
+    parse_phases_from_yaml_with(text, &crate::include::no_includes)
+}
+
+/// [`parse_phases_from_yaml`], expanding `include:` entries via `resolve`.
+pub fn parse_phases_from_yaml_with(
+    text: &str,
+    resolve: &crate::include::Resolver<'_>,
+) -> Result<Vec<PhaseConfig>> {
     let mut root: Value = serde_yaml_ng::from_str(text).map_err(|source| ConfigError::Yaml {
         path: "<template>".to_string(),
         source,
@@ -278,12 +299,12 @@ pub fn parse_phases_from_yaml(text: &str) -> Result<Vec<PhaseConfig>> {
     }
     expand_value(&mut root);
     match root.get("phases") {
-        Some(Value::Sequence(seq)) => parse_phases(seq),
+        Some(Value::Sequence(seq)) => parse_phases_with(seq, resolve),
         _ => Ok(Vec::new()),
     }
 }
 
-fn parse_phase(p: &Value) -> Result<PhaseConfig> {
+pub(crate) fn parse_phase(p: &Value) -> Result<PhaseConfig> {
     let name = get_str(p, "name").ok_or(ConfigError::MissingName)?;
 
     let max_loop = match p.get("max_loop_iterations") {
@@ -332,6 +353,7 @@ fn parse_phase(p: &Value) -> Result<PhaseConfig> {
         max_loop_iterations: max_loop,
         depends_on: get_str_list(p, "depends_on").unwrap_or_default(),
         when: get_str(p, "when").filter(|w| !w.trim().is_empty()),
+        origin: None,
     })
 }
 
@@ -359,7 +381,9 @@ pub fn load_project_config(repo_path: &Path) -> Result<Option<ProjectConfig>> {
     };
 
     let phases = match raw.get("phases") {
-        Some(Value::Sequence(seq)) => parse_phases(seq)?,
+        Some(Value::Sequence(seq)) => {
+            parse_phases_with(seq, &crate::templates::include_resolver(repo_path, None))?
+        }
         _ => Vec::new(),
     };
 

@@ -377,9 +377,35 @@ pub struct PhaseConfig {
     /// is skipped when it is false. See `flows_core::condition`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
+    /// Set when the phase came from an `include:` (see `flows_core::include`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<IncludeOrigin>,
+}
+
+/// Where an included phase came from, and what it needs at run time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncludeOrigin {
+    /// The template whose phases list defined this phase (prompt lookup).
+    pub template: String,
+    /// The phase's name inside that template (before any `as:` prefix).
+    pub local_name: String,
+    /// Alias prefix applied to the phase's name, e.g. `final.` (may be empty).
+    #[serde(default)]
+    pub prefix: String,
+    /// `with:` values, exposed to prompts, commands and `when` as `vars`.
+    #[serde(default)]
+    pub vars: serde_json::Map<String, serde_json::Value>,
 }
 
 impl PhaseConfig {
+    /// The include's `with:` values (empty for phases not from an include).
+    pub fn vars(&self) -> serde_json::Map<String, serde_json::Value> {
+        self.origin
+            .as_ref()
+            .map(|o| o.vars.clone())
+            .unwrap_or_default()
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -400,6 +426,7 @@ impl PhaseConfig {
             max_loop_iterations: 3,
             depends_on: Vec::new(),
             when: None,
+            origin: None,
         }
     }
 }

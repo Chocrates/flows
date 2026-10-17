@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use include_dir::{include_dir, Dir};
 
-use crate::config::{parse_phases_from_yaml, ConfigError};
+use crate::config::{parse_phases_from_yaml_with, ConfigError};
 use crate::models::PhaseConfig;
 
 /// Shipped default templates, embedded at compile time.
@@ -116,38 +116,49 @@ pub fn list_templates(flows_dir: Option<&Path>, repo_root: Option<&Path>) -> Vec
     ordered
 }
 
-fn load_from_str(text: &str) -> Result<(Vec<PhaseConfig>, String), TemplateError> {
-    let phases = parse_phases_from_yaml(text)?;
-    Ok((phases, text.to_string()))
-}
-
 /// Load a template's phases + raw YAML text. `name = None` uses the default
 /// (`feature`). Project override → global override → embedded builtin.
+/// `include:` entries resolve through the same lookup.
 pub fn load_template(
     name: Option<&str>,
     repo_root: &Path,
     flows_dir: Option<&Path>,
 ) -> Result<(Vec<PhaseConfig>, String), TemplateError> {
-    let resolved = name.unwrap_or(DEFAULT_TEMPLATE);
-    let file = format!("{resolved}.yml");
+    let text = template_text(name.unwrap_or(DEFAULT_TEMPLATE), repo_root, flows_dir)?;
+    let phases = parse_phases_from_yaml_with(&text, &include_resolver(repo_root, flows_dir))?;
+    Ok((phases, text))
+}
 
+/// A template's raw YAML: project override → global override → builtin.
+pub fn template_text(
+    name: &str,
+    repo_root: &Path,
+    flows_dir: Option<&Path>,
+) -> Result<String, TemplateError> {
+    let file = format!("{name}.yml");
     let project_file = repo_root.join(".flows").join("templates").join(&file);
     let global_file = global_templates_dir(flows_dir).join(&file);
 
-    let text = if project_file.exists() {
-        read_file(&project_file)?
+    if project_file.exists() {
+        read_file(&project_file)
     } else if global_file.exists() {
-        read_file(&global_file)?
+        read_file(&global_file)
     } else if let Some(f) = BUILTIN.get_file(&file) {
-        f.contents_utf8().unwrap_or_default().to_string()
+        Ok(f.contents_utf8().unwrap_or_default().to_string())
     } else {
-        return Err(TemplateError::Unknown {
-            name: resolved.to_string(),
+        Err(TemplateError::Unknown {
+            name: name.to_string(),
             available: list_templates(flows_dir, None),
-        });
-    };
+        })
+    }
+}
 
-    load_from_str(&text)
+/// Resolver for `include:` entries: template names via [`template_text`].
+pub fn include_resolver<'a>(
+    repo_root: &'a Path,
+    flows_dir: Option<&'a Path>,
+) -> impl Fn(&str) -> Result<String, String> + 'a {
+    move |name| template_text(name, repo_root, flows_dir).map_err(|e| e.to_string())
 }
 
 fn read_file(path: &Path) -> Result<String, TemplateError> {

@@ -187,6 +187,58 @@ mapped to its artifact content — and `idea`:
 - A `when` that doesn't parse fails `flows plan` and run start. One that fails while
   being evaluated stops the run; the phase is never silently skipped or run.
 
+## Reusing templates (`include`)
+
+An entry `include: <template>` in a phases list (in a template or `.flows.yml`)
+is replaced by that template's phases. Templates resolve like any other
+(project `.flows/templates/` → `~/.flows/templates/` → builtin); only their
+`phases` are used.
+
+```yaml
+# .flows/templates/checks.yml
+phases:
+  - name: lint
+    type: script
+    command: "{{ vars.lint_cmd }}"
+  - name: test
+    type: script
+    command: make test
+    on_failure: retry:lint
+
+# .flows/templates/ship.yml
+phases:
+  - name: implement
+    type: agent
+  - include: checks              # → lint, test
+    with: { lint_cmd: "make lint" }
+  - include: review              # builtin → review, approve
+  - include: checks
+    as: final                    # → final.lint, final.test
+    with: { lint_cmd: "make lint-strict" }
+    when: "artifacts.approve.answer == ''"
+```
+
+- **Names.** Included phases keep their names; a clash is a load error. `as: x`
+  renames them `x.<name>` and rewrites `depends_on`, `loop_back_to` and `retry:`
+  among them. Inside an aliased include, prompts and `when:` also see the
+  include's artifacts by short name (`artifacts.lint` means `final.lint`). From
+  outside, use `artifacts['final.lint']`.
+- **`with:`** values appear as `vars` in the included phases' prompts, script
+  commands and `when:`. A nested include's values override the outer ones.
+- **`when:`** on the include applies to every included phase (ANDed with the
+  phase's own `when`).
+- **Prompts.** An included phase without `prompt:` uses its own template's
+  prompts (`prompts/<included template>/<phase>.md`), so builtin templates bring
+  their prompts with them.
+- **Loops and the DAG.** Includes are flattened before validation, so the normal
+  rules apply. In a DAG pipeline (any `depends_on`), an include may set
+  `depends_on:` for its first phases, `depends_on: [final]` (an alias, or the
+  template name) means all of that include's phases, and an included template
+  without `depends_on` is chained in order. Including a template that uses
+  `depends_on` in a linear pipeline is an error.
+- Includes nest up to 8 deep; cycles are errors. `flows plan` shows the
+  flattened pipeline.
+
 ---
 
 ## Agent prompt templates

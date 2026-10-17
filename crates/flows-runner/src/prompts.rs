@@ -108,7 +108,13 @@ pub fn load_prompt(
         }
     }
 
-    let file = format!("{}.md", phase.name);
+    // An included phase is looked up under the template that defined it, by its
+    // name there (before any `as:` prefix).
+    let (template_name, local_name) = match &phase.origin {
+        Some(o) => (o.template.as_str(), o.local_name.as_str()),
+        None => (template_name, phase.name.as_str()),
+    };
+    let file = format!("{local_name}.md");
     if !template_name.is_empty() {
         // 2. project override, 3. global override, 4. builtin — by template
         if let Some(text) = read_fs(&project_dir.join(template_name).join(&file)) {
@@ -167,6 +173,28 @@ pub fn render_prompt(template: &str, context: &Value) -> Result<String, String> 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// An included phase finds its prompt under the template that defined it,
+    /// by its pre-alias name — not under the including template.
+    #[test]
+    fn included_phase_uses_origin_template_prompt() {
+        let repo = tempfile::tempdir().unwrap();
+        let flows = tempfile::tempdir().unwrap();
+        let mut p = PhaseConfig::new("second.review");
+        p.origin = Some(flows_core::models::IncludeOrigin {
+            template: "review".into(),
+            local_name: "review".into(),
+            prefix: "second.".into(),
+            vars: Default::default(),
+        });
+        let got = load_prompt(&p, "my-template", repo.path(), Some(flows.path()));
+        let want = BUILTIN
+            .get_file("review/review.md")
+            .unwrap()
+            .contents_utf8()
+            .unwrap();
+        assert_eq!(got, want);
+    }
 
     /// The shipped tool-bearing templates gate their tool section on
     /// `tools_enabled`, so a no-tool model is never shown (or told to call) tools.

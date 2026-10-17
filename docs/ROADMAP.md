@@ -38,6 +38,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Repo map breaks relevance ties by git recency (uncommitted files, then recent commits), read inside the sandbox; mtime fallback outside git.
 - Retrieval index re-embeds only new/changed chunks (content-addressed, spare pool for branch switches); `~/.flows/index/` capped at 1 GiB with orphan + LRU eviction. `retrieval_reindex_threshold` deprecated.
 - Path-free retrieval eval corpus (`eval-fixtures/retrieval/`: flows + synthetic Python / TypeScript / Go, 68 queries) via `flows eval retrieval --corpus`.
+- Pipeline composition: `include: <template>` splices a template's phases (`as:` alias, `with:` vars, include-level `when`/`depends_on`; prompts resolve under the included template).
 
 ## Next
 
@@ -51,7 +52,6 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 
 ### Pipelines
 
-- **Pipeline composition** — `include` another pipeline as a phase.
 - **Template registry** — share/import community templates.
 
 ### Later / maybe

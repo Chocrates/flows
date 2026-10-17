@@ -248,7 +248,7 @@ reasoning): add `thinking: false` under that phase in the template YAML.
 
 `run_pipeline()` in `runner.rs` is the core execution engine:
 
-1. Validates pipeline config (`flows_core::pipeline::validate_pipeline`, including `when` syntax)
+1. Validates pipeline config (`flows_core::pipeline::validate_pipeline`, including `when` syntax). Pipelines arrive flat: `include:` entries were expanded at load time (`flows_core::include`), with each included phase's `origin` (template, local name, alias prefix, `with:` vars) used for prompt lookup, `vars`, and short-name artifact views
 2. Writes `RunMeta` and `RunState` to `~/.flows/runs/{run_id}/`
 3. Merges LLM config (global → project) and resolves per-phase model profiles
 4. Detects execution mode:

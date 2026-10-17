@@ -189,7 +189,7 @@ pub fn run_script_cancellable(
 
     let env = Environment::new();
     let rendered = env
-        .render_str(command, context! { idea => idea })
+        .render_str(command, context! { idea => idea, vars => phase.vars() })
         .map_err(|e| format!("command render failed: {e}"))?;
 
     let mut child = Command::new("/bin/sh")
