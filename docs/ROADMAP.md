@@ -60,4 +60,4 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 
 ## Tech debt
 
-- `DESIGN.md`'s TUI section still describes the Textual implementation (`RichLog`, `_follow`, `CopyableRichLog`, compositor offsets); the Rust `OutputPane` (`crates/flows-tui/src/output.rs`) works differently and the section needs a rewrite.
+None tracked.

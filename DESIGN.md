@@ -414,87 +414,97 @@ Runs always live under `~/.flows/runs/`, never in the project `.flows/`.
 
 ## TUI (flows-tui)
 
-ratatui immediate-mode full-screen terminal application. Architecture:
+ratatui + crossterm, immediate mode: every frame is drawn from plain model
+structs (`App`, `OutputPane`, `PhasePanel`), so behaviour lives in methods that
+are unit-tested without a terminal, and `render.rs` draws into a `Buffer`.
 
-- `App` — the shared TUI model, used by both a live run and a reattach
-- `ChannelCallbacks(RunnerCallbacks)` — bridges runner events to `UiEvent`s over a channel
-- `PhasePanel` — left sidebar with live phase status icons (○ ▶ ↻ ✓ ✗ ⊘)
-- the pipeline runs on a tokio task; a foreground run streams events over a channel, a reattach polls the run's files (state.json / output.log / llm.jsonl)
-- Human input: the runner's `on_questions` / `on_human_gate` send a `UiEvent::NeedInput` carrying a `oneshot` sender; the input box replies on it
+### Screens and data flow
 
-Token streaming: `OutputPane::push_token` appends to the current line per `Category` (normal / thinking / JSON / tool / system / meta); complete lines join the scrollback. Follow sticks to the bottom unless the user scrolled up or has an active selection.
+- **Home** (`home.rs`, `flows` with no args): recent runs plus "＋ New run"
+  (idea + template form). `n` new, `Enter` open, `d` delete, `q`/`Esc` quit.
+  Starting a run spawns a background worker and attaches to it.
+- **Run view** = **attach view** (`attach.rs`). `flows run --tui` and the home
+  screen both start a detached worker and attach, so `q` only detaches; the run
+  keeps going (`flows attach <id>` / `flows stop <id>`). The view is fed by
+  polling the run's files every 200 ms: `state.json` → phase status, current
+  phase, finished/failed/cancelled; `output.log` → output lines (tailed from a
+  byte offset); `llm.jsonl` → cost; `meta.json` → phase names and loop edges.
+- **In-process run** (`run.rs::run_tui`): the pipeline on a tokio task, events
+  over an `mpsc` channel via `ChannelCallbacks` (`RunnerCallbacks` →
+  `UiEvent`). Questions and human gates send `UiEvent::NeedInput` with a
+  `oneshot` reply. The CLI uses the worker path; this one remains for embedding
+  and tests.
 
-Structured-response handling: `StreamFilter` (flows-runner::agent) buffers the first ~30 chars of a streamed response; if it begins with a `questions` JSON envelope, those tokens are dropped from `on_token` so raw clarification JSON never reaches the output pane. Artifact JSON is still streamed.
+`output.log` is categorized JSONL, `{"c": <cat>, "x": <text>}`, written by both
+`ChannelCallbacks` (via `OutputLog`) and the background worker, so a run is
+replayable from the start on any attach. Categories: `n` normal, `t` thinking,
+`j` JSON, `o` tool, `s` system prompt, `u` user, `m` meta, plus metric records
+(`ctx`, `cost`, `cw`).
 
-Thinking/reasoning streaming: a separate `_thinking_buf` + `on_flow_thinking` handler renders extended-thinking deltas dimmed/italic, prefixed with a one-time `thinking…` marker, kept out of the regular content buffer so it can't be mistaken for the actual answer.
+When attached, answers go back as signal files: the chat bar writes
+`signals/answer.txt`; `c`/`Esc` write a cancel signal. Stale signals are cleared
+on attach to a finished run so they can't be misread later.
 
-Toggleable thinking / JSON output: every line written to the output pane is recorded in `self._entries` as `(category, markup)`, where category is `thinking`, `json`, or `normal`. Streamed model tokens are classified line-by-line — a ```` ```json ```` fence flips `_in_json_fence` so the artifact envelope (fenced per the prompt templates) is tagged `json`; everything else is `normal`. `t` toggles thinking, `j` toggles JSON. Toggling flips `_show_thinking`/`_show_json` and calls `_rerender_output()`, which `clear()`s the log and replays only the currently-visible entries — so a toggle hides/shows **already-displayed** content, not just future output. `_in_json_fence` resets on each `FlowPhaseStarted` so an unterminated fence in one phase can't swallow the next phase's prose.
+### Output pane (`output.rs`)
 
-Tool call visibility: `summarize_tool_call`/`summarize_tool_result` (flows-runner::agent) build one-line, tool-specific summaries (e.g. `read_file "foo.rs"`, `bash "cargo test"`, `write_file "out.rs" (240 chars)`) instead of a bare tool name — surfaced via dedicated `on_tool_call`/`on_tool_result` callbacks (not the generic `on_status`, which they replaced for this purpose) in every callback implementation (TUI, foreground plain, background worker). Results longer than ~150 chars are truncated to a first-line preview + total length; errors (`result.starts_with("Error:")`) render in red.
+`OutputPane` stores logical lines tagged with a `Category` (`Normal`,
+`Thinking`, `Json`, `Tool`, `System`, `Meta`). `push_token` assembles streamed
+tokens into the current line and commits on `\n`; a category change commits the
+partial line first. `visible_entries()` filters by toggles and word-wraps to the
+viewport width (hard-breaking long words), and scrolling, selection and
+rendering all work on that same wrapped list, so they always agree.
 
-Messages: `FlowPhaseStarted`, `FlowPhaseEnded`, `FlowToken`, `FlowThinking`, `FlowToolCall`, `FlowToolResult`, `FlowStatus`, `FlowScriptResult`, `FlowLoopBack`, `FlowInputRequired`, `FlowRunComplete`, `FlowRunFailed`.
+- **Toggles** filter at view time, so they hide or show content already on
+  screen: `t` thinking, `j` the JSON artifact block, `s` the system prompt (off by
+  default). `Meta` (phase markers, the task, script results) is never hidden.
+- **What gets tagged where** is decided upstream: the agent's `StreamFilter`
+  buffers the start of each response and drops a `questions` envelope entirely
+  (raw clarification JSON never reaches the pane), and its fence splitter tags
+  the fenced artifact block as `TokenKind::Json` → `on_json`. Tool calls arrive
+  as one-line summaries (`summarize_tool_call` / `summarize_tool_result`);
+  errors render red.
+- **Sticky follow.** `follow` is a flag, not a recomputed position: scrolling
+  up clears it, reaching the bottom (scroll down, `End`) sets it, and new content
+  scrolls to the bottom only while it is set.
+- **A selection suspends follow.** While a non-empty selection exists, new
+  output does not scroll, so streaming can't drag the highlighted text away. A
+  plain click (zero-width selection) does not suspend it.
 
-### Loop visibility (`PhasePanel`)
+### Selection and copy
 
-A phase resuming from a `loop_back_to` used to just get reset to the generic `pending` status — visually identical to a phase that had never run, with no indication a loop was happening or how many iterations occurred. `PhasePanel` now has:
+Mouse capture is on, so the terminal's own selection is unavailable; the app
+does it. Left-drag inside the output pane selects (cells in wrapped-line
+coordinates, painted with `SELECTION_BG`); the wheel scrolls 3 lines.
+`Ctrl+C` copies the selection, `y` copies the whole visible buffer. Both go
+through `arboard` (system clipboard) and report `copied N chars` or the error in
+the status line. `Ctrl+C` never quits; `q` detaches.
 
-- A distinct `looping` icon/color (`↻` magenta) — separate from `pending` (`○` dim) and `running` (`⟳` yellow) — so a repeating phase reads differently from a fresh one.
-- `mark_looping_range(from_phase, to_phase)`: flags **every** phase between `to_phase` and `from_phase` inclusive as `looping`, not just the tail phase that decided to loop — since a loop-back re-executes that whole segment (e.g. `review → lint` re-runs `lint`, `test`, and `review`). Naturally overwritten back to `running`/`done` as each phase actually restarts via the normal `on_phase_start`/`on_phase_end` flow.
-- `set_loop_iteration(phase, iteration, max_iterations)`: a persistent `(i/max)` counter rendered next to the phase name, so the sidebar keeps showing how many times a phase looped even after the run moves on.
+### Phases pane (`phases.rs`)
 
-### Mouse-select + copy (`OutputPane`)
+Status glyphs: `○` pending, `▶` running, `↻` looping, `✓` done, `✗` failed,
+`⊘` skipped. Loop edges (`loop_back_to`) are drawn as brackets in a gutter from
+target to source, highlighted while active, and a loop source shows its
+iteration budget (`review ↺1/3`). On a loop-back, `restart_range` resets every
+phase from the target through the source to looping, since the whole segment
+re-runs. On attach, `mark_recorded_phases` rebuilds statuses (done, skipped,
+current) from `state.json`.
 
-Plain `RichLog` has three separate gaps versus ratatui's built-in text-selection system (click-drag highlight, Ctrl+C → `Screen.action_copy_text`, OSC 52 clipboard):
+### Input and status
 
-1. It doesn't implement `Widget.get_selection()`, so copy would silently extract nothing.
-2. Its `render_line` never looks at `self.text_selection` at all — unlike the sibling `Log` widget, which does — so a drag over it shows **no visual highlight**, even when Screen-level selection tracking is otherwise working.
-3. **The real reason a real mouse drag never worked at all**, not just gap 1/2: the compositor resolves a click's `(x, y)` back to a *content* position by reading `style.meta["offset"]` off each rendered segment (`_compositor.get_widget_and_offset_at`) — `Log` embeds this via `Strip.apply_offsets(scroll_x, y)` in its own `render_line`; `RichLog` never calls it. Without that metadata, `get_widget_and_offset_at` returns a widget but no content offset, so every real drag over a plain `RichLog` degrades to `Selection(None, None)` — the "select everything" sentinel — regardless of where the drag actually happened. This is the actual mechanism behind "a drag only ever highlights the phase sidebar": `PhasePanel` is a `Static`, which ratatui's generic `Widget.render_line`/`_styles_cache` path already knows how to offset; `RichLog`'s custom rendering path never was, no matter what `get_selection()`/`render_line` selection-painting does on top.
+While the run waits for an answer, a question panel opens above the status line
+(several questions are numbered one per line); typing goes to it, and output
+navigation moves to `Alt+t/j/s` plus arrows/PgUp/PgDn. The status line shows
+phase progress, tool round `N/T`, context-window usage and cost.
 
-`OutputPane` (subclasses `RichLog`, used for every output/log pane) fixes all three: tracks a plain-text mirror of every `write()` call for `get_selection()`; overrides `render_line` to slice the rendered `Strip` at the selection's column span and `apply_style("screen--selection")` to the selected portion (mirroring `Log`'s highlight approach, adapted to `Strip`-based rather than `Text`-based line caching); and — the fix that actually matters for real mouse input — calls `strip.apply_offsets(scroll_x, absolute_y)` on every rendered line so clicks resolve to a precise content position instead of the select-all fallback. `absolute_y` (`scroll_y + y`) matters here: both the offset metadata and `selection.get_span()` must agree on content-absolute (scroll-adjusted) row numbering, or highlighting and click-resolution would disagree once the log has scrolled.
+### Tests
 
-Forces `wrap=False` — `Selection` coordinates are row-indexed by *rendered* lines, and the plain-text mirror only tracks logical `write()` calls, not sub-line wrap points, so wrapping would misalign both extraction and highlight rendering; long lines scroll horizontally instead (mousewheel/keyboard scroll both unaffected — that's a plain `ScrollView` property, independent of `wrap`).
-
-### Sticky scroll
-
-New output pulls the view along while pinned to the bottom, but does not yank it back once the user scrolls up to read — and resumes following once they scroll back to the bottom. Driven by a sticky `_follow` flag on `OutputPane`, whose `write` passes `scroll_end=self._follow and self.text_selection is None` (RichLog's `scroll_end=None` sentinel is repurposed to mean "follow only while pinned to the bottom"). `_follow` is updated **only** in `watch_scroll_target_y` — which fires whenever the scroll *target* settles, from either our own follow-scroll (target → bottom) or a user scroll (wheel/scrollbar/keys) — as `round(new) >= max_scroll_y`.
-
-**Active selection suspends follow.** The `and self.text_selection is None` guard is essential on a live streaming run: while the user is drag-selecting in the output pane, auto-follow would scroll the highlighted text out of the viewport (and stretch the selection as new lines slide under the cursor). The visible result is that a drag on the output pane "does nothing" — no highlight appears and the copied text is garbage — while the static phases pane highlights fine. This was the real cause behind repeated "I can only highlight the phases pane, not the output pane" reports: selection/`render_line`/`apply_offsets` were all correct (a static PTY drag resolved and painted perfectly), but streaming + follow scrolled the selection away. Freezing the view whenever a selection exists keeps the highlight put; follow resumes once the selection is cleared and the user scrolls back to the bottom. Only reproducible by streaming writes *during* a PTY drag — a static drag looks fine.
-
-Two rejected approaches, and why:
-
-- **ratatui's own `anchor()`** gets released by the resize/layout that fires right after mount in a real terminal (but not in the `run_test` harness), leaving `_anchor_released` stuck `True` — so the view never followed at all. This is why it "worked in tests" but not in a real terminal; it was only caught by driving the app in a real PTY.
-- **Recomputing at-bottom from `scroll_offset.y` per write** fails on fast bursts: while following, RichLog scrolls *after* a refresh, so `scroll_offset.y` lags `max_scroll_y` by a line during a burst of writes between refreshes — a per-write position check reads "not at bottom" mid-stream and wrongly stops following. The sticky flag is only re-evaluated on an actual scroll settle, so the lag can't corrupt it.
-
-Both the follow/stop/resume cycle and the fast-burst case are covered by tests, and the whole thing was verified end-to-end in a real PTY with actual SGR mouse-wheel escape sequences (wheel-up mid-stream stops following; wheel-down to the bottom resumes it).
-
-### Output-pane selection highlight
-
-A drag on the output pane produced no visible highlight (while the phases pane, a plain `Static`, highlighted fine) for a reason that hid behind two earlier partial fixes. The real cause: **the selection style was applied *under* the pane's own background.** `Strip.apply_style(style)` computes `style + segment.style` per segment (Rich's `Segment.apply_style(style=…)`), so a segment that already carries an explicit background — the output pane sets one (`#1c1c1c`) — keeps it, and the selection background (`#094472`) is discarded. The highlight rendered invisibly. Fix: apply the selection style as a **`post_style`** (`segment.style + post_style`) so it overrides the content background:
-
-```python
-middle = Strip(
-    Segment.apply_style(list(selected), post_style=selection_style),
-    selected.cell_length,
-)
-```
-
-This is orthogonal to the two things that also made selection *feel* broken, both real and both fixed earlier: (a) `render_line`/`apply_offsets` were needed for the compositor to resolve a click to a content offset at all (without it, a drag degraded to the `Selection(None, None)` "select everything" sentinel); (b) sticky-follow scrolled the selection out of view on a streaming run (see Sticky scroll). All three had to be right before the output pane behaved.
-
-**Why it kept slipping through tests:** the pilot-based unit tests called `render_line` directly and asserted "styles differ", which stayed true even with the bug (the fg still changed). The bug only manifests when the widget has its *own* background, and only shows up as *rendered* colour — neither of which a render_line-styles assertion on the plain harness log exercises. It is now caught by `test_selection_highlight_overrides_pane_background` (a log with an explicit background, asserting the selection bgcolor wins) and by the PTY tests below (asserting the highlight colour actually reaches the screen).
-
-### Real-terminal test harness (flows-tui tests/pty.rs)
-
-ratatui's `TestBackend` is an in-process fake — no PTY, so it misses real-terminal behaviour (the resize/layout right after mount, real SGR mouse decoding, actual cell rendering). The immediate-mode design avoids the retained-render bugs entirely, but a real-terminal harness (`tests/pty.rs`) forks the TUI binary under a real PTY (`portable-pty`) and feeds its output into `vt100`, an in-process VT100 emulator, so a test can send real keystrokes / SGR mouse events, let the app settle, and assert on the **rendered screen** — visible characters *and* per-cell background colours (via the `vt100` screen). "Is the selection highlight actually visible" is a question about rendered background colour, which `TestBackend` cannot answer and `vt100` can. The test binary is `src/bin/tui_demo.rs`; `portable-pty` and `vt100` are dev dependencies.
-
-### Clipboard reliability
-
-The underlying selection and its highlight now render correctly (see above), but two more things made "select + copy" appear broken:
-
-1. **OSC 52 is unreliable.** an OSC 52 escape sequence alone is unreliable — fire-and-forget, silently dropped by macOS Terminal.app (noted in ratatui's own source), tmux without `set-clipboard on`, and some SSH setups. The clipboard path (via `arboard`) also shells out to the local clipboard tool — `pbcopy` (macOS), `wl-copy` (Wayland), `xclip`/`xsel` (X11), `clip` (Windows) —, landing text in the system clipboard on a local session regardless of OSC 52 support, plus a `notify()` toast so copy isn't silent.
-
-2. **The copy key wasn't discoverable.** In a mouse-capturing TUI the terminal's own select+copy is disabled, so copy must go through the app via Ctrl+C — but muscle memory is to select and use the *terminal's* copy shortcut, which grabs nothing from a ratatui selection. `App` binds `ctrl+c → copy_selection` **visibly** (shown in the footer as "Copy sel"); with no selection it shows a hint ("Drag to select, then Ctrl+C … or 'y' to copy all") instead of failing silently. `y → copy_all` copies the entire visible output buffer (from the `OutputPane` plain-text mirror) — a mouse-free, one-key path that works even if the user never gets mouse selection to behave. Ctrl+C is deliberately not bound to quit (that would shadow copy, and a reflexive Ctrl+C quitting mid-run is rarely wanted); leaving is `q`/`h`.
-
-The plain-text mirror that both copy-all and `get_selection()` read from is populated in `CopyableRichLog.write` only when `_size_known` is True: RichLog *defers* writes issued before its first resize and replays them later by calling `write()` again, so mirroring on both the original and the replay would double-count every early line (corrupting copy output and selection extraction). Gating on `_size_known` mirrors each line exactly once.
+Model behaviour (follow, selection, toggles, wrapping, loop spans, key
+handling) is unit-tested in `tests/{output,phases,app,render,home}.rs`.
+`tests/pty.rs` runs the `tui_demo` binary under a real PTY (`portable-pty`),
+feeds its output to a `vt100` emulator, sends real SGR mouse sequences, and
+asserts on rendered cells, including that the selection background reaches the
+screen. That catches what `TestBackend` can't: real mouse decoding and actual
+colours.
 
 ---
 
