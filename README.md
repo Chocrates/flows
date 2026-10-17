@@ -132,7 +132,7 @@ Reattach with `flows attach <id>` (or pick it from `flows`). Stop a run with
 | `flows delete <id> [--force]` | Delete one run (`--force` stops + deletes a running one) |
 | `flows clean [--all]` | Delete finished runs (`--all` also removes running ones) |
 | `flows usage <id>` | Per-phase token usage + cost for a run |
-| `flows doctor` | Check config, model routing, sandbox, templates |
+| `flows doctor` | Check config, model routing (probes local servers), sandbox, templates |
 | `flows config show \| set <key> <value>` | View / edit config |
 | `flows init [--global]` | Generate `.flows.yml`, or scaffold global config + templates |
 | `flows templates list \| sync \| new <name>` | List templates; copy builtins to `~/.flows` to edit; scaffold a commented new one |

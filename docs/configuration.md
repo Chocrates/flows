@@ -69,7 +69,9 @@ phases:
   literal model string on the default endpoint.
 - Each profile's key is its explicit `api_key`, else the dialect default. `flows
   plan` shows the model each phase resolves to; `flows doctor` flags an unusable
-  profile before you run.
+  profile before you run, and asks each local (`api_base`) server for its model
+  list (`GET /models`, 5 s timeout), warning when the server is down or doesn't
+  list the configured model. Cloud endpoints are not contacted.
 
 ### Models that can't call tools
 

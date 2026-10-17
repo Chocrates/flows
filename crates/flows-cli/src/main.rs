@@ -657,6 +657,7 @@ fn cmd_doctor() -> Result<(), String> {
         }
     }
 
+    check_endpoints(&llm, &profiles);
     check_web_search(&global);
 
     let info = detect_stack(&cwd);
@@ -669,6 +670,58 @@ fn cmd_doctor() -> Result<(), String> {
     let templates = list_templates(Some(&flows_dir().join("templates")), Some(&cwd));
     println!("  templates: {}", templates.join(", "));
     Ok(())
+}
+
+/// Doctor check for local model servers: `GET /models` on each distinct custom
+/// OpenAI-compatible endpoint (default model + profiles), then whether each model
+/// routed there is listed. Cloud endpoints are not probed.
+fn check_endpoints(llm: &LLMConfig, profiles: &HashMap<String, LLMConfig>) {
+    // A default `model:` naming a profile resolves through it, as in a run.
+    let mut uses: Vec<(String, LLMConfig)> =
+        vec![("default".into(), resolve_llm("", llm, profiles))];
+    let mut names: Vec<&String> = profiles.keys().collect();
+    names.sort();
+    for name in names {
+        uses.push((name.clone(), resolve_llm(name, llm, profiles)));
+    }
+    uses.retain(|(_, c)| !c.api_base.is_empty() && !c.model.to_lowercase().contains("claude"));
+    if uses.is_empty() {
+        return;
+    }
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            println!("  endpoints: ⚠ {e}");
+            return;
+        }
+    };
+    println!("  endpoints:");
+    let mut listings: HashMap<(String, String), Result<Vec<String>, String>> = HashMap::new();
+    for (label, c) in &uses {
+        let key = (c.api_base.clone(), c.api_key.clone());
+        let listing = listings.entry(key).or_insert_with(|| {
+            rt.block_on(flows_llm::list_models(
+                &c.api_base,
+                &c.api_key,
+                std::time::Duration::from_secs(5),
+            ))
+        });
+        let status = match listing {
+            Ok(ids) if ids.iter().any(|id| id == &c.model) => "reachable, model listed".to_string(),
+            Ok(ids) if ids.is_empty() => "⚠ reachable, but lists no models".to_string(),
+            Ok(ids) => {
+                let shown: Vec<&str> = ids.iter().take(5).map(String::as_str).collect();
+                let more = if ids.len() > 5 { ", …" } else { "" };
+                format!(
+                    "⚠ reachable, but {:?} is not listed (serves: {}{more})",
+                    c.model,
+                    shown.join(", ")
+                )
+            }
+            Err(e) => format!("⚠ {e}"),
+        };
+        println!("    {label:<12} {}  {status}", c.api_base);
+    }
 }
 
 /// Doctor check for the web_search backend. Only `searxng` points at a

@@ -3,12 +3,14 @@
 //! tool calls, extended thinking / reasoning). `make_provider` selects by model.
 
 pub mod anthropic;
+pub mod models;
 pub mod openai;
 pub mod provider;
 pub mod retry;
 pub mod stream;
 pub mod types;
 
+pub use models::list_models;
 pub use provider::{make_provider, AnthropicProvider, Emit, OpenAiProvider, Provider};
 pub use stream::Accumulator;
 pub use types::{Completion, CompletionRequest, LlmError, Message, Role, ToolCall, ToolDef, Usage};
