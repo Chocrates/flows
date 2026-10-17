@@ -68,24 +68,26 @@ identifier from its repo, so rankers can't win by matching paths.
 | `ts-kanban` | synthetic TypeScript kanban app (client + server), 31 files | 18 |
 | `go-jobqueue` | synthetic Go job-queue service, 30 files | 18 |
 
-Baseline (default `all-MiniLM-L6-v2`), `flows eval retrieval --corpus eval-fixtures/retrieval`:
+Scores (default `all-MiniLM-L6-v2`; `rag` = embedding + BM25 fusion),
+`flows eval retrieval --corpus eval-fixtures/retrieval`:
 
 ```
 fixture / corpus             ranker    r@1    r@3    r@5    MRR    n
 flows-workspace              map      0.00   0.11   0.11   0.11   14
-flows-workspace              rag      0.21   0.36   0.57   0.46   14
+flows-workspace              rag      0.25   0.43   0.57   0.50   14
 go-jobqueue                  map      0.17   0.22   0.42   0.35   18
-go-jobqueue                  rag      0.33   0.67   0.81   0.73   18
+go-jobqueue                  rag      0.42   0.72   0.78   0.85   18
 py-invoicing                 map      0.22   0.58   0.64   0.49   18
-py-invoicing                 rag      0.69   0.83   0.83   0.84   18
+py-invoicing                 rag      0.78   0.89   0.92   0.93   18
 ts-kanban                    map      0.08   0.26   0.39   0.36   18
-ts-kanban                    rag      0.28   0.47   0.57   0.53   18
+ts-kanban                    rag      0.22   0.47   0.67   0.49   18
 MEAN                         map      0.12   0.30   0.40   0.34   68
-MEAN                         rag      0.39   0.60   0.70   0.65   68
+MEAN                         rag      0.43   0.64   0.74   0.70   68
 ```
 
+Embedding-only ranking scored MEAN rag MRR 0.65 / r@5 0.70 here.
 On the older per-task fixtures (most name their target file) the same rankers
-score MRR 0.47 / 1.00; judge ranking changes on the corpus.
+score MRR 0.47 / 0.89; judge ranking changes on the corpus.
 
 ```
 model            config     suite    size        pass    in_tok      peak_ctx     cost  rounds   n

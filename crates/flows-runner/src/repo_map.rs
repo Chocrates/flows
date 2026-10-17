@@ -134,26 +134,31 @@ fn extract_signatures(lang: Lang, src: &str) -> Vec<String> {
 /// Lowercase alphanumeric tokens (length ≥ 3), split on non-alphanumerics and
 /// camelCase/snake_case boundaries — for overlap scoring.
 fn tokenize(s: &str) -> HashSet<String> {
-    let mut out = HashSet::new();
+    token_list(s).into_iter().collect()
+}
+
+/// [`tokenize`] keeping order and repeats (term frequencies for lexical ranking).
+pub(crate) fn token_list(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let mut cur = String::new();
     let mut prev_lower = false;
     for ch in s.chars() {
         if ch.is_alphanumeric() {
             if ch.is_uppercase() && prev_lower && cur.len() >= 3 {
-                out.insert(std::mem::take(&mut cur));
+                out.push(std::mem::take(&mut cur));
             }
             cur.push(ch.to_ascii_lowercase());
             prev_lower = ch.is_lowercase();
         } else {
             if cur.len() >= 3 {
-                out.insert(std::mem::take(&mut cur));
+                out.push(std::mem::take(&mut cur));
             }
             cur.clear();
             prev_lower = false;
         }
     }
     if cur.len() >= 3 {
-        out.insert(cur);
+        out.push(cur);
     }
     out
 }

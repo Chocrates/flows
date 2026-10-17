@@ -169,8 +169,9 @@ context:
 - A `supports_tools: false` model gets **no** tool schemas — only push context —
   so it never wastes turns trying to call tools.
 - **Retrieval injects whole definitions.** Code is chunked at function/type
-  boundaries (Rust, Python, JS/TS, Go; other files use 50-line windows) and the
-  best matches are packed into `retrieval_budget_fraction` of the model's
+  boundaries (Rust, Python, JS/TS, Go; other files use 50-line windows), ranked
+  by embedding similarity fused with keyword (BM25) matching, and the best
+  matches are packed into `retrieval_budget_fraction` of the model's
   context window (or `unknown_window_tokens`), at most `retrieval_max_chunks`.
 - **Retrieval is fully local.** Embeddings run in-process (`fastembed`/ONNX, a
   small model downloaded once) — no server, no cloud, no key. The index is synced
