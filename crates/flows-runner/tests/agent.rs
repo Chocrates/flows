@@ -813,3 +813,233 @@ fn offline_bash_tells_the_model() {
     assert!(desc(true).contains("NO network access"));
     assert!(!desc(false).contains("network"));
 }
+
+// -- stall / output-cap / dead-backend guards ---------------------------------
+
+/// What one request looked like: offered tool names, whether calls were
+/// forbidden, and the text of its last message.
+#[derive(Debug)]
+struct Seen {
+    tools: Vec<String>,
+    no_tool_calls: bool,
+    last: String,
+}
+
+/// Scripted provider that also records every request.
+struct Recorder {
+    responses: Mutex<VecDeque<Completion>>,
+    seen: Mutex<Vec<Seen>>,
+}
+
+impl Recorder {
+    fn new(responses: Vec<Completion>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into()),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+    fn seen(&self) -> std::sync::MutexGuard<'_, Vec<Seen>> {
+        self.seen.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl Provider for Recorder {
+    async fn complete(&self, req: &CompletionRequest) -> Result<Completion, LlmError> {
+        self.seen.lock().unwrap().push(Seen {
+            tools: req.tools.iter().map(|t| t.name.clone()).collect(),
+            no_tool_calls: req.no_tool_calls,
+            last: req
+                .messages
+                .last()
+                .and_then(|m| m.content.clone())
+                .unwrap_or_default(),
+        });
+        Ok(self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("recorder ran out of responses"))
+    }
+}
+
+fn capped(content: &str) -> Completion {
+    Completion {
+        stop_reason: Some("length".into()),
+        ..text(content)
+    }
+}
+
+async fn run_with(
+    phase: &PhaseConfig,
+    repo: &Path,
+    provider: &dyn Provider,
+    search: &WebSearchConfig,
+) -> flows_core::models::Artifact {
+    run_agent_phase(
+        phase,
+        "idea",
+        repo,
+        &empty_artifacts(),
+        "feature",
+        &LLMConfig::default(),
+        provider,
+        &NoopCallbacks,
+        None,
+        &ContextConfig::default(),
+        search,
+        0.0,
+        0.0,
+        None,
+    )
+    .await
+    .artifact
+}
+
+fn read_only_phase() -> PhaseConfig {
+    let mut p = PhaseConfig::new("plan");
+    p.tools = ToolsConfig {
+        files: true,
+        read_only: true,
+        ..Default::default()
+    };
+    p
+}
+
+fn repo_with_files() -> tempfile::TempDir {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.txt"), "alpha").unwrap();
+    std::fs::write(d.path().join("b.txt"), "beta").unwrap();
+    d
+}
+
+const READ_A: &str = r#"{"path": "a.txt"}"#;
+
+#[tokio::test]
+async fn capped_reply_is_nudged_not_taken_as_artifact() {
+    let provider = Recorder::new(vec![
+        capped("Let me think about every edge case of"),
+        artifact_json(r#"{"ok": true}"#),
+    ]);
+    let art = run_with(
+        &files_phase(),
+        Path::new("/tmp"),
+        &provider,
+        &WebSearchConfig::default(),
+    )
+    .await;
+    assert_eq!(art.content["ok"], true, "{art:?}");
+    let seen = provider.seen();
+    assert!(seen[1].last.contains("output limit"), "{seen:?}");
+}
+
+#[tokio::test]
+async fn capped_twice_fails_naming_max_tokens() {
+    let provider = Recorder::new(vec![capped(""), capped("still thinking")]);
+    let art = run_with(
+        &files_phase(),
+        Path::new("/tmp"),
+        &provider,
+        &WebSearchConfig::default(),
+    )
+    .await;
+    let err = art.content["error"].as_str().unwrap_or("");
+    assert!(err.contains("max_tokens"), "{art:?}");
+}
+
+#[tokio::test]
+async fn unreachable_search_backend_drops_the_tool() {
+    let mut phase = read_only_phase();
+    phase.tools.web_search = true;
+    // Nothing listens on port 1: the request fails to connect.
+    let search = WebSearchConfig {
+        backend: "searxng".into(),
+        base_url: "http://127.0.0.1:1".into(),
+        ..Default::default()
+    };
+    let provider = Recorder::new(vec![
+        tool("web_search", r#"{"query": "rust duration"}"#),
+        artifact_json(r#"{"ok": true}"#),
+    ]);
+    let art = run_with(&phase, Path::new("/tmp"), &provider, &search).await;
+    assert_eq!(art.content["ok"], true, "{art:?}");
+    let seen = provider.seen();
+    assert!(seen[0].tools.contains(&"web_search".to_string()));
+    assert!(
+        !seen[1].tools.contains(&"web_search".to_string()),
+        "{seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn stalled_read_only_phase_is_nudged_then_forced_to_reply() {
+    let repo = repo_with_files();
+    // One fresh read, then five re-reads of the unchanged file.
+    let mut script: Vec<Completion> = (0..6).map(|_| tool("read_file", READ_A)).collect();
+    script.push(artifact_json(r#"{"ok": true}"#));
+    let provider = Recorder::new(script);
+    let art = run_with(
+        &read_only_phase(),
+        repo.path(),
+        &provider,
+        &WebSearchConfig::default(),
+    )
+    .await;
+    assert_eq!(art.content["ok"], true, "{art:?}");
+    let seen = provider.seen();
+    assert_eq!(seen.len(), 7);
+    // Third stalled round (request 5) carries the nudge.
+    assert!(seen[4].last.contains("nothing new"), "{seen:?}");
+    // Fifth stalled round switches tools off for the reply.
+    assert!(seen[..6].iter().all(|s| !s.no_tool_calls));
+    assert!(seen[6].no_tool_calls);
+    assert!(seen[6].last.contains("switched off"), "{seen:?}");
+}
+
+#[tokio::test]
+async fn stalled_write_capable_phase_is_aborted() {
+    let repo = repo_with_files();
+    let script: Vec<Completion> = (0..9).map(|_| tool("read_file", READ_A)).collect();
+    let provider = Recorder::new(script);
+    let art = run_with(
+        &files_phase(),
+        repo.path(),
+        &provider,
+        &WebSearchConfig::default(),
+    )
+    .await;
+    let err = art.content["error"].as_str().unwrap_or("");
+    assert!(err.contains("nothing new"), "{art:?}");
+    assert!(provider.seen().iter().all(|s| !s.no_tool_calls));
+}
+
+#[tokio::test]
+async fn fresh_read_resets_the_stall_count() {
+    let repo = repo_with_files();
+    let read_b = r#"{"path": "b.txt"}"#;
+    let provider = Recorder::new(vec![
+        tool("read_file", READ_A),
+        tool("read_file", READ_A),
+        tool("read_file", READ_A),
+        tool("read_file", read_b),
+        tool("read_file", READ_A),
+        tool("read_file", READ_A),
+        artifact_json(r#"{"ok": true}"#),
+    ]);
+    let art = run_with(
+        &read_only_phase(),
+        repo.path(),
+        &provider,
+        &WebSearchConfig::default(),
+    )
+    .await;
+    assert_eq!(art.content["ok"], true, "{art:?}");
+    assert!(
+        provider
+            .seen()
+            .iter()
+            .all(|s| !s.last.contains("nothing new")),
+        "no nudge expected"
+    );
+}

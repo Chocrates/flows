@@ -141,6 +141,9 @@ pub struct CompletionRequest {
     pub max_tokens: u32,
     /// Extended-thinking budget in tokens, if enabled.
     pub thinking_budget: Option<u32>,
+    /// Keep `tools` declared (history may hold tool calls) but forbid calling
+    /// them this turn, so the model must answer in text.
+    pub no_tool_calls: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

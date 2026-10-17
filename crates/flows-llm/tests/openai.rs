@@ -12,6 +12,7 @@ fn req(messages: Vec<Message>) -> CompletionRequest {
         tools: vec![],
         max_tokens: 4096,
         thinking_budget: None,
+        no_tool_calls: false,
     }
 }
 
@@ -59,6 +60,9 @@ fn tools_wrapped_in_function_type() {
     let body = build_body(&r);
     assert_eq!(body["tools"][0]["type"], "function");
     assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+    assert!(body.get("tool_choice").is_none());
+    r.no_tool_calls = true;
+    assert_eq!(build_body(&r)["tool_choice"], "none");
 }
 
 #[test]

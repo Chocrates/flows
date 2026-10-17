@@ -160,7 +160,7 @@ State files are written atomically (temp file + rename).
 
 ## Specs (OpenSpec)
 
-Capabilities live in `openspec/specs/` (code-search, conditional-phases, context-eval, eval-harness, model-io, model-profiles, repo-context, security-model, semantic-retrieval, web-search). New features go through a change under `openspec/changes/` (propose → apply → archive). Use the `opsx:*` / `openspec-*` skills.
+Capabilities live in `openspec/specs/` (agent-loop-guards, code-search, conditional-phases, context-eval, eval-harness, model-io, model-profiles, pipeline-composition, repo-context, security-model, semantic-retrieval, template-registry, web-search). New features go through a change under `openspec/changes/` (propose → apply → archive). Use the `opsx:*` / `openspec-*` skills.
 
 ## Hard constraints
 

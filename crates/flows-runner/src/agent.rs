@@ -177,6 +177,19 @@ const ABORT_AFTER_NOOP_WRITES: u32 = 6;
 /// Consecutive empty final responses tolerated (with a nudge each) before the
 /// phase fails — a model that keeps returning nothing is stuck.
 const MAX_EMPTY_RESPONSES: u32 = 3;
+/// Consecutive tool rounds that brought nothing new (deduplicated re-reads,
+/// disabled or failed searches, failed fetches) before the model is told to stop
+/// gathering. A thinking model can otherwise re-deliberate for many minutes per
+/// round and spend each round on a call that cannot help (observed: a plan phase
+/// ran 14 rounds / 107 min re-reading one file and searching a dead backend).
+const STALL_NUDGE_ROUNDS: u32 = 3;
+/// …after which a phase that cannot write gets no more tool calls and must reply.
+const STALL_FORCE_ROUNDS: u32 = 5;
+/// …and a phase that can write is aborted (a tool-less implement reply would only
+/// inline its code).
+const STALL_ABORT_ROUNDS: u32 = 8;
+/// Consecutive replies cut off at the output limit before the phase fails.
+const MAX_CAPPED_RESPONSES: u32 = 2;
 /// Most-recent messages budgeting never trims (keeps the live turn coherent).
 const BUDGET_RECENT_KEEP: usize = 4;
 
@@ -597,6 +610,20 @@ fn summarize_tool_call(name: &str, args: &Value) -> String {
         }
         _ => format!("{name}(...)"),
     }
+}
+
+/// A tool error from failing to reach the backend at all (connect / send / read),
+/// as opposed to an HTTP status or an empty result.
+fn backend_unreachable(result: &str) -> bool {
+    result.contains("request failed") || result.contains("read failed")
+}
+
+/// An `http_get` result whose response status is 400 or above.
+fn http_error_status(result: &str) -> bool {
+    serde_json::from_str::<Value>(result)
+        .ok()
+        .and_then(|v| v.get("status").and_then(Value::as_u64))
+        .is_some_and(|s| s >= 400)
 }
 
 fn summarize_tool_result(result: &str) -> (String, bool) {
@@ -1072,6 +1099,12 @@ your context small.",
     // Consecutive empty final responses — nudge the model to start producing, fail
     // if it keeps stalling.
     let mut empty_streak = 0u32;
+    // Consecutive tool rounds with nothing new (see STALL_*), whether the model
+    // has been switched to a tool-less reply, and consecutive capped replies.
+    let mut stall_streak = 0u32;
+    let mut forced_reply = false;
+    let mut capped_streak = 0u32;
+    let mut tool_defs = tool_defs;
 
     // Optional full-prompt transcript (what the model actually saw each round),
     // gated by `FLOWS_TRANSCRIPT` so normal runs aren't bloated. The eval harness
@@ -1122,6 +1155,7 @@ your context small.",
             tools: tool_defs.clone(),
             max_tokens: phase.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             thinking_budget,
+            no_tool_calls: forced_reply,
         };
         // Mark the outbound call so the LLM I/O is visible in the pane (the
         // response marker below closes it, with exact token usage).
@@ -1239,7 +1273,10 @@ your context small.",
         // Tool calls — prefer structured; fall back to any the model leaked as
         // text (some thinking models write `<tool_call>{…}</tool_call>` or
         // `<tools>{…}</tools>` in content/reasoning instead of real tool_calls).
-        let tool_calls: Vec<ToolCall> = if !completion.tool_calls.is_empty() {
+        let tool_calls: Vec<ToolCall> = if forced_reply {
+            // Tools are off: anything shaped like a call is part of the reply.
+            Vec::new()
+        } else if !completion.tool_calls.is_empty() {
             completion.tool_calls.clone()
         } else {
             let mut ex = extract_text_tool_calls(&completion.content);
@@ -1248,6 +1285,44 @@ your context small.",
             }
             ex
         };
+
+        // Output-cap guard: a reply cut off at max_tokens with no tool call is
+        // neither an artifact nor "empty" — the model reasoned past the limit.
+        // Tell it so; fail if it happens again.
+        let capped = matches!(
+            completion.stop_reason.as_deref(),
+            Some("length" | "max_tokens")
+        );
+        if tool_calls.is_empty() && capped {
+            capped_streak += 1;
+            let limit = req.max_tokens;
+            if capped_streak >= MAX_CAPPED_RESPONSES {
+                let msg = format!(
+                    "the model's reply hit the max_tokens limit ({limit}) {capped_streak} times \
+                     in a row before producing anything usable — it reasons past the limit. \
+                     Raise the phase's max_tokens or reduce its reasoning."
+                );
+                callbacks.on_note(&format!("⛔ {msg}"));
+                return AgentResult {
+                    artifact: error_artifact(&phase.name, idea, msg),
+                    cost_usd: phase_cost,
+                };
+            }
+            callbacks.on_note(&format!(
+                "⚠ reply cut off at the {limit}-token output limit — nudging the model to be brief"
+            ));
+            if !completion.content.trim().is_empty() {
+                messages.push(Message::assistant_text(completion.content.clone()));
+            }
+            messages.push(Message::user(format!(
+                "Your last reply was cut off at the output limit ({limit} tokens) before you \
+                 produced anything usable. Keep your reasoning short: decide, then act right \
+                 away — call one tool, or reply with the final artifact JSON. If you are \
+                 writing a large file, write it in smaller parts."
+            )));
+            continue;
+        }
+        capped_streak = 0;
 
         if !tool_calls.is_empty() {
             empty_streak = 0; // productive round — reset the empty-response streak
@@ -1259,6 +1334,8 @@ your context small.",
             let mut all_errored = true;
             let mut wrote_this_round = false;
             let mut noop_write_this_round = false;
+            // Did any call bring something new? (See STALL_* above.)
+            let mut new_info = false;
             for tc in &tool_calls {
                 let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
                 callbacks.on_tool_call(&tc.name, &summarize_tool_call(&tc.name, &args));
@@ -1324,6 +1401,7 @@ your context small.",
                     ));
                     continue;
                 }
+                let mut deduped = false;
 
                 let mut result = dispatch_tool(
                     &tc.name,
@@ -1353,6 +1431,7 @@ your context small.",
                              and rounds. Edit it with write_file if you need to change it.)",
                             result.chars().count()
                         );
+                        deduped = true;
                     } else {
                         read_cache.insert(key, h);
                     }
@@ -1361,12 +1440,23 @@ your context small.",
                 callbacks.on_tool_result(&tc.name, &summary, is_error);
                 // Track search productivity: a search with no result URL (empty or
                 // errored) is "dry"; a real hit resets the counter.
+                let mut dry = false;
                 if tc.name == "web_search" {
                     if !is_error && result.contains("\"url\"") {
                         dry_searches = 0;
+                    } else if is_error && backend_unreachable(&result) {
+                        // The backend is down, not just empty: stop now.
+                        dry_searches = MAX_DRY_SEARCHES;
+                        dry = true;
                     } else {
                         dry_searches += 1;
+                        dry = true;
                     }
+                }
+                let failed_fetch = matches!(tc.name.as_str(), "http_get" | "lookup")
+                    && (is_error || http_error_status(&result));
+                if !(deduped || dry || failed_fetch) {
+                    new_info = true;
                 }
                 if !is_error {
                     all_errored = false;
@@ -1379,6 +1469,64 @@ your context small.",
                     }
                 }
                 messages.push(Message::tool_result(tc.id.clone(), result));
+            }
+
+            // Once search is off, stop offering it: a listed tool keeps getting called.
+            if dry_searches >= MAX_DRY_SEARCHES && tool_defs.iter().any(|d| d.name == "web_search")
+            {
+                tool_defs.retain(|d| d.name != "web_search");
+                callbacks.on_note(
+                    "⚠ web_search disabled for the rest of this phase (backend unreachable or \
+                     repeatedly empty)",
+                );
+            }
+
+            // Stall guard: rounds that brought nothing new — re-reads of unchanged
+            // files, dead searches, failed fetches. Nudge, then force a reply
+            // (read-only phases) or abort (write-capable ones).
+            if wrote_this_round || new_info {
+                stall_streak = 0;
+            } else {
+                stall_streak += 1;
+            }
+            if stall_streak == STALL_NUDGE_ROUNDS {
+                callbacks.on_note(
+                    "⚠ stall guard: tool calls are returning nothing new — nudging the model to produce its output",
+                );
+                messages.push(Message::user(if can_write {
+                    "Your last few tool calls returned nothing new (re-reads of unchanged files, \
+                     failed searches or fetches). You already have everything these tools will \
+                     give you. Stop gathering and start producing: write the next file with \
+                     `write_file`; when a detail is uncertain, choose the straightforward option \
+                     and note it."
+                } else {
+                    "Your last few tool calls returned nothing new (re-reads of unchanged files, \
+                     failed searches or fetches). You already have everything these tools will \
+                     give you. Stop gathering and reply now with the final artifact JSON; when a \
+                     detail is uncertain, choose the straightforward option and note it as an \
+                     assumption."
+                }));
+            }
+            if stall_streak >= STALL_FORCE_ROUNDS && !can_write && !forced_reply {
+                forced_reply = true;
+                callbacks.on_note(
+                    "⚠ stall guard: tools switched off — the model must reply with its artifact",
+                );
+                messages.push(Message::user(
+                    "Tools are now switched off for this phase. Reply with the final artifact \
+                     JSON using what you already know.",
+                ));
+            }
+            if stall_streak >= STALL_ABORT_ROUNDS && can_write {
+                let msg = format!(
+                    "aborted: {stall_streak} tool rounds in a row returned nothing new (re-reads, \
+                     failed searches or fetches) — the model is stalled"
+                );
+                callbacks.on_note(&format!("⛔ stall guard: {msg}"));
+                return AgentResult {
+                    artifact: error_artifact(&phase.name, idea, msg),
+                    cost_usd: phase_cost,
+                };
             }
 
             // No-progress guard: once code has been written, thrashing many rounds

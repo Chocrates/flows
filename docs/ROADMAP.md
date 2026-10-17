@@ -42,6 +42,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Retrieval ranks chunks by embedding + BM25 reciprocal-rank fusion (path-free corpus MRR 0.65 → 0.70).
 - Template registry: `flows templates install <git>[//path][@ref]` pins to a commit, reviews before writing, and confines untrusted templates (scripts sandboxed, no credential exposure).
 - Shared per-model vector cache (`~/.flows/vectors/`): worktrees, clones and eval temp dirs reuse embeddings.
+- Agent stall guards: replies cut off at `max_tokens` are nudged, then fail; rounds that bring nothing new nudge, then force a tool-less reply (read-only) or abort; an unreachable search backend drops `web_search` for the phase.
 
 ## Next
 

@@ -33,6 +33,9 @@ pub fn build_body(req: &CompletionRequest) -> Map<String, Value> {
             .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.parameters}))
             .collect();
         body.insert("tools".into(), json!(tools));
+        if req.no_tool_calls {
+            body.insert("tool_choice".into(), json!({"type": "none"}));
+        }
     }
 
     if let Some(budget) = req.thinking_budget {

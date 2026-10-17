@@ -733,6 +733,7 @@ fn run_turn_trial(
         } else {
             None
         },
+        no_tool_calls: false,
     };
 
     let timed = rt.block_on(async {

@@ -12,6 +12,7 @@ fn req(messages: Vec<Message>) -> CompletionRequest {
         tools: vec![],
         max_tokens: 4096,
         thinking_budget: None,
+        no_tool_calls: false,
     }
 }
 
@@ -162,4 +163,19 @@ fn parse_tool_use() {
 fn parse_missing_content_errors() {
     let resp = json!({"usage": {"input_tokens": 1, "output_tokens": 1}});
     assert!(parse_response(&resp).is_err());
+}
+
+#[test]
+fn no_tool_calls_keeps_tools_but_forbids_calls() {
+    let mut r = req(vec![Message::user("hi")]);
+    r.tools = vec![ToolDef {
+        name: "read_file".into(),
+        description: "read".into(),
+        parameters: json!({"type": "object"}),
+    }];
+    assert!(build_body(&r).get("tool_choice").is_none());
+    r.no_tool_calls = true;
+    let body = build_body(&r);
+    assert_eq!(body["tools"][0]["name"], "read_file");
+    assert_eq!(body["tool_choice"], json!({"type": "none"}));
 }

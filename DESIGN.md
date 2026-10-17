@@ -273,6 +273,12 @@ All UI (TUI, foreground print, background notify) is implemented via `RunnerCall
 4. Render prompt template (MiniJinja) with: `idea`, `repo_tree`, `repo_map`, `pushed_context`, `tools_enabled`, `prior_artifacts`
 5. Resolve extended thinking and run the provider completion with a tool loop (tools enabled per phase config; a `supports_tools: false` model gets no schemas and no tool prompt sections)
 6. Clarification loop: up to `max_clarification_rounds`, then proceed with best guess
+7. Loop guards end a phase that has stopped making progress, each with a note in the output pane:
+   - identical failing calls (`MAX_REPEATED_TOOL_ERRORS`), unchanged rewrites of one file (nudge at 3, abort at 6), 30 rounds without a write once writing has started, and the round cap;
+   - **empty replies**: nudged, the phase fails after 3;
+   - **output cap**: a reply stopped by `max_tokens` (`length` / `max_tokens`) with no tool call is nudged to be brief rather than taken as the artifact; a second in a row fails the phase naming the limit;
+   - **stalls**: rounds whose calls bring nothing new (deduplicated re-reads, dead or empty searches, failed or 4xx/5xx fetches) nudge at 3; at 5 a read-only phase gets `tool_choice: none` and must reply; a write-capable phase aborts at 8;
+   - **dead search**: a `web_search` that cannot reach its backend (or 6 empty results) turns search off for the phase and drops it from the offered tools.
 
 #### Context delivery (small models)
 

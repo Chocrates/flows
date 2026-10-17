@@ -72,6 +72,9 @@ pub fn build_body(req: &CompletionRequest) -> Map<String, Value> {
             }))
             .collect();
         body.insert("tools".into(), json!(tools));
+        if req.no_tool_calls {
+            body.insert("tool_choice".into(), json!("none"));
+        }
     }
     body
 }
