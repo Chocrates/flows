@@ -47,7 +47,12 @@ embedding cost or dependency.
 The system SHALL compute embeddings **locally, in-process** (via a bundled ONNX
 embedder) using a small sentence-transformer model selected by `retrieval_model`
 (default all-MiniLM-L6-v2), with no embeddings server and no cloud dependency.
-The model SHALL be fetched once to a local cache and reused across runs.
+The model SHALL be fetched once to a local cache outside the repository (`~/.flows/models`, or `FASTEMBED_CACHE_DIR` when set) and reused across runs.
+
+#### Scenario: Model cache stays out of the repo
+
+- **WHEN** retrieval downloads its embedding model during a run
+- **THEN** nothing is written to the repository directory.
 
 #### Scenario: Works with no hosted embeddings model
 

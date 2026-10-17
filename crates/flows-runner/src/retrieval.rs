@@ -51,7 +51,8 @@ fn resolve_model(name: &str) -> EmbeddingModel {
 fn embed_local(model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     let mut map = crate::lock(EMBEDDERS.get_or_init(|| Mutex::new(HashMap::new())));
     if !map.contains_key(model) {
-        let emb = TextEmbedding::try_new(TextInitOptions::new(resolve_model(model)))
+        let opts = TextInitOptions::new(resolve_model(model)).with_cache_dir(model_cache_dir());
+        let emb = TextEmbedding::try_new(opts)
             .map_err(|e| format!("load embedding model `{model}`: {e}"))?;
         map.insert(model.to_string(), emb);
     }
@@ -406,6 +407,15 @@ pub struct RepoIndex {
 /// Process-wide memo of built indexes, keyed by `canonical-repo-path|model`, so a
 /// flow embeds the repo at most once (every phase reuses it).
 static INDEXES: OnceLock<Mutex<HashMap<String, Arc<RepoIndex>>>> = OnceLock::new();
+
+/// Where the embedding model is downloaded: `FASTEMBED_CACHE_DIR` if set, else
+/// `~/.flows/models`. fastembed's own default is `.fastembed_cache` under the
+/// working directory — i.e. inside the user's repo, where agents then search it.
+fn model_cache_dir() -> PathBuf {
+    std::env::var_os("FASTEMBED_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| flows_index_root().with_file_name("models"))
+}
 
 fn flows_index_root() -> PathBuf {
     let home = std::env::var_os("HOME")
@@ -907,6 +917,14 @@ mod tests {
 
     fn cost(c: &Chunk) -> usize {
         crate::budget::est_str(&format_chunk(c))
+    }
+
+    #[test]
+    fn model_downloads_outside_the_repo() {
+        if std::env::var_os("FASTEMBED_CACHE_DIR").is_none() {
+            assert!(model_cache_dir().ends_with(".flows/models"));
+        }
+        assert!(!model_cache_dir().ends_with(".fastembed_cache"));
     }
 
     #[test]

@@ -5,7 +5,7 @@ Keep an agent phase from spending its round budget once it has stopped making pr
 ## Requirements
 ### Requirement: Stall guard
 
-The agent loop SHALL count consecutive tool rounds in which nothing was written and every tool call returned nothing new: a re-read of an unchanged file, a disabled or result-less `web_search`, or a failed `http_get` / `lookup` (including an `http_get` with status 400 or above). After 3 such rounds it SHALL tell the model to stop gathering and produce its output. After 5, a phase that cannot write files SHALL be sent its next and later requests with no tools, together with a request for the final artifact; a phase that can write files SHALL fail after 8 with a message naming the stall. Any other tool result, or a write, SHALL reset the count.
+The agent loop SHALL count consecutive tool rounds in which nothing was written and every tool call returned nothing new: a re-read of an unchanged file, a disabled or result-less `web_search`, a failed `http_get` / `lookup` (including an `http_get` with status 400 or above), or a read-only call (`list_files`, `search_code`, `web_search`, `http_get`, `lookup`) repeating an earlier call's arguments and result exactly. After 3 such rounds it SHALL tell the model to stop gathering and produce its output. After 5, a phase that cannot write files SHALL be sent its next and later requests with no tools, together with a request for the final artifact; a phase that can write files SHALL fail after 8 with a message naming the stall. Any other tool result, or a write, SHALL reset the count.
 
 #### Scenario: Nudged after three empty rounds
 
@@ -26,6 +26,11 @@ The agent loop SHALL count consecutive tool rounds in which nothing was written 
 
 - **WHEN** a stalled round is followed by a round that reads a file not read before
 - **THEN** the stall count starts again from zero.
+
+#### Scenario: Identical repeat
+
+- **WHEN** an agent repeats a `list_files` or `search_code` call with the same arguments and gets the same result
+- **THEN** that call counts as bringing nothing new.
 
 ### Requirement: Output-cap replies
 

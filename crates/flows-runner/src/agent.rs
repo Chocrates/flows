@@ -1096,6 +1096,9 @@ your context small.",
     // read_file dedup cache: call-args → content hash of what we already served, so
     // an unchanged re-read returns a short pointer instead of the full file again.
     let mut read_cache: HashMap<String, u64> = HashMap::new();
+    // Same for the other read-only tools, for the stall guard only: an identical
+    // call returning an identical result brought nothing new.
+    let mut seen_results: HashMap<String, u64> = HashMap::new();
     // Consecutive empty final responses — nudge the model to start producing, fail
     // if it keeps stalling.
     let mut empty_streak = 0u32;
@@ -1455,7 +1458,13 @@ your context small.",
                 }
                 let failed_fetch = matches!(tc.name.as_str(), "http_get" | "lookup")
                     && (is_error || http_error_status(&result));
-                if !(deduped || dry || failed_fetch) {
+                let repeated = matches!(
+                    tc.name.as_str(),
+                    "list_files" | "search_code" | "web_search" | "http_get" | "lookup"
+                ) && seen_results
+                    .insert(format!("{}|{}", tc.name, tc.arguments), hash_str(&result))
+                    == Some(hash_str(&result));
+                if !(deduped || dry || failed_fetch || repeated) {
                     new_info = true;
                 }
                 if !is_error {

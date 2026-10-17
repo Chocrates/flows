@@ -1043,3 +1043,21 @@ async fn fresh_read_resets_the_stall_count() {
         "no nudge expected"
     );
 }
+
+#[tokio::test]
+async fn repeated_identical_listing_counts_as_stalled() {
+    let repo = repo_with_files();
+    let list = r#"{"path": "."}"#;
+    let phase = read_only_phase();
+    let provider = Recorder::new(vec![
+        tool("list_files", list),
+        tool("list_files", list),
+        tool("list_files", list),
+        tool("list_files", list),
+        artifact_json(r#"{"ok": true}"#),
+    ]);
+    let art = run_with(&phase, repo.path(), &provider, &WebSearchConfig::default()).await;
+    assert_eq!(art.content["ok"], true, "{art:?}");
+    let seen = provider.seen();
+    assert!(seen[4].last.contains("nothing new"), "{seen:?}");
+}
