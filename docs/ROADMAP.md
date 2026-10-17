@@ -40,12 +40,13 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Path-free retrieval eval corpus (`eval-fixtures/retrieval/`: flows + synthetic Python / TypeScript / Go, 68 queries) via `flows eval retrieval --corpus`.
 - Pipeline composition: `include: <template>` splices a template's phases (`as:` alias, `with:` vars, include-level `when`/`depends_on`; prompts resolve under the included template).
 - Retrieval ranks chunks by embedding + BM25 reciprocal-rank fusion (path-free corpus MRR 0.65 → 0.70).
+- Shared per-model vector cache (`~/.flows/vectors/`): worktrees, clones and eval temp dirs reuse embeddings.
 
 ## Next
 
 ### Context delivery follow-ups
 
-- **Improve path-free retrieval** — on the path-free corpus the repo map scores MRR 0.34 and retrieval 0.70 (68 queries). Candidates: a stronger default embedding model, lexical signals in the repo map, real-repo corpora, a vector cache shared across checkouts (eval temp dirs and worktrees re-embed today).
+- **Improve path-free retrieval** — on the path-free corpus the repo map scores MRR 0.34 and retrieval 0.70 (68 queries). Candidates: a stronger default embedding model, lexical signals in the repo map, real-repo corpora.
 
 ### Sandbox & tools
 

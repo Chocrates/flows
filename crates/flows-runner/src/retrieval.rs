@@ -432,6 +432,145 @@ fn chunk_key(embed_text: &str) -> String {
     blake3::hash(embed_text.as_bytes()).to_hex().to_string()
 }
 
+/// Cap for each model's shared vector cache; past it, the newest half is kept.
+const VECTOR_CACHE_MAX_BYTES: u64 = 256 << 20;
+
+/// `~/.flows/vectors/<model>.bin`: chunk vectors by content key, shared by every
+/// checkout, so the same code at another path (eval temp dirs, worktrees,
+/// clones) is never embedded twice.
+fn vector_cache_path(model: &str) -> PathBuf {
+    let name: String = if model.trim().is_empty() {
+        "default".into()
+    } else {
+        model
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    flows_index_root()
+        .with_file_name("vectors")
+        .join(format!("{name}.bin"))
+}
+
+/// One cache record: `[32-byte key][u32 LE dim][dim × f32 LE]`.
+fn encode_vector(key: &str, v: &[f32], out: &mut Vec<u8>) -> bool {
+    let Ok(hash) = blake3::Hash::from_hex(key) else {
+        return false;
+    };
+    out.extend_from_slice(hash.as_bytes());
+    out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+    for x in v {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    true
+}
+
+/// Decode cache records in file order (later = newer). Stops at the first
+/// incomplete record, so a truncated tail costs only that record.
+fn decode_vectors(bytes: &[u8]) -> Vec<(String, Vec<f32>, std::ops::Range<usize>)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 36 <= bytes.len() {
+        let key = blake3::Hash::from_bytes(bytes[i..i + 32].try_into().unwrap());
+        let dim = u32::from_le_bytes(bytes[i + 32..i + 36].try_into().unwrap()) as usize;
+        let end = i + 36 + dim * 4;
+        if dim == 0 || end > bytes.len() {
+            break;
+        }
+        let v = bytes[i + 36..end]
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        out.push((key.to_hex().to_string(), v, i..end));
+        i = end;
+    }
+    out
+}
+
+/// Keep only the newest records, up to `keep_bytes`. Temp file + rename.
+fn compact_vector_cache(path: &Path, keep_bytes: u64) -> std::io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    let records = decode_vectors(&bytes);
+    let mut kept = 0u64;
+    let mut start = records.len();
+    for (idx, (_, _, r)) in records.iter().enumerate().rev() {
+        if kept + r.len() as u64 > keep_bytes {
+            break;
+        }
+        kept += r.len() as u64;
+        start = idx;
+    }
+    let from = records
+        .get(start)
+        .map(|(_, _, r)| r.start)
+        .unwrap_or(bytes.len());
+    let to = records.last().map(|(_, _, r)| r.end).unwrap_or(from);
+    let tmp = path.with_extension("bin.tmp");
+    std::fs::write(&tmp, &bytes[from..to])?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Embed `texts` through the shared cache at `path`: cached keys are reused,
+/// the rest go to `embed` (one call) and are appended. Cache I/O errors are
+/// ignored — the cache only ever saves work.
+fn cached_embed<E>(
+    path: &Path,
+    texts: &[String],
+    embed: E,
+    max_bytes: u64,
+) -> Result<Vec<Vec<f32>>, String>
+where
+    E: FnOnce(&[String]) -> Result<Vec<Vec<f32>>, String>,
+{
+    let keys: Vec<String> = texts.iter().map(|t| chunk_key(t)).collect();
+    let mut known: HashMap<String, Vec<f32>> = std::fs::read(path)
+        .map(|b| {
+            decode_vectors(&b)
+                .into_iter()
+                .map(|(k, v, _)| (k, v))
+                .collect()
+        })
+        .unwrap_or_default();
+    let missing: Vec<usize> = (0..texts.len())
+        .filter(|&i| !known.contains_key(&keys[i]))
+        .collect();
+    if !missing.is_empty() {
+        let batch: Vec<String> = missing.iter().map(|&i| texts[i].clone()).collect();
+        let vectors = embed(&batch)?;
+        if vectors.len() != batch.len() {
+            return Err(format!(
+                "embedder returned {} vectors for {} texts",
+                vectors.len(),
+                batch.len()
+            ));
+        }
+        let mut buf = Vec::new();
+        for (&i, v) in missing.iter().zip(vectors) {
+            encode_vector(&keys[i], &v, &mut buf);
+            known.insert(keys[i].clone(), v);
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        use std::io::Write;
+        let appended = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| f.write_all(&buf));
+        if appended.is_ok() && std::fs::metadata(path).is_ok_and(|m| m.len() > max_bytes) {
+            let _ = compact_vector_cache(path, max_bytes / 2);
+        }
+    }
+    Ok(keys.iter().map(|k| known[k].clone()).collect())
+}
+
 /// Bring `old` up to date with the repo: keep vectors whose key still appears,
 /// embed only new/changed chunks (one `embed` call), and move vectors of chunks
 /// that disappeared to the spare pool. `old` from another model or chunker
@@ -627,8 +766,9 @@ fn load_or_build_index(
     model: &str,
     warnings: &mut Vec<String>,
 ) -> Result<Arc<RepoIndex>, String> {
+    let cache = vector_cache_path(model);
     load_or_build_index_in(&flows_index_root(), repo_root, model, warnings, |t| {
-        embed_local(model, t)
+        cached_embed(&cache, t, |m| embed_local(model, m), VECTOR_CACHE_MAX_BYTES)
     })
 }
 
@@ -1017,6 +1157,78 @@ mod tests {
             .elapsed()
             .unwrap();
         assert!(age.as_secs() < 60);
+    }
+
+    fn texts(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn vector_cache_skips_embedding_known_texts() {
+        let d = tempdir().unwrap();
+        let path = d.path().join("vectors").join("m.bin");
+        let log = RefCell::new(Vec::new());
+        let v1 = cached_embed(&path, &texts(&["a", "b"]), fake_embed(&log), u64::MAX).unwrap();
+        assert_eq!(log.borrow().len(), 2);
+        log.borrow_mut().clear();
+        let v2 = cached_embed(&path, &texts(&["b", "c", "a"]), fake_embed(&log), u64::MAX).unwrap();
+        assert_eq!(*log.borrow(), ["c"], "only the new text is embedded");
+        assert_eq!(v2[0], v1[1]);
+        assert_eq!(v2[2], v1[0]);
+    }
+
+    #[test]
+    fn second_checkout_embeds_nothing() {
+        let home = tempdir().unwrap();
+        let cache = home.path().join("vectors.bin");
+        let (one, two) = (tempdir().unwrap(), tempdir().unwrap());
+        for r in [one.path(), two.path()] {
+            std::fs::write(r.join("a.rs"), fn_src("login")).unwrap();
+            std::fs::write(r.join("b.rs"), fn_src("parse")).unwrap();
+        }
+        let mut embedded = Vec::new();
+        for r in [one.path(), two.path()] {
+            if let Some(m) = INDEXES.get() {
+                crate::lock(m).clear();
+            }
+            let log = RefCell::new(Vec::new());
+            load_or_build_index_in(home.path(), r, "m", &mut Vec::new(), |t| {
+                cached_embed(&cache, t, fake_embed(&log), u64::MAX)
+            })
+            .unwrap();
+            embedded.push(log.into_inner().len());
+        }
+        assert_eq!(embedded, [2, 0]);
+    }
+
+    #[test]
+    fn truncated_cache_keeps_intact_records() {
+        let d = tempdir().unwrap();
+        let path = d.path().join("m.bin");
+        let log = RefCell::new(Vec::new());
+        cached_embed(&path, &texts(&["a", "b"]), fake_embed(&log), u64::MAX).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
+        assert_eq!(decode_vectors(&std::fs::read(&path).unwrap()).len(), 1);
+        log.borrow_mut().clear();
+        cached_embed(&path, &texts(&["a", "b"]), fake_embed(&log), u64::MAX).unwrap();
+        assert_eq!(*log.borrow(), ["b"], "only the damaged record is redone");
+    }
+
+    #[test]
+    fn cache_compacts_to_newest_records() {
+        let d = tempdir().unwrap();
+        let path = d.path().join("m.bin");
+        let log = RefCell::new(Vec::new());
+        cached_embed(&path, &texts(&["a", "b", "c"]), fake_embed(&log), u64::MAX).unwrap();
+        let record = std::fs::metadata(&path).unwrap().len() / 3;
+        // Appending "d" exceeds a 3-record cap → keep the newest 1.5 → 1 record.
+        cached_embed(&path, &texts(&["d"]), fake_embed(&log), record * 3).unwrap();
+        let keys: Vec<String> = decode_vectors(&std::fs::read(&path).unwrap())
+            .into_iter()
+            .map(|(k, _, _)| k)
+            .collect();
+        assert_eq!(keys, [chunk_key("d")]);
     }
 
     #[test]

@@ -178,6 +178,9 @@ context:
   once per flow and persisted under `~/.flows/index/`: only new or changed code
   is re-embedded, and switching back to a recently indexed branch is free. The
   directory is capped at 1 GiB (indexes of deleted checkouts go first, then the
-  least recently used). `retrieval_reindex_threshold` is deprecated and ignored.
+  least recently used). Vectors are also kept per model in `~/.flows/vectors/`
+  (≤ 256 MiB), shared by every checkout, so a worktree, clone, or eval temp dir
+  of the same code embeds nothing. `retrieval_reindex_threshold` is deprecated
+  and ignored.
 - **Measure before enabling.** Use [`flows eval`](./eval.md) to A/B a config
   against baseline on your model. "Useful" is a measured delta, not an assumption.
