@@ -158,7 +158,7 @@ context:
   budgeting: true            # trim old tool results as the window fills
   retrieval: true            # local embedding retrieval of relevant chunks (push)
   # tuning:
-  retrieval_model: minilm            # local embed model (empty → all-MiniLM-L6-v2)
+  retrieval_model: minilm            # minilm (default) | bge-small | bge-base | jina-code | gemma
   retrieval_max_chunks: 8            # hard cap on injected chunks
   retrieval_budget_fraction: 0.25    # retrieved code ≤ this × the model's window
   budget_fraction: 0.6               # trim when est. tokens exceed this × window
@@ -180,6 +180,10 @@ context:
   by embedding similarity fused with keyword (BM25) matching, and the best
   matches are packed into `retrieval_budget_fraction` of the model's
   context window (or `unknown_window_tokens`), at most `retrieval_max_chunks`.
+- **Choosing `retrieval_model`.** `minilm` is small and fast. `gemma`
+  (EmbeddingGemma-300M) ranks best on the eval corpus (MRR 0.83 vs 0.71) for a
+  1.2 GB download and ~10× the indexing time; `jina-code` sits between. See
+  [eval](eval.md) for the numbers. Changing the model re-embeds the repo once.
 - **Retrieval is fully local.** Embeddings run in-process (`fastembed`/ONNX, a
   small model downloaded once) — no server, no cloud, no key. The index is synced
   once per flow and persisted under `~/.flows/index/`: only new or changed code

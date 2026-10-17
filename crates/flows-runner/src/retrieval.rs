@@ -34,15 +34,90 @@ const CHUNKER_VERSION: u32 = 2;
 /// the lifetime of the process. `embed` needs `&mut self`, hence the Mutex.
 static EMBEDDERS: OnceLock<Mutex<HashMap<String, TextEmbedding>>> = OnceLock::new();
 
+/// A local embedding model plus the instruction prefixes it was trained with.
+/// Asymmetric retrieval models (BGE, EmbeddingGemma) rank worse without them.
+struct ModelSpec {
+    model: EmbeddingModel,
+    query_prefix: &'static str,
+    doc_prefix: &'static str,
+}
+
+const BGE_QUERY: &str = "Represent this sentence for searching relevant passages: ";
+
+/// Texts per embedding batch. Small batches bound peak memory (padding to the
+/// longest chunk in a batch dominates) and were no slower: on the eval corpus,
+/// EmbeddingGemma peaked at 3.6 GB with fastembed's default of 256 vs 1.2 GB at 8.
+const EMBED_BATCH: usize = 8;
+
+/// Model names [`resolve_model`] recognises, aliases included.
+const KNOWN_MODELS: &[&str] = &[
+    "minilm",
+    "all-minilm-l6-v2",
+    "allminilml6v2",
+    "bge-small",
+    "bge-small-en-v1.5",
+    "bgesmallenv15",
+    "bge-base",
+    "bge-base-en-v1.5",
+    "bgebaseenv15",
+    "jina-code",
+    "jina-embeddings-v2-base-code",
+    "gemma",
+    "embeddinggemma-300m",
+];
+
+/// Warning for a `retrieval_model` that silently falls back to the default.
+fn unknown_model_warning(name: &str) -> Option<String> {
+    let n = name.trim().to_ascii_lowercase();
+    (!n.is_empty() && !KNOWN_MODELS.contains(&n.as_str())).then(|| {
+        format!(
+            "unknown retrieval_model `{name}`; using minilm \
+             (known: minilm, bge-small, bge-base, jina-code, gemma)"
+        )
+    })
+}
+
 /// Map a config model name to a fastembed model. Unknown/empty → a small, fast
-/// default (all-MiniLM-L6-v2, 384-dim). Kept small so first-run download + CPU
-/// inference stay cheap.
-fn resolve_model(name: &str) -> EmbeddingModel {
+/// default (all-MiniLM-L6-v2, 384-dim, ~90 MB). Path-free corpus MRR (68
+/// queries): minilm 0.71, bge-small 0.72, bge-base 0.72, jina-code 0.77, gemma
+/// 0.83 — the larger ones cost a 0.4–1.2 GB download and ~10× the indexing time.
+/// Dynamically quantized variants are left out: they must embed a whole index in
+/// one batch, so their memory grows with the repo.
+fn resolve_model(name: &str) -> ModelSpec {
+    let spec = |model, query_prefix, doc_prefix| ModelSpec {
+        model,
+        query_prefix,
+        doc_prefix,
+    };
     match name.trim().to_ascii_lowercase().as_str() {
-        "" | "minilm" | "all-minilm-l6-v2" | "allminilml6v2" => EmbeddingModel::AllMiniLML6V2,
-        "bge-small" | "bge-small-en-v1.5" | "bgesmallenv15" => EmbeddingModel::BGESmallENV15,
-        "bge-base" | "bge-base-en-v1.5" | "bgebaseenv15" => EmbeddingModel::BGEBaseENV15,
-        _ => EmbeddingModel::AllMiniLML6V2,
+        "bge-small" | "bge-small-en-v1.5" | "bgesmallenv15" => {
+            spec(EmbeddingModel::BGESmallENV15, BGE_QUERY, "")
+        }
+        "bge-base" | "bge-base-en-v1.5" | "bgebaseenv15" => {
+            spec(EmbeddingModel::BGEBaseENV15, BGE_QUERY, "")
+        }
+        "jina-code" | "jina-embeddings-v2-base-code" => {
+            spec(EmbeddingModel::JinaEmbeddingsV2BaseCode, "", "")
+        }
+        "gemma" | "embeddinggemma-300m" => spec(
+            EmbeddingModel::EmbeddingGemma300M,
+            "task: code retrieval | query: ",
+            "title: none | text: ",
+        ),
+        _ => spec(EmbeddingModel::AllMiniLML6V2, "", ""),
+    }
+}
+
+const PREFIXED_SUFFIX: &str = "@prefixed";
+
+/// Name an index and vector cache are stored under. Prefixed models get a
+/// suffix so vectors embedded before prefixes existed are never reused.
+fn storage_model(model: &str) -> String {
+    let spec = resolve_model(model);
+    if spec.query_prefix.is_empty() && spec.doc_prefix.is_empty() {
+        model.to_string()
+    } else {
+        format!("{model}{PREFIXED_SUFFIX}")
     }
 }
 
@@ -51,14 +126,33 @@ fn resolve_model(name: &str) -> EmbeddingModel {
 fn embed_local(model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
     let mut map = crate::lock(EMBEDDERS.get_or_init(|| Mutex::new(HashMap::new())));
     if !map.contains_key(model) {
-        let opts = TextInitOptions::new(resolve_model(model)).with_cache_dir(model_cache_dir());
+        let opts =
+            TextInitOptions::new(resolve_model(model).model).with_cache_dir(model_cache_dir());
         let emb = TextEmbedding::try_new(opts)
             .map_err(|e| format!("load embedding model `{model}`: {e}"))?;
         map.insert(model.to_string(), emb);
     }
     let emb = map.get_mut(model).expect("just inserted");
-    emb.embed(texts, None)
+    emb.embed(texts, Some(EMBED_BATCH))
         .map_err(|e| format!("embed failed: {e}"))
+}
+
+/// Embed repository chunks with the model's document prefix.
+fn embed_docs(model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    let prefix = resolve_model(model).doc_prefix;
+    if prefix.is_empty() {
+        return embed_local(model, texts);
+    }
+    let texts: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
+    embed_local(model, &texts)
+}
+
+/// Embed the idea with the model's query prefix.
+fn embed_query(model: &str, idea: &str) -> Result<Vec<f32>, String> {
+    let text = format!("{}{idea}", resolve_model(model).query_prefix);
+    embed_local(model, &[text])?
+        .pop()
+        .ok_or_else(|| "empty query embedding".to_string())
 }
 
 /// Source extensions worth embedding. Keeps the index focused on code + docs and
@@ -786,9 +880,10 @@ fn load_or_build_index(
     model: &str,
     warnings: &mut Vec<String>,
 ) -> Result<Arc<RepoIndex>, String> {
-    let cache = vector_cache_path(model);
-    load_or_build_index_in(&flows_index_root(), repo_root, model, warnings, |t| {
-        cached_embed(&cache, t, |m| embed_local(model, m), VECTOR_CACHE_MAX_BYTES)
+    let store = storage_model(model);
+    let cache = vector_cache_path(&store);
+    load_or_build_index_in(&flows_index_root(), repo_root, &store, warnings, |t| {
+        cached_embed(&cache, t, |m| embed_docs(model, m), VECTOR_CACHE_MAX_BYTES)
     })
 }
 
@@ -811,6 +906,10 @@ where
     if let Some(existing) = memo.get(&key) {
         return Ok(existing.clone());
     }
+    // Once per index build, not per phase; `model` is the storage name here.
+    warnings.extend(unknown_model_warning(
+        model.trim_end_matches(PREFIXED_SUFFIX),
+    ));
 
     let path = index_path_in(index_root, &canon, model);
     let old = RepoIndex::load(&path);
@@ -852,9 +951,7 @@ pub fn retrieve(
     if index.chunks.is_empty() {
         return Ok(String::new());
     }
-    let query = embed_local(model, &[idea.to_string()])?
-        .pop()
-        .ok_or_else(|| "empty query embedding".to_string())?;
+    let query = embed_query(model, idea)?;
     let ranked = fused_order(idea, &query, &index.chunks);
     let chunks: Vec<Chunk> = index
         .chunks
@@ -884,9 +981,7 @@ pub fn rank_paths(
     if index.chunks.is_empty() {
         return Ok(Vec::new());
     }
-    let query = embed_local(model, &[idea.to_string()])?
-        .pop()
-        .ok_or_else(|| "empty query embedding".to_string())?;
+    let query = embed_query(model, idea)?;
     let order = fused_order(idea, &query, &index.chunks);
     let mut seen = std::collections::HashSet::new();
     let mut paths = Vec::new();
@@ -927,6 +1022,40 @@ mod tests {
 
     fn cost(c: &Chunk) -> usize {
         crate::budget::est_str(&format_chunk(c))
+    }
+
+    #[test]
+    fn models_resolve_with_their_prefixes() {
+        assert_eq!(resolve_model("").model, EmbeddingModel::AllMiniLML6V2);
+        assert_eq!(resolve_model("nope").model, EmbeddingModel::AllMiniLML6V2);
+        let g = resolve_model(" Gemma ");
+        assert_eq!(g.model, EmbeddingModel::EmbeddingGemma300M);
+        assert!(g.query_prefix.contains("code retrieval"));
+        assert!(!g.doc_prefix.is_empty());
+        assert!(resolve_model("bge-small")
+            .query_prefix
+            .starts_with("Represent"));
+        assert_eq!(
+            resolve_model("jina-code").model,
+            EmbeddingModel::JinaEmbeddingsV2BaseCode
+        );
+    }
+
+    #[test]
+    fn unknown_model_name_warns() {
+        assert!(unknown_model_warning("").is_none());
+        assert!(unknown_model_warning(" Gemma ").is_none());
+        assert!(unknown_model_warning("bge-small-en-v1.5").is_none());
+        assert!(unknown_model_warning("gema").unwrap().contains("`gema`"));
+    }
+
+    #[test]
+    fn prefixed_models_store_apart_from_unprefixed_vectors() {
+        assert_eq!(storage_model(""), "");
+        assert_eq!(storage_model("minilm"), "minilm");
+        assert_eq!(storage_model("jina-code"), "jina-code");
+        assert_eq!(storage_model("bge-small"), "bge-small@prefixed");
+        assert_eq!(storage_model("gemma"), "gemma@prefixed");
     }
 
     #[test]

@@ -45,13 +45,14 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Agent stall guards: replies cut off at `max_tokens` are nudged, then fail; rounds that bring nothing new nudge, then force a tool-less reply (read-only) or abort; an unreachable search backend drops `web_search` for the phase.
 - `thinking: false` turns reasoning off on local OpenAI-compatible servers (`chat_template_kwargs.enable_thinking`).
 - Repo map ranks files by BM25 over path + full source (path-free corpus MRR 0.34 → 0.72; fixtures 0.47 → 1.00).
+- `retrieval_model: gemma` (EmbeddingGemma-300M, path-free MRR 0.83 vs 0.71 default) and `jina-code`; models embed with their trained prefixes, in batches of 8 (gemma 3.6 → 1.2 GB peak); unknown names warn.
 - `flows doctor` probes local model servers (`GET /models`) and warns when one is down or doesn't list its configured model.
 
 ## Next
 
 ### Context delivery follow-ups
 
-- **Improve path-free retrieval** — on the path-free corpus the repo map scores MRR 0.72 and retrieval 0.71 (68 queries). Candidates: a stronger default embedding model, real-repo corpora.
+- **Improve path-free retrieval** — on the path-free corpus the repo map scores MRR 0.72, retrieval 0.71 with the default model and 0.83 with `gemma` (68 queries). Open: whether to make a larger model the default; real-repo corpora.
 
 ### Sandbox & tools
 

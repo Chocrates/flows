@@ -68,26 +68,44 @@ identifier from its repo, so rankers can't win by matching paths.
 | `ts-kanban` | synthetic TypeScript kanban app (client + server), 31 files | 18 |
 | `go-jobqueue` | synthetic Go job-queue service, 30 files | 18 |
 
-Scores (default `all-MiniLM-L6-v2`; `rag` = embedding + BM25 fusion),
-`flows eval retrieval --corpus eval-fixtures/retrieval`:
+Scores (default `all-MiniLM-L6-v2`; `map` = BM25 over path + full source;
+`rag` = embedding + BM25 fusion), `flows eval retrieval --corpus eval-fixtures/retrieval`:
 
 ```
 fixture / corpus             ranker    r@1    r@3    r@5    MRR    n
-flows-workspace              map      0.00   0.11   0.11   0.11   14
+flows-workspace              map      0.32   0.46   0.64   0.57   14
 flows-workspace              rag      0.25   0.43   0.57   0.50   14
-go-jobqueue                  map      0.17   0.22   0.42   0.35   18
-go-jobqueue                  rag      0.42   0.72   0.78   0.85   18
-py-invoicing                 map      0.22   0.58   0.64   0.49   18
-py-invoicing                 rag      0.78   0.89   0.92   0.93   18
-ts-kanban                    map      0.08   0.26   0.39   0.36   18
-ts-kanban                    rag      0.22   0.47   0.67   0.49   18
-MEAN                         map      0.12   0.30   0.40   0.34   68
-MEAN                         rag      0.43   0.64   0.74   0.70   68
+go-jobqueue                  map      0.53   0.69   0.81   0.89   18
+go-jobqueue                  rag      0.39   0.69   0.81   0.81   18
+py-invoicing                 map      0.78   0.83   0.92   0.91   18
+py-invoicing                 rag      0.83   0.89   0.92   0.96   18
+ts-kanban                    map      0.17   0.39   0.55   0.48   18
+ts-kanban                    rag      0.25   0.47   0.56   0.54   18
+MEAN                         map      0.46   0.60   0.73   0.72   68
+MEAN                         rag      0.44   0.63   0.72   0.71   68
 ```
 
-Embedding-only ranking scored MEAN rag MRR 0.65 / r@5 0.70 here.
-On the older per-task fixtures (most name their target file) the same rankers
-score MRR 0.47 / 0.89; judge ranking changes on the corpus.
+Before BM25 the map counted shared words in paths and signatures: MRR 0.34.
+Embedding-only ranking scored rag MRR 0.65 / r@5 0.70.
+
+`rag` by `retrieval_model` (MEAN over the 68 queries; time and peak memory to
+index `ts-kanban` from a cold cache, model already downloaded):
+
+| `retrieval_model` | download | r@1 | r@5 | MRR | index ts-kanban |
+|---|---|---|---|---|---|
+| `minilm` (default) | 90 MB | 0.44 | 0.72 | 0.71 | 5 s, 0.3 GB |
+| `bge-small` | 130 MB | 0.43 | 0.69 | 0.72 | — |
+| `bge-base` | 420 MB | 0.42 | 0.80 | 0.72 | — |
+| `jina-code` | 620 MB | 0.48 | 0.81 | 0.77 | 53 s, 1.3 GB |
+| `gemma` (EmbeddingGemma-300M) | 1.2 GB | 0.54 | 0.82 | 0.83 | 50 s, 1.2 GB |
+
+Also measured and not offered: nomic-embed-text-v1.5 0.65, gte-base 0.74,
+arctic-embed-s 0.67, multilingual-e5-small 0.67 (all with their prefixes);
+quantized EmbeddingGemma scored 0.83 but needs the whole index in one batch
+(27 GB peak on this corpus).
+
+On the older per-task fixtures (most name their target file) the rankers score
+map MRR 1.00 / rag 0.89; judge ranking changes on the corpus.
 
 ```
 model            config     suite    size        pass    in_tok      peak_ctx     cost  rounds   n
