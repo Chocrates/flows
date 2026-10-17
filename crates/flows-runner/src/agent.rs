@@ -1,7 +1,7 @@
 //! Agent phase — the LLM tool loop: build the request, stream the response,
 //! dispatch tools, honour round/cost budgets, parse questions/artifacts.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -188,6 +188,13 @@ const STALL_FORCE_ROUNDS: u32 = 5;
 /// …and a phase that can write is aborted (a tool-less implement reply would only
 /// inline its code).
 const STALL_ABORT_ROUNDS: u32 = 8;
+/// Weaker signal: consecutive rounds of file exploration (reads, listings,
+/// searches) that turned up no file the phase had not already seen and no new
+/// read. Observed: a plan phase over a 3-file repo ran 16 rounds of ever-different
+/// searches that all pointed back at the one file it had read. Nudge, then force
+/// a reply in phases that cannot write.
+const EXPLORE_NUDGE_ROUNDS: u32 = 6;
+const EXPLORE_FORCE_ROUNDS: u32 = 10;
 /// Consecutive replies cut off at the output limit before the phase fails.
 const MAX_CAPPED_RESPONSES: u32 = 2;
 /// Most-recent messages budgeting never trims (keeps the live turn coherent).
@@ -610,6 +617,30 @@ fn summarize_tool_call(name: &str, args: &Value) -> String {
         }
         _ => format!("{name}(...)"),
     }
+}
+
+/// Repo paths a `list_files` / `search_code` result mentions.
+fn touched_paths(tool: &str, result: &str) -> Vec<String> {
+    if result.starts_with("Error") || result.starts_with("No matches") {
+        return Vec::new();
+    }
+    result
+        .lines()
+        .filter_map(|l| match tool {
+            "list_files" => Some(l.trim()).filter(|l| !l.is_empty() && *l != "(empty)"),
+            _ => l.split_once(':').map(|(p, _)| p.trim()),
+        })
+        .filter(|p| !p.is_empty() && !p.contains(' '))
+        .map(norm_path)
+        .collect()
+}
+
+fn norm_path(p: &str) -> String {
+    p.trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// A tool error from failing to reach the backend at all (connect / send / read),
@@ -1099,6 +1130,10 @@ your context small.",
     // Same for the other read-only tools, for the stall guard only: an identical
     // call returning an identical result brought nothing new.
     let mut seen_results: HashMap<String, u64> = HashMap::new();
+    // Paths the phase has read, listed or seen in a search hit, and the streak
+    // of exploration rounds that added none (see EXPLORE_*).
+    let mut known_paths: HashSet<String> = HashSet::new();
+    let mut explore_streak = 0u32;
     // Consecutive empty final responses — nudge the model to start producing, fail
     // if it keeps stalling.
     let mut empty_streak = 0u32;
@@ -1339,6 +1374,8 @@ your context small.",
             let mut noop_write_this_round = false;
             // Did any call bring something new? (See STALL_* above.)
             let mut new_info = false;
+            // Did the round do anything besides exploring already-known files?
+            let mut explored_new = false;
             for tc in &tool_calls {
                 let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(json!({}));
                 callbacks.on_tool_call(&tc.name, &summarize_tool_call(&tc.name, &args));
@@ -1464,8 +1501,26 @@ your context small.",
                 ) && seen_results
                     .insert(format!("{}|{}", tc.name, tc.arguments), hash_str(&result))
                     == Some(hash_str(&result));
-                if !(deduped || dry || failed_fetch || repeated) {
+                let fresh = !(deduped || dry || failed_fetch || repeated);
+                if fresh {
                     new_info = true;
+                }
+                explored_new |= match tc.name.as_str() {
+                    "read_file" => fresh,
+                    "list_files" | "search_code" => {
+                        let mut any = false;
+                        for p in touched_paths(&tc.name, &result) {
+                            any |= known_paths.insert(p);
+                        }
+                        any
+                    }
+                    // Anything else (bash, a write, a fetch) is not exploration.
+                    _ => fresh,
+                };
+                if tc.name == "read_file" {
+                    if let Some(p) = args.get("path").and_then(Value::as_str) {
+                        known_paths.insert(norm_path(p));
+                    }
                 }
                 if !is_error {
                     all_errored = false;
@@ -1516,7 +1571,29 @@ your context small.",
                      assumption."
                 }));
             }
-            if stall_streak >= STALL_FORCE_ROUNDS && !can_write && !forced_reply {
+            if wrote_this_round || explored_new {
+                explore_streak = 0;
+            } else {
+                explore_streak += 1;
+            }
+            if explore_streak == EXPLORE_NUDGE_ROUNDS && stall_streak < STALL_NUDGE_ROUNDS {
+                callbacks.on_note(
+                    "⚠ stall guard: exploration keeps returning files already seen — nudging the model to produce its output",
+                );
+                messages.push(Message::user(format!(
+                    "Your last {EXPLORE_NUDGE_ROUNDS} rounds of reading and searching found nothing \
+                     you had not already seen. The repository has nothing more to show you for \
+                     this task. Stop exploring and {}.",
+                    if can_write {
+                        "write the code with `write_file`"
+                    } else {
+                        "reply now with the final artifact JSON"
+                    }
+                )));
+            }
+            let explore_force = explore_streak >= EXPLORE_FORCE_ROUNDS;
+            if (stall_streak >= STALL_FORCE_ROUNDS || explore_force) && !can_write && !forced_reply
+            {
                 forced_reply = true;
                 callbacks.on_note(
                     "⚠ stall guard: tools switched off — the model must reply with its artifact",

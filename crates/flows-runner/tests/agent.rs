@@ -1061,3 +1061,36 @@ async fn repeated_identical_listing_counts_as_stalled() {
     let seen = provider.seen();
     assert!(seen[4].last.contains("nothing new"), "{seen:?}");
 }
+
+#[tokio::test]
+async fn exploring_only_known_files_is_nudged_then_forced() {
+    let repo = repo_with_files();
+    // Read both files, then ten listings that differ in their arguments (so
+    // none is an identical repeat) but only ever show the two known files.
+    let mut script = vec![
+        tool("read_file", READ_A),
+        tool("read_file", r#"{"path": "b.txt"}"#),
+    ];
+    for n in 0..10 {
+        script.push(tool("list_files", &format!(r#"{{"path": ".", "n": {n}}}"#)));
+    }
+    script.push(artifact_json(r#"{"ok": true}"#));
+    let provider = Recorder::new(script);
+    let art = run_with(
+        &read_only_phase(),
+        repo.path(),
+        &provider,
+        &WebSearchConfig::default(),
+    )
+    .await;
+    assert_eq!(art.content["ok"], true, "{art:?}");
+    let seen = provider.seen();
+    // Six listings that add nothing → nudge; ten → tools off for the reply.
+    assert!(
+        seen[8].last.contains("nothing you had not already seen"),
+        "{seen:?}"
+    );
+    assert!(seen[..12].iter().all(|s| !s.no_tool_calls));
+    assert!(seen[12].no_tool_calls, "{seen:?}");
+    assert_eq!(seen.len(), 13);
+}

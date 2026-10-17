@@ -278,6 +278,7 @@ All UI (TUI, foreground print, background notify) is implemented via `RunnerCall
    - **empty replies**: nudged, the phase fails after 3;
    - **output cap**: a reply stopped by `max_tokens` (`length` / `max_tokens`) with no tool call is nudged to be brief rather than taken as the artifact; a second in a row fails the phase naming the limit;
    - **stalls**: rounds whose calls bring nothing new (deduplicated re-reads, identical repeats of a read-only call, dead or empty searches, failed or 4xx/5xx fetches) nudge at 3; at 5 a read-only phase gets `tool_choice: none` and must reply; a write-capable phase aborts at 8;
+   - **exploration without novelty**: rounds of reads / listings / searches that surface no unseen path and no new read nudge at 6 and force a read-only phase to reply at 10;
    - **dead search**: a `web_search` that cannot reach its backend (or 6 empty results) turns search off for the phase and drops it from the offered tools.
 
 #### Context delivery (small models)

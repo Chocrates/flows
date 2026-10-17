@@ -32,6 +32,15 @@ The agent loop SHALL count consecutive tool rounds in which nothing was written 
 - **WHEN** an agent repeats a `list_files` or `search_code` call with the same arguments and gets the same result
 - **THEN** that call counts as bringing nothing new.
 
+### Requirement: Exploration that finds nothing new
+
+The agent loop SHALL also count consecutive tool rounds in which nothing was written and every call was a file exploration (`read_file`, `list_files`, `search_code`) that neither read new content nor mentioned a path the phase had not already read, listed or seen in a search hit. After 6 such rounds it SHALL tell the model the repository has nothing more to show and to produce its output; after 10, a phase that cannot write files SHALL be sent its later requests with no tools, as for the stall guard. Any other tool call, a new path, or a write SHALL reset the count.
+
+#### Scenario: Searching files already read
+
+- **WHEN** a read-only phase has read every file a search can find and spends ten rounds listing and searching them with varied arguments
+- **THEN** it is nudged after six rounds and its eleventh request offers no tools.
+
 ### Requirement: Output-cap replies
 
 When a response ends because it reached the output token limit (stop reason `length` or `max_tokens`) and contains no tool call, the agent loop SHALL NOT treat it as the artifact or as an empty reply. It SHALL tell the model its reply was cut off at the limit and to reason briefly before acting. A second consecutive capped reply SHALL fail the phase with a message that names the `max_tokens` limit.
