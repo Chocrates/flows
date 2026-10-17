@@ -699,6 +699,29 @@ fn push_tool_call(v: &Value, out: &mut Vec<ToolCall>) -> bool {
     true
 }
 
+/// Parse Qwen3-Coder's XML tool-call body into `{name, arguments}`:
+/// `<function=read_file><parameter=path>src/lib.rs</parameter></function>`.
+/// Parameter values that parse as JSON (numbers, booleans, objects) keep their
+/// type; anything else is a string.
+fn xml_function_call(body: &str) -> Option<Value> {
+    static FUNC: OnceLock<Regex> = OnceLock::new();
+    static PARAM: OnceLock<Regex> = OnceLock::new();
+    let func = FUNC.get_or_init(|| Regex::new(r"<function=([^>\s]+)>").unwrap());
+    let param = PARAM
+        .get_or_init(|| Regex::new(r"(?s)<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>").unwrap());
+    let name = func.captures(body)?[1].to_string();
+    let mut args = serde_json::Map::new();
+    for c in param.captures_iter(body) {
+        let raw = &c[2];
+        let v = match serde_json::from_str::<Value>(raw.trim()) {
+            Ok(v) if !v.is_string() => v,
+            _ => Value::String(raw.to_string()),
+        };
+        args.insert(c[1].to_string(), v);
+    }
+    Some(json!({"name": name, "arguments": Value::Object(args)}))
+}
+
 pub fn extract_text_tool_calls(text: &str) -> Vec<ToolCall> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
@@ -706,9 +729,13 @@ pub fn extract_text_tool_calls(text: &str) -> Vec<ToolCall> {
     });
     let mut out = Vec::new();
 
-    // 1. XML-tagged blocks: `<tool_call>{…}</tool_call>` / `<tools>{…}</tools>`.
+    // 1. XML-tagged blocks: `<tool_call>{…}</tool_call>` / `<tools>{…}</tools>`,
+    //    or Qwen3-Coder's XML body `<function=NAME><parameter=K>V</parameter>…`.
     for cap in re.captures_iter(text) {
-        if let Ok(v) = serde_json::from_str::<Value>(cap[1].trim()) {
+        let body = cap[1].trim();
+        if let Ok(v) = serde_json::from_str::<Value>(body) {
+            push_tool_call(&v, &mut out);
+        } else if let Some(v) = xml_function_call(body) {
             push_tool_call(&v, &mut out);
         }
     }
@@ -1701,6 +1728,30 @@ starting — likely stuck in a build/search loop"
             continue;
         }
 
+        // Tools are off, but the model answered with a call written as text: not
+        // an artifact. Say so; repeated, it counts toward the empty-reply limit.
+        if forced_reply && !extract_text_tool_calls(&completion.content).is_empty() {
+            empty_streak += 1;
+            if empty_streak >= MAX_EMPTY_RESPONSES {
+                let msg = format!(
+                    "the model kept calling tools after they were switched off \
+                     ({empty_streak} replies) and never produced its artifact"
+                );
+                callbacks.on_note(&format!("⛔ stall guard: {msg}"));
+                return AgentResult {
+                    artifact: error_artifact(&phase.name, idea, msg),
+                    cost_usd: phase_cost,
+                };
+            }
+            callbacks.on_note("⚠ stall guard: model replied with a tool call while tools are off");
+            messages.push(Message::assistant_text(completion.content.clone()));
+            messages.push(Message::user(
+                "Tools are switched off; that tool call was not run and will not be. Write \
+                 your final answer now as the artifact JSON, from what you already know.",
+            ));
+            continue;
+        }
+
         // Text response.
         messages.push(Message::assistant_text(completion.content.clone()));
         let parsed = parse_response(&completion.content);
@@ -1872,6 +1923,16 @@ mod tool_list_tests {
             "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>",
         );
         assert_eq!(calls[0].name, "read_file");
+        // Qwen3-Coder's XML body, with typed and multi-line values.
+        let calls = extract_text_tool_calls(
+            "<tool_call>\n<function=read_file>\n<parameter=path>\nsrc/lib.rs\n</parameter>\n\
+             <parameter=start_line>\n3\n</parameter>\n</function>\n</tool_call>",
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+        assert_eq!(args["path"], "src/lib.rs");
+        assert_eq!(args["start_line"], 3);
         // No tool blocks → nothing.
         assert!(extract_text_tool_calls("just some prose, no tools").is_empty());
     }

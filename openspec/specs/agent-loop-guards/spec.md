@@ -17,6 +17,11 @@ The agent loop SHALL count consecutive tool rounds in which nothing was written 
 - **WHEN** a phase without write access stalls for five rounds
 - **THEN** its next request offers no tools and asks for the final artifact, and the reply becomes the phase artifact.
 
+#### Scenario: Tool call written as text while tools are off
+
+- **WHEN** a phase whose tools were switched off replies with a tool call written as text (JSON or Qwen-style XML)
+- **THEN** the reply is not taken as the artifact; the model is told the call was not run and asked for the artifact, and three such replies fail the phase.
+
 #### Scenario: Write-capable phase aborted
 
 - **WHEN** a phase with write access stalls for eight rounds

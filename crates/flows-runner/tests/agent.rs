@@ -1124,3 +1124,29 @@ async fn thinking_false_reaches_the_request() {
     .await;
     assert!(provider.seen()[0].disable_thinking);
 }
+
+#[tokio::test]
+async fn tool_call_written_as_text_after_tools_are_off_is_not_the_artifact() {
+    let repo = repo_with_files();
+    let mut script: Vec<Completion> = (0..6).map(|_| tool("read_file", READ_A)).collect();
+    // Tools are now off; the model writes the call out in Qwen's XML instead.
+    script.push(text(
+        "<tool_call>\n<function=read_file>\n<parameter=path>\na.txt\n</parameter>\n</function>\n</tool_call>",
+    ));
+    script.push(artifact_json(r#"{"ok": true}"#));
+    let provider = Recorder::new(script);
+    let art = run_with(
+        &read_only_phase(),
+        repo.path(),
+        &provider,
+        &WebSearchConfig::default(),
+    )
+    .await;
+    assert_eq!(art.content["ok"], true, "{art:?}");
+    let seen = provider.seen();
+    assert!(seen[7].no_tool_calls);
+    assert!(
+        seen[7].last.contains("that tool call was not run"),
+        "{seen:?}"
+    );
+}
