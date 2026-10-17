@@ -124,9 +124,39 @@ pub fn load_template(
     repo_root: &Path,
     flows_dir: Option<&Path>,
 ) -> Result<(Vec<PhaseConfig>, String), TemplateError> {
-    let text = template_text(name.unwrap_or(DEFAULT_TEMPLATE), repo_root, flows_dir)?;
-    let phases = parse_phases_from_yaml_with(&text, &include_resolver(repo_root, flows_dir))?;
+    let name = name.unwrap_or(DEFAULT_TEMPLATE);
+    let text = template_text(name, repo_root, flows_dir)?;
+    let mut phases = parse_phases_from_yaml_with(&text, &include_resolver(repo_root, flows_dir))?;
+    crate::registry::mark_untrusted(
+        &mut phases,
+        Some(name),
+        &installed_untrusted(repo_root, flows_dir),
+    );
     Ok((phases, text))
+}
+
+/// Whether template `name` resolves to an untrusted registry install: the
+/// global copy wins the lookup (no project override) and the lockfile lists it
+/// without trust.
+pub fn installed_untrusted<'a>(
+    repo_root: &'a Path,
+    flows_dir: Option<&'a Path>,
+) -> impl Fn(&str) -> bool + 'a {
+    let global = global_templates_dir(flows_dir);
+    let lock = global
+        .parent()
+        .map(crate::registry::read_lock)
+        .unwrap_or_default();
+    move |name: &str| {
+        let file = format!("{name}.yml");
+        !repo_root
+            .join(".flows")
+            .join("templates")
+            .join(&file)
+            .exists()
+            && global.join(&file).exists()
+            && lock.templates.get(name).is_some_and(|e| !e.trusted)
+    }
 }
 
 /// A template's raw YAML: project override → global override → builtin.

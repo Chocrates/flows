@@ -13,6 +13,7 @@ pub mod models;
 pub mod notify;
 pub mod pipeline;
 pub mod pricing;
+pub mod registry;
 pub mod state;
 pub mod templates;
 pub mod thinking;

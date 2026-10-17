@@ -380,6 +380,11 @@ pub struct PhaseConfig {
     /// Set when the phase came from an `include:` (see `flows_core::include`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<IncludeOrigin>,
+    /// Defined by an installed, untrusted registry template: script phases run
+    /// sandboxed and credentials stay hidden. Set by the template loader, never
+    /// from YAML (see `flows_core::registry`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub untrusted: bool,
 }
 
 /// Where an included phase came from, and what it needs at run time.
@@ -427,6 +432,7 @@ impl PhaseConfig {
             depends_on: Vec::new(),
             when: None,
             origin: None,
+            untrusted: false,
         }
     }
 }

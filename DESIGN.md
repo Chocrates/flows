@@ -508,6 +508,25 @@ colours.
 
 ---
 
+## Template registry (flows-core::registry)
+
+`flows templates install <git-url>[//path][@ref]` clones with hooks disabled
+(`core.hooksPath=/dev/null`, `protocol.ext.allow=never`, no terminal prompts),
+resolves the ref to a commit, and reads one template plus `prompts/<stem>/*.md`
+(regular files only, no symlinks, ≤ 256 KiB each). A review (phases, script
+commands, bash settings, includes, prompts) is printed before anything is
+written. Installs go to `~/.flows/templates/<name>.yml` +
+`~/.flows/prompts/<name>/`, recorded in `~/.flows/templates/registry.lock`
+(source, path, ref, commit, file hashes, trust).
+
+Trust is enforced at load: `registry::mark_untrusted` marks every phase whose
+defining template (the loaded one, or an `include:` origin) resolved to an
+untrusted install — global copy wins the lookup and the lockfile lists it
+without trust. Marked phases get `PhaseConfig.untrusted` (serialized into run
+meta) and `expose_credentials` cleared; `script.rs` runs their commands through
+`sandbox::confined_command` (same wrapping, limits and env scrubbing as the bash
+tool) instead of `/bin/sh` on the host. `update` resets trust unless re-granted.
+
 ## Cost estimation (flows-core::estimate)
 
 `estimate_pipeline(phases, idea, template_name, repo_root, llm)` returns `list[PhaseEstimate]`.
@@ -585,13 +604,11 @@ flows doctor                             # check config, API keys, env vars, req
 flows doctor --check-llm                 # also send a test LLM request
 
 # Templates
-flows templates list                     # list all templates (builtin + user)
-flows templates show <name>              # print template YAML
-flows templates copy <name>              # copy to ~/.flows/templates/ for editing
-flows templates copy <name> --to <path>
-flows templates edit <name>              # open in $EDITOR (copies builtin first)
-flows templates sync                     # refresh builtin templates/prompts into ~/.flows/; skips locally-modified files
-flows templates sync --force             # also overwrite locally-modified files
+flows templates list                     # list all templates (project → global → builtin)
+flows templates sync [--force]           # copy builtin templates/prompts into ~/.flows/
+flows templates new <name>               # scaffold a commented template
+flows templates install <git>[//path][@ref] [--as N] [--trust] [--yes]
+flows templates installed | update <name> | remove <name> | trust <name> [--revoke]
 
 # Prompts
 flows prompts list                       # list all agent prompts

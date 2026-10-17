@@ -7,6 +7,15 @@ use crate::estimate::{estimate_pipeline, PhaseEstimate};
 use crate::models::{GlobalConfig, PhaseConfig, ProjectConfig};
 use crate::pipeline::{is_dag, validate_pipeline};
 
+/// `when:` condition plus a marker for phases confined as untrusted.
+fn phase_suffix(p: &PhaseConfig) -> String {
+    let mut s = when_suffix(p);
+    if p.untrusted {
+        s.push_str("  (untrusted template: confined)");
+    }
+    s
+}
+
 fn when_suffix(p: &PhaseConfig) -> String {
     p.when
         .as_deref()
@@ -29,7 +38,7 @@ pub fn build_plan_lines(phases: &[PhaseConfig]) -> Vec<String> {
                 p.name,
                 p.phase_type.as_str(),
                 dep_str,
-                when_suffix(p)
+                phase_suffix(p)
             ));
         }
     } else {
@@ -39,7 +48,7 @@ pub fn build_plan_lines(phases: &[PhaseConfig]) -> Vec<String> {
                 i + 1,
                 p.name,
                 p.phase_type.as_str(),
-                when_suffix(p)
+                phase_suffix(p)
             ));
         }
     }

@@ -354,6 +354,7 @@ pub(crate) fn parse_phase(p: &Value) -> Result<PhaseConfig> {
         depends_on: get_str_list(p, "depends_on").unwrap_or_default(),
         when: get_str(p, "when").filter(|w| !w.trim().is_empty()),
         origin: None,
+        untrusted: false,
     })
 }
 
@@ -382,7 +383,14 @@ pub fn load_project_config(repo_path: &Path) -> Result<Option<ProjectConfig>> {
 
     let phases = match raw.get("phases") {
         Some(Value::Sequence(seq)) => {
-            parse_phases_with(seq, &crate::templates::include_resolver(repo_path, None))?
+            let mut phases =
+                parse_phases_with(seq, &crate::templates::include_resolver(repo_path, None))?;
+            crate::registry::mark_untrusted(
+                &mut phases,
+                None,
+                &crate::templates::installed_untrusted(repo_path, None),
+            );
+            phases
         }
         _ => Vec::new(),
     };

@@ -1,5 +1,5 @@
-//! Script phase — runs a user-authored shell command (trusted, not sandboxed),
-//! captures output. Port of `flows/phases/script.py`.
+//! Script phase — runs a user-authored shell command (trusted, not sandboxed;
+//! scripts from untrusted installed templates are sandboxed), captures output. Port of `flows/phases/script.py`.
 //!
 //! Also resolves the `@auto:test` / `@auto:lint` sentinels: pick the project's
 //! test/lint command in pure Rust (no LLM, no tokens) — preferring a `make`
@@ -192,10 +192,21 @@ pub fn run_script_cancellable(
         .render_str(command, context! { idea => idea, vars => phase.vars() })
         .map_err(|e| format!("command render failed: {e}"))?;
 
-    let mut child = Command::new("/bin/sh")
-        .arg("-c")
-        .arg(&rendered)
-        .current_dir(repo_root)
+    // Scripts are trusted host commands — except those from an installed,
+    // untrusted registry template, which run in the shell sandbox (fail closed).
+    let mut cmd = if phase.untrusted {
+        flows_tools::sandbox::confined_command(
+            &rendered,
+            repo_root,
+            &flows_tools::sandbox::Confinement::default(),
+        )
+        .map_err(|e| format!("untrusted template script: {e}"))?
+    } else {
+        let mut c = Command::new("/bin/sh");
+        c.arg("-c").arg(&rendered).current_dir(repo_root);
+        c
+    };
+    let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

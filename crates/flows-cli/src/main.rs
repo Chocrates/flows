@@ -281,6 +281,40 @@ enum TemplatesCmd {
         /// Template name (alphanumeric, dashes/underscores ok).
         name: String,
     },
+    /// Install a template from git, pinned to a commit, after a review.
+    /// SOURCE is `<git-url>[//<path>][@<ref>]`, e.g.
+    /// `https://github.com/acme/flows-templates//ship@v1`.
+    Install {
+        source: String,
+        /// Install under this name instead of the template's file name.
+        #[arg(long = "as")]
+        as_name: Option<String>,
+        /// Trust it: script phases run on the host and may expose credentials.
+        #[arg(long)]
+        trust: bool,
+        /// Skip the confirmation prompt (the review is still printed).
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// List templates installed from git, with source, commit and trust.
+    Installed,
+    /// Move an installed template to the latest commit of its ref (shows a diff).
+    /// Trust is reset unless --trust is given.
+    Update {
+        name: String,
+        #[arg(long)]
+        trust: bool,
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Remove an installed template and its prompts.
+    Remove { name: String },
+    /// Trust an installed template (scripts run on the host), or --revoke.
+    Trust {
+        name: String,
+        #[arg(long)]
+        revoke: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -336,6 +370,16 @@ fn main() -> ExitCode {
             TemplatesCmd::List => cmd_templates_list(),
             TemplatesCmd::Sync { force } => cmd_templates_sync(force),
             TemplatesCmd::New { name } => cmd_templates_new(&name),
+            TemplatesCmd::Install {
+                source,
+                as_name,
+                trust,
+                yes,
+            } => cmd_templates_install(&source, as_name.as_deref(), trust, yes),
+            TemplatesCmd::Installed => cmd_templates_installed(),
+            TemplatesCmd::Update { name, trust, yes } => cmd_templates_update(&name, trust, yes),
+            TemplatesCmd::Remove { name } => cmd_templates_remove(&name),
+            TemplatesCmd::Trust { name, revoke } => cmd_templates_trust(&name, revoke),
         },
         Command::Config { command } => match command {
             ConfigCmd::Show => cmd_config_show(),
@@ -787,10 +831,104 @@ fn cmd_init(global: bool, template: &str, force: bool) -> Result<(), String> {
 
 fn cmd_templates_list() -> Result<(), String> {
     let cwd = std::env::current_dir().ok();
-    let names = list_templates(Some(&flows_dir().join("templates")), cwd.as_deref());
+    let names = list_templates(Some(&flows_dir()), cwd.as_deref());
     for n in names {
         println!("{n}");
     }
+    Ok(())
+}
+
+fn confirm(prompt: &str, yes: bool) -> bool {
+    yes || matches!(read_line(prompt).to_lowercase().as_str(), "y" | "yes")
+}
+
+fn cmd_templates_install(
+    source: &str,
+    as_name: Option<&str>,
+    trust: bool,
+    yes: bool,
+) -> Result<(), String> {
+    use flows_core::registry;
+    let src = registry::Source::parse(source)?;
+    let dir = flows_dir();
+    println!("Fetching {} …", src.display());
+    let pkg = registry::fetch(&src)?;
+    let name = as_name.unwrap_or(&pkg.stem).to_string();
+    registry::check_new_name(&dir, &name)?;
+    println!("\n{}", registry::review(&src, &pkg, &name, trust));
+    if !confirm("Install? [y/N]", yes) {
+        return Err("not installed".into());
+    }
+    registry::install(&dir, &src, &pkg, &name, trust)?;
+    println!(
+        "Installed {name} @ {}",
+        &pkg.commit[..12.min(pkg.commit.len())]
+    );
+    Ok(())
+}
+
+fn cmd_templates_remove(name: &str) -> Result<(), String> {
+    flows_core::registry::remove(&flows_dir(), name)?;
+    println!("Removed {name}");
+    Ok(())
+}
+
+fn cmd_templates_trust(name: &str, revoke: bool) -> Result<(), String> {
+    flows_core::registry::set_trust(&flows_dir(), name, !revoke)?;
+    if revoke {
+        println!("{name}: untrusted (script phases sandboxed)");
+    } else {
+        println!("{name}: trusted (script phases run on this machine)");
+    }
+    Ok(())
+}
+
+fn cmd_templates_installed() -> Result<(), String> {
+    let lock = flows_core::registry::read_lock(&flows_dir());
+    if lock.templates.is_empty() {
+        println!("No templates installed. Add one with `flows templates install <git-url>`.");
+    }
+    for (name, e) in &lock.templates {
+        println!(
+            "{name:<20} {}  {}  {}",
+            &e.commit[..12.min(e.commit.len())],
+            if e.trusted { "trusted  " } else { "untrusted" },
+            e.source().display()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_templates_update(name: &str, trust: bool, yes: bool) -> Result<(), String> {
+    use flows_core::registry;
+    let dir = flows_dir();
+    let lock = registry::read_lock(&dir);
+    let entry = lock
+        .templates
+        .get(name)
+        .ok_or_else(|| format!("{name:?} is not an installed template"))?;
+    let src = entry.source();
+    println!("Fetching {} …", src.display());
+    let pkg = registry::fetch(&src)?;
+    let diff = registry::update_diff(&dir, name, &pkg);
+    if pkg.commit == entry.commit && diff.is_empty() {
+        println!(
+            "{name} is up to date ({})",
+            &pkg.commit[..12.min(pkg.commit.len())]
+        );
+        return Ok(());
+    }
+    println!("\n{}", registry::review(&src, &pkg, name, trust));
+    println!(
+        "Changes {} → {}:\n{diff}",
+        &entry.commit[..12.min(entry.commit.len())],
+        &pkg.commit[..12.min(pkg.commit.len())]
+    );
+    if !confirm("Update? [y/N]", yes) {
+        return Err("not updated".into());
+    }
+    registry::install(&dir, &src, &pkg, name, trust)?;
+    println!("Updated {name}");
     Ok(())
 }
 

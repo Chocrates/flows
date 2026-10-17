@@ -85,3 +85,36 @@ fn missing_command_errors() {
     p.phase_type = flows_core::models::PhaseType::Script;
     assert!(run_script(&p, d.path(), "").is_err());
 }
+
+#[test]
+fn untrusted_script_runs_sandboxed() {
+    if !flows_tools::sandbox_available() {
+        eprintln!("skipping: no sandbox");
+        return;
+    }
+    let repo = tempfile::tempdir().unwrap();
+    // Outside the repo and outside /tmp (the sandbox has a private /tmp).
+    let outside = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let marker = outside.path().join("pwned");
+    let cmd = format!(
+        "touch {}; echo inside > in-repo.txt; echo $SECRET_TOKEN",
+        marker.display()
+    );
+    std::env::set_var("SECRET_TOKEN", "hunter2");
+
+    let mut p = script_phase("s", &cmd);
+    p.untrusted = true;
+    let res = flows_runner::run_script(&p, repo.path(), "idea").unwrap();
+    assert!(!marker.exists(), "write outside the repo must fail");
+    assert!(
+        repo.path().join("in-repo.txt").exists(),
+        "repo stays writable"
+    );
+    assert!(!res.stdout.contains("hunter2"), "host env is cleared");
+
+    // Control: the same script from a trusted template runs on the host.
+    p.untrusted = false;
+    let res = flows_runner::run_script(&p, repo.path(), "idea").unwrap();
+    assert!(marker.exists());
+    assert!(res.stdout.contains("hunter2"));
+}

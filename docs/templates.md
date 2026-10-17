@@ -13,6 +13,7 @@ builtin. Three ways to author one:
 flows templates list          # what's available (project → global → builtin)
 flows templates sync          # copy ALL builtins into ~/.flows/templates to edit
 flows templates new <name>    # scaffold a fresh, heavily-commented template
+flows templates install <git> # install a shared template (see below)
 ```
 
 - **`sync`** drops editable copies of every shipped template (and the agent
@@ -23,6 +24,44 @@ flows templates new <name>    # scaffold a fresh, heavily-commented template
   with `flows run "…" --template <name>`.
 - For a **single project**, put a `.flows.yml` at the repo root (`flows init`
   detects your stack and generates one).
+
+### Installing templates from git
+
+```bash
+flows templates install https://github.com/acme/flows-templates//ship@v1
+flows templates installed               # source, pinned commit, trust
+flows templates update ship             # fetch the ref again, show a diff, confirm
+flows templates remove ship
+flows templates trust ship [--revoke]
+```
+
+The source is `<git-url>[//<path>][@<ref>]`. `<path>` is a `.yml` template or a
+directory holding exactly one; its prompts come from `prompts/<stem>/*.md` next
+to it. The ref (default: the default branch) is resolved to a commit and pinned in
+`~/.flows/templates/registry.lock`; the template goes to
+`~/.flows/templates/<name>.yml` and its prompts to `~/.flows/prompts/<name>/`.
+`--as <name>` renames it. Names of builtins or of your own global templates are
+refused, so an install never silently replaces something.
+
+Before writing anything, install (and update) prints a review: the commit, every
+phase, every script command, bash allowlists and risky settings
+(`unrestricted`, `expose_credentials`), includes and prompt files. Nothing is
+installed unless you confirm (`--yes` skips the prompt, not the review).
+
+**Installed templates are untrusted by default.** A template is code, so:
+
+- their **script phases run in the shell sandbox** (writes limited to the
+  project, credential stores hidden, environment cleared) instead of directly on
+  your machine, and fail if no sandbox is available;
+- their agent phases **can't expose credentials** (`expose_credentials` is
+  ignored);
+- this holds wherever their phases appear, including through `include:`, and
+  `flows plan` marks them `(untrusted template: confined)`.
+
+`flows templates trust <name>` (or `install --trust`) lifts both after you've
+reviewed it; `update` resets trust unless you pass `--trust` again. A project
+template (`.flows/templates/<name>.yml`) with the same name still wins and is
+treated like any local template.
 
 A template is YAML with an optional `llm:` block and a list of `phases:`:
 

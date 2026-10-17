@@ -40,6 +40,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Path-free retrieval eval corpus (`eval-fixtures/retrieval/`: flows + synthetic Python / TypeScript / Go, 68 queries) via `flows eval retrieval --corpus`.
 - Pipeline composition: `include: <template>` splices a template's phases (`as:` alias, `with:` vars, include-level `when`/`depends_on`; prompts resolve under the included template).
 - Retrieval ranks chunks by embedding + BM25 reciprocal-rank fusion (path-free corpus MRR 0.65 → 0.70).
+- Template registry: `flows templates install <git>[//path][@ref]` pins to a commit, reviews before writing, and confines untrusted templates (scripts sandboxed, no credential exposure).
 - Shared per-model vector cache (`~/.flows/vectors/`): worktrees, clones and eval temp dirs reuse embeddings.
 
 ## Next
@@ -51,10 +52,6 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 ### Sandbox & tools
 
 - **macOS sandbox IPC parity** — the Seatbelt profile allows `network*` (including unix sockets) and all `mach-lookup`, so a sandboxed command may reach launchd/host services. Linux denies unix sockets via seccomp; macOS needs `(allow network* (remote ip))`-style rules and a mach-lookup allowlist, verified on a Mac.
-
-### Pipelines
-
-- **Template registry** — share/import community templates.
 
 ### Later / maybe
 

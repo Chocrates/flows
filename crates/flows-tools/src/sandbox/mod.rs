@@ -386,12 +386,24 @@ pub fn run_confined(
     )
 }
 
-fn spawn_with_timeout(
-    argv: &[String],
-    cwd: &Path,
-    timeout_secs: u64,
-    limits: &Limits,
-) -> std::io::Result<Output> {
+/// A fully prepared confined process for `command` in `repo_root`: wrapped by
+/// the platform backend, under resource limits, with the host environment
+/// cleared. Fails closed when no sandbox is available. Callers attach stdio
+/// and spawn (e.g. script phases from untrusted templates, which poll for
+/// cancellation themselves).
+pub fn confined_command(
+    command: &str,
+    repo_root: &Path,
+    confinement: &Confinement,
+) -> ToolResult<Command> {
+    if !sandbox_available() {
+        return Err(ToolError::new(backend().unavailable_reason()));
+    }
+    let argv = wrap_command_with(repo_root, command, confinement);
+    Ok(prepare_command(&argv, repo_root, &confinement.limits))
+}
+
+fn prepare_command(argv: &[String], cwd: &Path, limits: &Limits) -> Command {
     let use_cgroup = !limits.is_unlimited() && limits_mode() == LimitMode::Cgroup;
     let argv: Vec<String> = if use_cgroup {
         limits::cgroup_prefix(limits)
@@ -413,9 +425,17 @@ fn spawn_with_timeout(
     } else if limits_mode() == LimitMode::PerProcess {
         limits::apply_rlimits(&mut cmd, limits);
     }
-    let mut child = cmd
-        .args(&argv[1..])
-        .current_dir(cwd)
+    cmd.args(&argv[1..]).current_dir(cwd);
+    cmd
+}
+
+fn spawn_with_timeout(
+    argv: &[String],
+    cwd: &Path,
+    timeout_secs: u64,
+    limits: &Limits,
+) -> std::io::Result<Output> {
+    let mut child = prepare_command(argv, cwd, limits)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;

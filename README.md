@@ -136,6 +136,7 @@ Reattach with `flows attach <id>` (or pick it from `flows`). Stop a run with
 | `flows config show \| set <key> <value>` | View / edit config |
 | `flows init [--global]` | Generate `.flows.yml`, or scaffold global config + templates |
 | `flows templates list \| sync \| new <name>` | List templates; copy builtins to `~/.flows` to edit; scaffold a commented new one |
+| `flows templates install <git>[//path][@ref]` | Install a shared template, pinned and reviewed; scripts sandboxed until trusted ([docs](./docs/templates.md#installing-templates-from-git)) |
 | `flows searxng up \| down \| status` | Manage an optional self-hosted SearXNG for web search |
 | `flows eval …` | Benchmark models on task fixtures — see [docs/eval.md](./docs/eval.md) |
 | `flows completions <shell>` | Print a shell completion script |
