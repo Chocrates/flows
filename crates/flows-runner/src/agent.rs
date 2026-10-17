@@ -345,7 +345,7 @@ pub fn build_tool_defs(tools: &ToolsConfig, ctx: &ContextConfig) -> Vec<ToolDef>
         });
         defs.push(ToolDef {
             name: "list_files".into(),
-            description: "List files/directories at a path in the repository. Omit `path` (or pass \"\" / \".\") to list the repository root.".into(),
+            description: "List files/directories at a path in the repository. Omit `path` (or pass \"\" / \".\") to list the repository root. Directories end with `/`; all paths are repo-relative.".into(),
             parameters: json!({"type": "object", "properties": {"path": {"type": "string", "description": "Repo-relative directory; empty or omitted = root."}}}),
         });
         // Repo-scoped regex search — find code by pattern without reading whole

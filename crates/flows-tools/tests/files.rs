@@ -110,8 +110,8 @@ fn list_files_dirs_first_then_files() {
     std::fs::create_dir(d.path().join("subdir")).unwrap();
     let out = list_files(d.path(), ".").unwrap();
     let lines: Vec<&str> = out.lines().collect();
-    // dir first (with leading /), then files alphabetical
-    assert_eq!(lines[0], "/subdir");
+    // dir first (with trailing /), then files alphabetical
+    assert_eq!(lines[0], "subdir/");
     assert_eq!(lines[1], "alpha.txt");
     assert_eq!(lines[2], "zeta.txt");
 }
@@ -126,7 +126,7 @@ fn list_files_root_spellings() {
     for root in ["", "   ", ".", "/"] {
         assert_eq!(
             list_files(d.path(), root).unwrap(),
-            "/sub\na.txt",
+            "sub/\na.txt",
             "root={root:?}"
         );
     }

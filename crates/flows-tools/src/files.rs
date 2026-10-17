@@ -229,8 +229,10 @@ pub fn list_files(repo_root: &Path, path: &str) -> ToolResult<String> {
         .iter()
         .map(|e| {
             let r = rel(repo_root, e);
+            // Directories get a trailing `/`. (A leading one read as an absolute
+            // path: models passed `/.flows` on to read_file, which rejects it.)
             if e.is_dir() {
-                format!("/{r}")
+                format!("{r}/")
             } else {
                 r
             }
