@@ -37,12 +37,13 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Sandbox hides credential stores under `~` (ssh, gpg, cloud CLIs, forge tokens, registry creds, browsers, flows' own API-key config); `tools.bash.expose_credentials` opts out per phase.
 - Repo map breaks relevance ties by git recency (uncommitted files, then recent commits), read inside the sandbox; mtime fallback outside git.
 - Retrieval index re-embeds only new/changed chunks (content-addressed, spare pool for branch switches); `~/.flows/index/` capped at 1 GiB with orphan + LRU eviction. `retrieval_reindex_threshold` deprecated.
+- Path-free retrieval eval corpus (`eval-fixtures/retrieval/`: flows + synthetic Python / TypeScript / Go, 68 queries) via `flows eval retrieval --corpus`.
 
 ## Next
 
 ### Context delivery follow-ups
 
-- **Broader retrieval eval corpus** — all six fixtures come from this repo and most tasks name their target file path, which inflates path-matching rankers. Add path-free tasks and fixtures from other repos/languages.
+- **Improve path-free retrieval** — on the path-free corpus the repo map scores MRR 0.34 and embeddings 0.65 (68 queries). Candidates: hybrid map+embedding ranking, a stronger default embedding model, real-repo corpora.
 
 ### Sandbox & tools
 

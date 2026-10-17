@@ -36,6 +36,13 @@ with `flows eval review`.
   (1200–2400s) and minutes per trial, especially the whole-workspace ones. Keep
   `--trials` small. The medium (single-crate) fixtures are much faster.
 
+## Retrieval corpora
+
+`retrieval/` holds path-free retrieval corpora (`queries.yml` + `repo/`), scored by
+`flows eval retrieval --corpus eval-fixtures/retrieval`. See [docs/eval.md](../docs/eval.md#retrieval-corpora).
+`flows-workspace` reuses `whole-workspace/repo`, so regenerating that snapshot
+can move its labels; re-run the eval after `make-fixtures.sh`.
+
 ## Regenerating
 
 The repos are generated from the live tree by `make-fixtures.sh` (snapshots +

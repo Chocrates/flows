@@ -1,0 +1,98 @@
+# Small Python billing backend (customers, bills, regional tax, promos, payments, overdue reminders, exports, REST API).
+queries:
+  - task: >
+      Bills with several items sometimes come out one cent different from what
+      the client gets by hand from the grand sum. Where is the per-item
+      rounding done, and how would I switch to rounding only once at the end?
+    relevant:
+      - invoicing/billing/totals.py
+      - invoicing/money.py
+  - task: >
+      Amounts in Japanese yen should never show decimal places. How do we
+      decide how many fractional digits each currency gets?
+    relevant:
+      - invoicing/money.py
+  - task: >
+      A client who paid 99.97 against a 100.00 bill got marked as fully paid.
+      Why is a small shortfall treated as settled?
+    relevant:
+      - invoicing/payments.py
+  - task: >
+      German business clients who supply a VAT number are being charged Irish
+      VAT. Where is cross-border B2B zero-rating decided?
+    relevant:
+      - invoicing/billing/rules.py
+  - task: >
+      Add a 2% late penalty to balances more than 30 days past due, applied at
+      the point the overdue reminder goes out.
+    relevant:
+      - invoicing/dunning.py
+      - invoicing/billing/totals.py
+  - task: >
+      Which reminder message goes out once a bill is a month overdue, and what
+      stops us from sending the same escalation step twice?
+    relevant:
+      - invoicing/dunning.py
+  - task: >
+      Change the wording of the last-warning letter so it greets the client by
+      name instead of a generic hello.
+    relevant:
+      - invoicing/emails.py
+  - task: >
+      Credentials we disabled last week can still call the HTTP endpoints.
+      Where are incoming access tokens checked against the stored ones?
+    relevant:
+      - invoicing/api/guard.py
+  - task: >
+      Promo codes meant for first-time buyers only are being accepted for
+      long-standing accounts.
+    relevant:
+      - invoicing/billing/coupons.py
+  - task: >
+      Two bills finalized at the same moment received the same sequential
+      reference. How is the next number reserved, and is it atomic?
+    relevant:
+      - invoicing/billing/numbering.py
+      - invoicing/storage/db.py
+  - task: >
+      For net-30 terms, a due date landing on a Saturday gets pushed to Monday.
+      Finance wants the plain calendar date kept. Where is that shift applied?
+    relevant:
+      - invoicing/clock.py
+  - task: >
+      Who changed a bill's status, and when? I need to show the change trail
+      for a single bill in the admin screen.
+    relevant:
+      - invoicing/audit.py
+  - task: >
+      Accountants want the spreadsheet download semicolon-separated and with an
+      extra column for the client's VAT number.
+    relevant:
+      - invoicing/tabular.py
+  - task: >
+      Add an endpoint to cancel (void) a bill that has not been paid yet.
+    relevant:
+      - invoicing/api/routes.py
+      - invoicing/service.py
+  - task: >
+      How can I override the SMTP server host with an environment
+      variable in production?
+    relevant:
+      - invoicing/settings.py
+  - task: >
+      After the worker process restarts in the afternoon, the daily overdue
+      sweep runs a second time. How does the periodic runner decide whether the
+      daily run already happened?
+    relevant:
+      - invoicing/jobs.py
+  - task: >
+      The JSON returned for a bill exposes internal reminder counters and free
+      text notes; trim the response down to what clients need.
+    relevant:
+      - invoicing/api/serializers.py
+  - task: >
+      Where do our bank account details get printed at the bottom of the
+      downloadable copy, and how is the reverse-charge legal note placed there?
+    relevant:
+      - invoicing/pdf.py
+      - invoicing/billing/rules.py

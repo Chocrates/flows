@@ -1,0 +1,75 @@
+# Path-free questions over the `flows` workspace snapshot (shared with the
+# whole-workspace fixture). No query names a file, crate, or identifier.
+repo: ../../whole-workspace/repo
+queries:
+  - task: >
+      Fetching a page that bounces to an address on the internal network should
+      be refused at every hop, not just the first request.
+    relevant:
+      - crates/flows-tools/src/http.rs
+  - task: >
+      A link inside the project that points at my home directory lets the agent
+      read things outside the project.
+    relevant:
+      - crates/flows-tools/src/files.rs
+  - task: >
+      How is the dollar estimate for a run worked out before anything executes?
+    relevant:
+      - crates/flows-core/src/estimate.rs
+      - crates/flows-core/src/pricing.rs
+  - task: >
+      Selecting output in the terminal interface and copying it to the system
+      paste buffer does nothing.
+    relevant:
+      - crates/flows-tui/src/app.rs
+  - task: >
+      If the machine loses power while a run's status is being saved, the saved
+      status can end up half written.
+    relevant:
+      - crates/flows-core/src/state.rs
+  - task: >
+      Show a desktop popup when a long job finishes or is waiting on me.
+    relevant:
+      - crates/flows-core/src/notify.rs
+  - task: >
+      Thinking tokens streamed back by llama-style local servers leak into the
+      final answer text.
+    relevant:
+      - crates/flows-llm/src/openai.rs
+      - crates/flows-llm/src/stream.rs
+  - task: >
+      Stop a job once it has spent more than the configured spending limit.
+    relevant:
+      - crates/flows-runner/src/runner.rs
+      - crates/flows-runner/src/agent.rs
+  - task: >
+      How does a job running in the background receive my reply to its
+      clarifying question?
+    relevant:
+      - crates/flows-core/src/state.rs
+      - crates/flows-tui/src/attach.rs
+  - task: >
+      Guess which command runs a project's unit tests for Node or Rust codebases.
+    relevant:
+      - crates/flows-core/src/detect.rs
+  - task: >
+      Agent shell commands can see my environment variables, including keys.
+    relevant:
+      - crates/flows-tools/src/sandbox/mod.rs
+      - crates/flows-tools/src/sandbox/bwrap.rs
+  - task: >
+      Go back to an earlier step automatically when the reviewer says the work
+      needs changes.
+    relevant:
+      - crates/flows-runner/src/runner.rs
+      - crates/flows-core/src/pipeline.rs
+  - task: >
+      Which model gets used when a step asks for a named model setup that
+      doesn't exist?
+    relevant:
+      - crates/flows-core/src/models.rs
+  - task: >
+      Watch the live output of a job that is already going, from a second
+      terminal window.
+    relevant:
+      - crates/flows-tui/src/attach.rs

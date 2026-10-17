@@ -1,0 +1,107 @@
+# TypeScript kanban app (plain-TS client store, offline queue, live updates, Express + SQLite server).
+queries:
+  - task: >
+      Nudging a card down two slots in quick succession and then pressing ctrl-z
+      sends it back both slots at once. One keypress should revert one move.
+    relevant:
+      - src/client/history.ts
+  - task: >
+      Edits I make on a plane are kept, but when wifi comes back nothing is sent
+      to the server until I change something else. Pending edits should go out
+      as soon as the connection returns.
+    relevant:
+      - src/client/sync.ts
+      - src/client/outbox.ts
+  - task: >
+      People with read-only access to a board can still change a column's title
+      by calling the API directly.
+    relevant:
+      - src/server/routes/boardRoutes.ts
+      - src/shared/acl.ts
+  - task: >
+      When the backend is overloaded and answers 503, every open tab retries at
+      exactly the same moments. Add some randomness to the wait between attempts.
+    relevant:
+      - src/client/api.ts
+  - task: >
+      If the server refuses a drag (for example permission denied), the card
+      stays where I dropped it instead of snapping back to its original column.
+    relevant:
+      - src/client/sync.ts
+  - task: >
+      My own edits come back to me over the realtime connection and briefly
+      overwrite what I'm typing. The server already tags each event with the
+      sender, so the browser should ignore its own echoes.
+    relevant:
+      - src/client/socket.ts
+      - src/client/merge.ts
+  - task: >
+      After my laptop wakes from sleep, other people's changes stop showing up
+      until I reload the page.
+    relevant:
+      - src/client/socket.ts
+  - task: >
+      If two people change the same task at the same moment, how does the app
+      decide whose values win, both in the browser and when the database write
+      happens?
+    relevant:
+      - src/client/merge.ts
+      - src/server/dao.ts
+  - task: >
+      After items are repeatedly dropped into the same gap in a list, their
+      position keys grow very long. Where are those keys generated, and when does
+      the server renumber a whole list?
+    relevant:
+      - src/shared/ordering.ts
+      - src/server/routes/cardRoutes.ts
+  - task: >
+      The "due tomorrow" notification pops up at the wrong hour for teammates
+      whose configured time zone differs from their computer's own setting.
+    relevant:
+      - src/client/reminders.ts
+      - src/shared/clock.ts
+  - task: >
+      Could a task description contain a link that runs script when clicked?
+      Explain how description text becomes HTML and what gets stripped out.
+    relevant:
+      - src/client/markdown.ts
+      - src/client/sanitize.ts
+  - task: >
+      Typing the letter n inside the comment textarea opens a new card editor
+      instead of inserting the character.
+    relevant:
+      - src/client/hotkeys.ts
+  - task: >
+      Searching by tag only works when I type the tag name with the exact
+      capitalisation. Also allow several tags in one search.
+    relevant:
+      - src/client/filter.ts
+  - task: >
+      Add a German translation, and proper singular/plural wording for the item
+      counter ("1 cards" looks wrong).
+    relevant:
+      - src/shared/messages.ts
+  - task: >
+      Creating a task with an empty or whitespace-only name succeeds and leaves a
+      blank tile on the board. It should be rejected with a 400.
+    relevant:
+      - src/server/schemas.ts
+      - src/server/routes/cardRoutes.ts
+  - task: >
+      Undoing the deletion of a whole list brings the list back empty: the tasks
+      that were in it are gone for good.
+    relevant:
+      - src/client/actions.ts
+      - src/client/reducer.ts
+  - task: >
+      Walk me through what the server does from an incoming request to edit a
+      task until the row is written and other viewers are told about it.
+    relevant:
+      - src/server/routes/cardRoutes.ts
+      - src/server/dao.ts
+      - src/server/broadcast.ts
+  - task: >
+      Deleting a column on one person's screen doesn't remove it for
+      collaborators who already have the board open.
+    relevant:
+      - src/client/socket.ts

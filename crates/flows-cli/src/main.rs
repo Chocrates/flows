@@ -246,9 +246,17 @@ enum EvalCmd {
     /// Deterministic retrieval-quality eval: recall@k / MRR of the repo map and
     /// embedding retrieval against each fixture's labeled `relevant` files. No LLM.
     Retrieval {
-        /// Directory of fixture folders (each with fixture.yml + repo/). Omit for built-ins.
+        /// Directory of fixture folders (each with fixture.yml + repo/). Omit for
+        /// built-ins (skipped when only --corpus is given).
         #[arg(long)]
         fixtures: Option<String>,
+        /// Directory of retrieval corpora (each with queries.yml + repo/), e.g.
+        /// eval-fixtures/retrieval.
+        #[arg(long)]
+        corpus: Option<String>,
+        /// Also print a row per corpus query.
+        #[arg(long)]
+        per_query: bool,
         /// Local embedding model for the retrieval ranker (empty → all-MiniLM-L6-v2).
         #[arg(long)]
         model: Option<String>,
@@ -413,9 +421,17 @@ fn main() -> ExitCode {
             ),
             EvalCmd::Retrieval {
                 fixtures,
+                corpus,
+                per_query,
                 model,
                 fixture,
-            } => eval::cmd_retrieval(fixtures.as_deref(), model.as_deref(), fixture.as_deref()),
+            } => eval::cmd_retrieval(
+                fixtures.as_deref(),
+                corpus.as_deref(),
+                model.as_deref(),
+                fixture.as_deref(),
+                per_query,
+            ),
         },
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "flows", &mut std::io::stdout());

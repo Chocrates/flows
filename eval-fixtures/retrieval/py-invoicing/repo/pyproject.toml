@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "invoicing"
+version = "0.7.2"
+description = "Small invoicing and billing backend"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "reportlab>=4.0",
+    "flask>=3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "freezegun>=1.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

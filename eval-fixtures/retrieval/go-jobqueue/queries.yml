@@ -1,0 +1,109 @@
+# Go background-work service: HTTP intake, claim/visibility timeouts, backoff, parking, timetables, per-tenant throttling.
+queries:
+  - task: >
+      A task whose process gets OOM-killed mid-run seems to sit in limbo
+      forever instead of being picked up by another node. Where is the code
+      that notices nobody is working on it anymore and makes it available again?
+    relevant:
+      - internal/queue/lease.go
+      - internal/store/memory.go
+  - task: >
+      When a downstream API goes down, hundreds of failing tasks all come back
+      at the exact same moment and hammer it again. How are the wait times
+      between attempts computed and randomised?
+    relevant:
+      - internal/retry/backoff.go
+      - internal/retry/policy.go
+  - task: >
+      One customer flooding us with requests starves everyone else. How is the
+      per-customer quota enforced, and what tells the caller when to come back?
+    relevant:
+      - internal/ratelimit/bucket.go
+      - internal/api/middleware.go
+  - task: >
+      Setting the per-customer requests-per-second limit through an environment
+      variable does nothing; only the command-line option takes effect.
+    relevant:
+      - internal/config/config.go
+  - task: >
+      On deploy, in-flight work is cut off mid-way. In what order are the
+      subsystems stopped after SIGTERM, and how long do we wait before giving up?
+    relevant:
+      - internal/lifecycle/group.go
+      - cmd/server/main.go
+  - task: >
+      Callers resend POSTs on network timeouts and we end up with duplicate
+      work items. How does the service recognise a repeated request and hand
+      back the original instead of creating a new one?
+    relevant:
+      - internal/queue/dedupe.go
+      - internal/queue/broker.go
+  - task: >
+      Add support for an "L" token meaning the last day of the month in
+      recurring timetable expressions.
+    relevant:
+      - internal/schedule/cron.go
+  - task: >
+      We run two replicas and both fire the recurring nightly report at
+      midnight. Will the report be produced twice, and what prevents it?
+    relevant:
+      - internal/schedule/scheduler.go
+      - internal/queue/dedupe.go
+  - task: >
+      A bug in one task type panics. Does that take down the whole process,
+      and where is the stack trace captured and recorded as the failure reason?
+    relevant:
+      - internal/worker/pool.go
+  - task: >
+      We want at most two video transcodes running at once regardless of how
+      many total goroutines are processing work. Where would a per-type cap go?
+    relevant:
+      - internal/worker/pool.go
+      - internal/config/config.go
+  - task: >
+      How are malformed or oversized payloads rejected, and how does the
+      producer get a list of every bad field in one response instead of just
+      the first one?
+    relevant:
+      - internal/job/validate.go
+      - internal/api/handlers.go
+  - task: >
+      Operators need to see which items gave up for good and push them back
+      for another try from the command line. How does that admin flow work end to end?
+    relevant:
+      - cmd/qctl/main.go
+      - internal/deadletter/dlq.go
+  - task: >
+      In the scrape output the latency distribution lines look wrong: the +Inf
+      line has its labels formatted oddly. Where is the text exposition rendered?
+    relevant:
+      - internal/metrics/http.go
+  - task: >
+      Log lines from a single request are not correlated. How is a request id
+      attached and carried down into the code that runs during that request?
+    relevant:
+      - internal/api/middleware.go
+      - internal/logging/logger.go
+  - task: >
+      Code processing a task that receives bad input keeps getting attempted
+      five times. How does a task signal that a failure is not worth trying again?
+    relevant:
+      - internal/retry/policy.go
+      - internal/worker/handler.go
+  - task: >
+      Under load, urgent work waits behind older low-urgency work. How is the
+      ordering chosen when picking the next item to run?
+    relevant:
+      - internal/queue/priority.go
+      - internal/store/memory.go
+  - task: >
+      With the SQL backend, how do several nodes grab pending rows at the same
+      time without blocking each other or double-taking a row?
+    relevant:
+      - internal/store/postgres.go
+  - task: >
+      A node is half-way through a long task when its hold on it lapses, and a
+      second node starts the same task. What is supposed to keep the hold alive?
+    relevant:
+      - internal/queue/lease.go
+      - internal/worker/pool.go

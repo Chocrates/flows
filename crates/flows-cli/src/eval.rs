@@ -397,11 +397,15 @@ impl RunnerCallbacks for EvalCallbacks {
 
 /// Materialize the fixture repo into a fresh temp dir and `git init` it.
 fn materialize(fixture: &Fixture) -> Result<tempfile::TempDir, String> {
+    materialize_files(&fixture.repo_files)
+}
+
+fn materialize_files(repo_files: &[(String, Vec<u8>)]) -> Result<tempfile::TempDir, String> {
     let dir = tempfile::Builder::new()
         .prefix("flows-eval-")
         .tempdir()
         .map_err(|e| e.to_string())?;
-    for (rel, bytes) in &fixture.repo_files {
+    for (rel, bytes) in repo_files {
         let path = dir.path().join(rel);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -1600,99 +1604,243 @@ fn mrr(ranked: &[String], targets: &HashSet<String>) -> f64 {
         .unwrap_or(0.0)
 }
 
-type Agg = HashMap<&'static str, (f64, f64, f64, f64, usize)>;
+/// recall@1, recall@3, recall@5, MRR for one ranking.
+type Scores = [f64; 4];
 
-fn report_row(
-    name: &str,
-    ranker: &'static str,
-    ranked: &[String],
-    targets: &HashSet<String>,
-    agg: &mut Agg,
-) {
-    let (r1, r3, r5, m) = (
+fn score_ranking(ranked: &[String], targets: &HashSet<String>) -> Scores {
+    [
         recall_at(ranked, targets, 1),
         recall_at(ranked, targets, 3),
         recall_at(ranked, targets, 5),
         mrr(ranked, targets),
-    );
-    println!(
-        "{:<24} {:<6} {:>6.2} {:>6.2} {:>6.2} {:>6.2}",
-        trunc(name, 24),
-        ranker,
-        r1,
-        r3,
-        r5,
-        m
-    );
-    let e = agg.entry(ranker).or_insert((0.0, 0.0, 0.0, 0.0, 0));
-    e.0 += r1;
-    e.1 += r3;
-    e.2 += r5;
-    e.3 += m;
-    e.4 += 1;
+    ]
 }
 
-/// Deterministic retrieval eval: for each fixture with labeled `relevant` files,
-/// rank files by the repo map and by embedding retrieval and score recall@k + MRR
-/// against the labels. No LLM call (embeddings run locally).
+/// Running per-ranker sums: (score sums, query count).
+#[derive(Default)]
+struct Tally(HashMap<&'static str, (Scores, usize)>);
+
+impl Tally {
+    fn add(&mut self, ranker: &'static str, s: Scores) {
+        let e = self.0.entry(ranker).or_insert(([0.0; 4], 0));
+        for (acc, v) in e.0.iter_mut().zip(s) {
+            *acc += v;
+        }
+        e.1 += 1;
+    }
+
+    fn mean(&self, ranker: &str) -> Option<(Scores, usize)> {
+        let (sum, n) = self.0.get(ranker)?;
+        (*n > 0).then(|| (sum.map(|v| v / *n as f64), *n))
+    }
+
+    fn merge(&mut self, other: &Tally) {
+        for (ranker, (sum, n)) in &other.0 {
+            let e = self.0.entry(ranker).or_insert(([0.0; 4], 0));
+            for (acc, v) in e.0.iter_mut().zip(sum) {
+                *acc += v;
+            }
+            e.1 += n;
+        }
+    }
+}
+
+fn print_row(name: &str, ranker: &str, s: Scores, n: usize) {
+    println!(
+        "{:<28} {:<6} {:>6.2} {:>6.2} {:>6.2} {:>6.2} {:>4}",
+        trunc(name, 28),
+        ranker,
+        s[0],
+        s[1],
+        s[2],
+        s[3],
+        n
+    );
+}
+
+/// A retrieval-only corpus: one repository, many labeled queries. A folder with
+/// `queries.yml` and the source tree in `repo/` (or the `repo:` path, relative
+/// to the folder, to reuse another fixture's tree).
+#[derive(Debug, Deserialize)]
+struct CorpusSpec {
+    #[serde(default)]
+    repo: Option<String>,
+    queries: Vec<CorpusQuery>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CorpusQuery {
+    task: String,
+    relevant: Vec<String>,
+}
+
+struct Corpus {
+    name: String,
+    repo_files: Vec<(String, Vec<u8>)>,
+    queries: Vec<CorpusQuery>,
+}
+
+/// Load every `<dir>/<name>/queries.yml` corpus. Labels are curated, so a
+/// `relevant` path missing from the repo is an error, not a silent skip.
+fn load_corpora(dir: &Path) -> Result<Vec<Corpus>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut out = Vec::new();
+    for cdir in entries.flatten().map(|e| e.path()) {
+        let spec_path = cdir.join("queries.yml");
+        if !spec_path.is_file() {
+            continue;
+        }
+        let text = std::fs::read(&spec_path).map_err(|e| e.to_string())?;
+        let spec: CorpusSpec = serde_yaml_ng::from_slice(&text)
+            .map_err(|e| format!("{}: {e}", spec_path.display()))?;
+        let name = cdir
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let repo = cdir.join(spec.repo.as_deref().unwrap_or("repo"));
+        let mut repo_files = Vec::new();
+        walk_disk(&repo, &repo, &mut repo_files);
+        if repo_files.is_empty() {
+            return Err(format!("corpus `{name}`: no files in {}", repo.display()));
+        }
+        let have: HashSet<&str> = repo_files.iter().map(|(p, _)| p.as_str()).collect();
+        for q in &spec.queries {
+            if q.relevant.is_empty() {
+                return Err(format!("corpus `{name}`: a query has no `relevant` files"));
+            }
+            if let Some(missing) = q.relevant.iter().find(|r| !have.contains(r.as_str())) {
+                return Err(format!(
+                    "corpus `{name}`: relevant file `{missing}` is not in the repo"
+                ));
+            }
+        }
+        if spec.queries.is_empty() {
+            return Err(format!("corpus `{name}`: no queries"));
+        }
+        out.push(Corpus {
+            name,
+            repo_files,
+            queries: spec.queries,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    if out.is_empty() {
+        return Err(format!(
+            "no corpora found in {} (folders with queries.yml)",
+            dir.display()
+        ));
+    }
+    Ok(out)
+}
+
+/// Score one query with both rankers into `tally`; `label` prints a per-query row.
+fn score_query(
+    work: &Path,
+    task: &str,
+    targets: &HashSet<String>,
+    model: &str,
+    tally: &mut Tally,
+    label: Option<&str>,
+) {
+    let map = score_ranking(&repo_map::rank_files(work, task), targets);
+    tally.add("map", map);
+    let mut warnings = Vec::new();
+    let rag = match retrieval::rank_paths(work, task, model, &mut warnings) {
+        Ok(rr) => Some(score_ranking(&rr, targets)),
+        Err(e) => {
+            eprintln!("  rag skipped: {e}");
+            None
+        }
+    };
+    if let Some(r) = rag {
+        tally.add("rag", r);
+    }
+    for w in warnings {
+        eprintln!("  {w}");
+    }
+    if let Some(label) = label {
+        print_row(label, "map", map, 1);
+        if let Some(r) = rag {
+            print_row(label, "rag", r, 1);
+        }
+    }
+}
+
+/// Deterministic retrieval eval: rank files by the repo map and by embedding
+/// retrieval and score recall@k + MRR against labeled files, for fixtures with
+/// `relevant` labels and/or retrieval corpora. No LLM call (embeddings run
+/// locally). The overall MEAN weights every query equally.
 pub fn cmd_retrieval(
     fixtures_dir: Option<&str>,
+    corpus_dir: Option<&str>,
     model: Option<&str>,
     fixture: Option<&str>,
+    per_query: bool,
 ) -> Result<(), String> {
     let model = model.unwrap_or("");
-    let fixtures = load_fixtures(fixtures_dir)?;
     let name_f = split_csv(fixture).unwrap_or_default();
+    let keep = |n: &str| name_f.is_empty() || name_f.iter().any(|f| n.contains(f.as_str()));
+
+    // Fixtures: the built-ins unless only a corpus was asked for.
+    let fixtures = if corpus_dir.is_some() && fixtures_dir.is_none() {
+        Vec::new()
+    } else {
+        load_fixtures(fixtures_dir)?
+    };
     let scored: Vec<&Fixture> = fixtures
         .iter()
-        .filter(|f| !relevant_files(f).is_empty())
-        .filter(|f| name_f.is_empty() || name_f.iter().any(|n| f.name.contains(n.as_str())))
+        .filter(|f| !relevant_files(f).is_empty() && keep(&f.name))
         .collect();
-    if scored.is_empty() {
-        return Err("no fixtures with labeled `relevant` files to score".into());
+    let corpora: Vec<Corpus> = match corpus_dir {
+        Some(d) => load_corpora(Path::new(d))?
+            .into_iter()
+            .filter(|c| keep(&c.name))
+            .collect(),
+        None => Vec::new(),
+    };
+    if scored.is_empty() && corpora.is_empty() {
+        return Err("no fixtures with labeled `relevant` files or corpora to score".into());
     }
 
     println!("Deterministic retrieval eval — recall@k / MRR vs labeled files\n");
     println!(
-        "{:<24} {:<6} {:>6} {:>6} {:>6} {:>6}",
-        "fixture", "ranker", "r@1", "r@3", "r@5", "MRR"
+        "{:<28} {:<6} {:>6} {:>6} {:>6} {:>6} {:>4}",
+        "fixture / corpus", "ranker", "r@1", "r@3", "r@5", "MRR", "n"
     );
-    let mut agg: Agg = HashMap::new();
+    let mut total = Tally::default();
     for f in &scored {
         let work = materialize(f)?;
         let targets: HashSet<String> = relevant_files(f).into_iter().collect();
-        report_row(
-            &f.name,
-            "map",
-            &repo_map::rank_files(work.path(), &f.spec.task),
-            &targets,
-            &mut agg,
-        );
-        let mut warnings = Vec::new();
-        match retrieval::rank_paths(work.path(), &f.spec.task, model, &mut warnings) {
-            Ok(rr) => report_row(&f.name, "rag", &rr, &targets, &mut agg),
-            Err(e) => eprintln!("  {} rag skipped: {e}", f.name),
+        let mut t = Tally::default();
+        score_query(work.path(), &f.spec.task, &targets, model, &mut t, None);
+        for ranker in ["map", "rag"] {
+            if let Some((s, n)) = t.mean(ranker) {
+                print_row(&f.name, ranker, s, n);
+            }
         }
-        for w in warnings {
-            eprintln!("  {}: {w}", f.name);
+        total.merge(&t);
+    }
+    for c in &corpora {
+        let work = materialize_files(&c.repo_files)?;
+        let mut t = Tally::default();
+        for (i, q) in c.queries.iter().enumerate() {
+            let targets: HashSet<String> = q.relevant.iter().cloned().collect();
+            let label = format!("{}#{} {}", c.name, i + 1, q.task.trim());
+            let label = per_query.then_some(label.as_str());
+            score_query(work.path(), &q.task, &targets, model, &mut t, label);
         }
+        for ranker in ["map", "rag"] {
+            if let Some((s, n)) = t.mean(ranker) {
+                print_row(&c.name, ranker, s, n);
+            }
+        }
+        total.merge(&t);
     }
 
     println!();
     for ranker in ["map", "rag"] {
-        if let Some((r1, r3, r5, m, n)) = agg.get(ranker) {
-            if *n > 0 {
-                let n = *n as f64;
-                println!(
-                    "{:<24} {:<6} {:>6.2} {:>6.2} {:>6.2} {:>6.2}",
-                    "MEAN",
-                    ranker,
-                    r1 / n,
-                    r3 / n,
-                    r5 / n,
-                    m / n
-                );
-            }
+        if let Some((s, n)) = total.mean(ranker) {
+            print_row("MEAN", ranker, s, n);
         }
     }
     Ok(())
@@ -1930,5 +2078,57 @@ mod tests {
         assert_eq!(g.passes, 1);
         assert_eq!(mean(&g.peak), 200.0);
         assert!(stddev(&g.peak) > 0.0); // spread visible across trials
+    }
+
+    fn write(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn corpora_load_reuse_repos_and_reject_bad_labels() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        write(&root.join("a/repo/src/x.rs"), "fn x() {}");
+        write(
+            &root.join("a/queries.yml"),
+            "queries:\n  - task: one\n    relevant: [src/x.rs]\n  - task: two\n    relevant: [src/x.rs]\n",
+        );
+        // Reuses a's tree via `repo:`.
+        write(
+            &root.join("b/queries.yml"),
+            "repo: ../a/repo\nqueries:\n  - task: three\n    relevant: [src/x.rs]\n",
+        );
+        // Not a corpus (no queries.yml): ignored.
+        write(&root.join("c/fixture.yml"), "task: t\n");
+        let cs = load_corpora(root).unwrap();
+        assert_eq!(
+            cs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(cs[0].queries.len(), 2);
+        assert_eq!(cs[1].repo_files.len(), 1);
+
+        write(
+            &root.join("b/queries.yml"),
+            "repo: ../a/repo\nqueries:\n  - task: t\n    relevant: [src/missing.rs]\n",
+        );
+        let err = load_corpora(root).err().unwrap();
+        assert!(err.contains("src/missing.rs"), "{err}");
+    }
+
+    #[test]
+    fn tally_means_weight_each_query() {
+        let mut a = Tally::default();
+        a.add("map", [1.0, 1.0, 1.0, 1.0]);
+        let mut b = Tally::default();
+        b.add("map", [0.0, 0.0, 0.0, 0.0]);
+        b.add("map", [0.0, 0.0, 0.0, 0.5]);
+        a.merge(&b);
+        let (s, n) = a.mean("map").unwrap();
+        assert_eq!(n, 3);
+        assert!((s[0] - 1.0 / 3.0).abs() < 1e-9);
+        assert!((s[3] - 0.5).abs() < 1e-9);
+        assert!(a.mean("rag").is_none());
     }
 }

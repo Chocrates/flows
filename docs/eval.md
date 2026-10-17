@@ -43,7 +43,49 @@ for confirmation unless `--yes`.
   [context delivery](./configuration.md#context-delivery-for-small-models).
 - **`flows eval retrieval`** — a **deterministic** ranking eval (no model call):
   for every fixture with labeled `relevant` files, it ranks files by the repo map
-  and by embedding retrieval and reports recall@1/3/5 + MRR.
+  and by embedding retrieval and reports recall@1/3/5 + MRR. `--corpus DIR` adds
+  retrieval corpora (see below); `--per-query` prints a row per query.
+
+### Retrieval corpora
+
+A corpus is one repository with many labeled queries — cheaper than a fixture per
+query (one repo copy, one index) and the right shape for ranking work:
+
+```
+eval-fixtures/retrieval/<name>/
+  queries.yml     # queries: [{task, relevant: [repo-relative paths]}]; optional repo: <path>
+  repo/           # source tree (or reuse another fixture's via `repo: ../../x/repo`)
+```
+
+`eval run` ignores corpus folders. Every `relevant` path must exist, or the eval
+stops. The shipped corpus is **path-free**: no query names a file, directory, or
+identifier from its repo, so rankers can't win by matching paths.
+
+| corpus | repo | queries |
+|---|---|---|
+| `flows-workspace` | this workspace (snapshot shared with `whole-workspace`) | 14 |
+| `py-invoicing` | synthetic Python billing backend, 29 files | 18 |
+| `ts-kanban` | synthetic TypeScript kanban app (client + server), 31 files | 18 |
+| `go-jobqueue` | synthetic Go job-queue service, 30 files | 18 |
+
+Baseline (default `all-MiniLM-L6-v2`), `flows eval retrieval --corpus eval-fixtures/retrieval`:
+
+```
+fixture / corpus             ranker    r@1    r@3    r@5    MRR    n
+flows-workspace              map      0.00   0.11   0.11   0.11   14
+flows-workspace              rag      0.21   0.36   0.57   0.46   14
+go-jobqueue                  map      0.17   0.22   0.42   0.35   18
+go-jobqueue                  rag      0.33   0.67   0.81   0.73   18
+py-invoicing                 map      0.22   0.58   0.64   0.49   18
+py-invoicing                 rag      0.69   0.83   0.83   0.84   18
+ts-kanban                    map      0.08   0.26   0.39   0.36   18
+ts-kanban                    rag      0.28   0.47   0.57   0.53   18
+MEAN                         map      0.12   0.30   0.40   0.34   68
+MEAN                         rag      0.39   0.60   0.70   0.65   68
+```
+
+On the older per-task fixtures (most name their target file) the same rankers
+score MRR 0.47 / 1.00; judge ranking changes on the corpus.
 
 ```
 model            config     suite    size        pass    in_tok      peak_ctx     cost  rounds   n
