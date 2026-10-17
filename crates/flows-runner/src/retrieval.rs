@@ -248,31 +248,41 @@ fn lexical_terms(s: &str) -> Vec<String> {
 /// Okapi BM25 score of each document for `query` (k1 = 1.2, b = 0.75).
 pub(crate) fn bm25_scores(query: &str, docs: &[&str]) -> Vec<f64> {
     let (k1, b) = (1.2, 0.75);
-    let docs: Vec<Vec<String>> = docs.iter().map(|d| lexical_terms(d)).collect();
-    let n = docs.len() as f64;
-    let avg = docs.iter().map(Vec::len).sum::<usize>() as f64 / n.max(1.0);
     let mut q: Vec<String> = lexical_terms(query);
     q.sort();
     q.dedup();
-    let df: HashMap<&str, f64> = q
+    // Per document: its length and the frequency of each query term in it.
+    let stats: Vec<(usize, HashMap<&str, f64>)> = docs
         .iter()
-        .map(|t| {
-            let c = docs.iter().filter(|d| d.iter().any(|x| x == t)).count();
-            (t.as_str(), c as f64)
+        .map(|d| {
+            let terms = lexical_terms(d);
+            let mut tf: HashMap<&str, f64> = HashMap::new();
+            for t in &terms {
+                if let Ok(i) = q.binary_search(t) {
+                    *tf.entry(q[i].as_str()).or_default() += 1.0;
+                }
+            }
+            (terms.len(), tf)
         })
         .collect();
-    docs.iter()
-        .map(|d| {
-            let len = d.len() as f64;
-            q.iter()
-                .map(|t| {
-                    let tf = d.iter().filter(|x| *x == t).count() as f64;
-                    if tf == 0.0 {
-                        return 0.0;
-                    }
-                    let idf = ((n - df[t.as_str()] + 0.5) / (df[t.as_str()] + 0.5) + 1.0).ln();
-                    idf * tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * len / avg.max(1.0)))
-                })
+    let n = docs.len() as f64;
+    let avg = stats.iter().map(|(len, _)| *len).sum::<usize>() as f64 / n.max(1.0);
+    let idf: HashMap<&str, f64> = q
+        .iter()
+        .map(|t| {
+            let df = stats
+                .iter()
+                .filter(|(_, tf)| tf.contains_key(t.as_str()))
+                .count() as f64;
+            (t.as_str(), ((n - df + 0.5) / (df + 0.5) + 1.0).ln())
+        })
+        .collect();
+    stats
+        .iter()
+        .map(|(len, tf)| {
+            let norm = k1 * (1.0 - b + b * *len as f64 / avg.max(1.0));
+            tf.iter()
+                .map(|(t, f)| idf[t] * f * (k1 + 1.0) / (f + norm))
                 .sum()
         })
         .collect()

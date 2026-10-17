@@ -32,7 +32,10 @@ The system SHALL be able to produce a repo map: for source files, the key
 symbols they define (function / type / class signatures), ranked by relevance to
 the run's idea, bounded to a token budget, and made available to prompts as a
 context variable. The map SHALL degrade to fewer files/symbols when the budget
-is tight rather than exceeding it.
+is tight rather than exceeding it. Relevance SHALL be the BM25 score of the idea
+against the file's path and full source text, so words that appear only in
+bodies or comments count, and words common across the repository count less than
+rare ones.
 
 Among files of similar relevance, the map SHALL favor recently changed files. In
 a git repository, recency SHALL come from git: files with uncommitted changes
@@ -45,6 +48,11 @@ SHALL fall back to file modification times.
 
 - **WHEN** a repo map is built for an idea
 - **THEN** it lists source files with their key symbol signatures, ordered by relevance to the idea.
+
+#### Scenario: Body terms count, common words do not dominate
+
+- **WHEN** only one file mentions a rare idea term, in a function body, and other files repeat the idea's common words
+- **THEN** that file ranks first.
 
 #### Scenario: Map respects a token budget
 

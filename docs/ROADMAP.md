@@ -44,13 +44,14 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Shared per-model vector cache (`~/.flows/vectors/`): worktrees, clones and eval temp dirs reuse embeddings.
 - Agent stall guards: replies cut off at `max_tokens` are nudged, then fail; rounds that bring nothing new nudge, then force a tool-less reply (read-only) or abort; an unreachable search backend drops `web_search` for the phase.
 - `thinking: false` turns reasoning off on local OpenAI-compatible servers (`chat_template_kwargs.enable_thinking`).
+- Repo map ranks files by BM25 over path + full source (path-free corpus MRR 0.34 → 0.72; fixtures 0.47 → 1.00).
 - `flows doctor` probes local model servers (`GET /models`) and warns when one is down or doesn't list its configured model.
 
 ## Next
 
 ### Context delivery follow-ups
 
-- **Improve path-free retrieval** — on the path-free corpus the repo map scores MRR 0.34 and retrieval 0.70 (68 queries). Candidates: a stronger default embedding model, lexical signals in the repo map, real-repo corpora.
+- **Improve path-free retrieval** — on the path-free corpus the repo map scores MRR 0.72 and retrieval 0.71 (68 queries). Candidates: a stronger default embedding model, real-repo corpora.
 
 ### Sandbox & tools
 

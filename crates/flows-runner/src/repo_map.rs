@@ -6,9 +6,10 @@
 //! or tool calls, so it helps small and no-tool models alike.
 //!
 //! Signatures are the first line of each definition node (up to the body), which is
-//! cheap and language-agnostic enough for a map. Ranking is idea↔(path + symbol
-//! names) token overlap plus a small recency boost: from git history when the
-//! repo has one (see [`git_recency`]), else from file mtimes.
+//! cheap and language-agnostic enough for a map. Ranking is BM25 of the idea
+//! against each file's path + full source (identifiers, comments, strings), plus
+//! a small recency boost: from git history when the repo has one (see
+//! [`git_recency`]), else from file mtimes.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -94,6 +95,8 @@ struct FileSymbols {
     path: String,
     signatures: Vec<String>,
     mtime: u64,
+    /// Full source, used for ranking only (taken once scored).
+    src: String,
 }
 
 /// The first line of a node's source, trimmed and with a trailing `{` removed — a
@@ -131,13 +134,8 @@ fn extract_signatures(lang: Lang, src: &str) -> Vec<String> {
     sigs
 }
 
-/// Lowercase alphanumeric tokens (length ≥ 3), split on non-alphanumerics and
-/// camelCase/snake_case boundaries — for overlap scoring.
-fn tokenize(s: &str) -> HashSet<String> {
-    token_list(s).into_iter().collect()
-}
-
-/// [`tokenize`] keeping order and repeats (term frequencies for lexical ranking).
+/// Lowercase alphanumeric tokens (length ≥ 3) in order, repeats kept, split on
+/// non-alphanumerics and camelCase/snake_case boundaries — for lexical ranking.
 pub(crate) fn token_list(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -163,7 +161,7 @@ pub(crate) fn token_list(s: &str) -> Vec<String> {
     out
 }
 
-/// Largest recency boost; relevance (token overlap, in whole tokens) dominates.
+/// Largest recency boost; relevance (BM25) dominates, recency orders near-ties.
 const MAX_RECENCY: f64 = 0.5;
 /// Commits of history read for git recency.
 const GIT_LOG_COMMITS: usize = 300;
@@ -241,17 +239,6 @@ fn git_recency(repo_root: &Path) -> Option<HashMap<String, f64>> {
     parse_git_recency(&out)
 }
 
-/// Relevance score of a file to the idea: number of idea tokens that appear in the
-/// file's path + signatures, plus the recency boost.
-fn score(idea_tokens: &HashSet<String>, f: &FileSymbols, recency: &Recency) -> f64 {
-    let mut hay = f.path.clone();
-    hay.push(' ');
-    hay.push_str(&f.signatures.join(" "));
-    let file_tokens = tokenize(&hay);
-    let overlap = idea_tokens.intersection(&file_tokens).count() as f64;
-    overlap + recency.boost(f)
-}
-
 /// Extract symbols for every supported file, then rank by relevance to `idea`
 /// (highest first). Shared by the rendered map and the deterministic eval.
 fn collect_ranked(repo_root: &Path, idea: &str) -> Vec<FileSymbols> {
@@ -281,6 +268,7 @@ fn collect_ranked(repo_root: &Path, idea: &str) -> Vec<FileSymbols> {
             path: rel,
             signatures,
             mtime,
+            src,
         });
     }
     let recency = match git_recency(repo_root) {
@@ -290,13 +278,19 @@ fn collect_ranked(repo_root: &Path, idea: &str) -> Vec<FileSymbols> {
             files.iter().map(|f| f.mtime).max().unwrap_or(0),
         ),
     };
-    let idea_tokens = tokenize(idea);
-    files.sort_by(|a, b| {
-        score(&idea_tokens, b, &recency)
-            .total_cmp(&score(&idea_tokens, a, &recency))
-            .then_with(|| a.path.cmp(&b.path))
-    });
-    files
+    let docs: Vec<String> = files
+        .iter_mut()
+        .map(|f| format!("{} {}", f.path, std::mem::take(&mut f.src)))
+        .collect();
+    let refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+    let relevance = crate::retrieval::bm25_scores(idea, &refs);
+    let mut scored: Vec<(f64, FileSymbols)> = files
+        .into_iter()
+        .zip(relevance)
+        .map(|(f, r)| (r + recency.boost(&f), f))
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.path.cmp(&b.1.path)));
+    scored.into_iter().map(|(_, f)| f).collect()
 }
 
 /// Ranked repo-relative file paths (most relevant first) — for the retrieval eval.
@@ -361,11 +355,8 @@ mod tests {
 
     #[test]
     fn tokenize_splits_camel_and_snake() {
-        let t = tokenize("resolve_llm dialectEnvKey");
-        assert!(t.contains("resolve"));
-        assert!(t.contains("llm")); // len 3 → kept
-        assert!(t.contains("dialect"));
-        assert!(t.contains("env"));
+        let t = token_list("resolve_llm dialectEnvKey");
+        assert_eq!(t, ["resolve", "llm", "dialect", "env", "key"]);
     }
 
     #[test]
@@ -397,6 +388,28 @@ mod tests {
     }
 
     #[test]
+    fn body_terms_rank_and_common_words_do_not() {
+        let d = tempdir().unwrap();
+        let r = d.path();
+        // Only a function body mentions the outbox; the other files repeat the
+        // common words of the idea.
+        std::fs::write(
+            r.join("net.ts"),
+            "export function flush() {\n  // drain the outbox\n  outbox.drain();\n}\n",
+        )
+        .unwrap();
+        for name in ["a", "b", "c", "d"] {
+            std::fs::write(
+                r.join(format!("{name}.ts")),
+                "// the user should see this when the user is ready\nexport function show() {}\n",
+            )
+            .unwrap();
+        }
+        let ranked = rank_files(r, "the user should see the outbox when online");
+        assert_eq!(ranked[0], "net.ts", "{ranked:?}");
+    }
+
+    #[test]
     fn parses_git_recency_output() {
         let out =
             "@@dirty\nsrc/wip.rs\nnew.rs\n@@log\n@\n\nsrc/a.rs\n@\n\nsrc/b.rs\nsrc/a.rs\n@@end\n";
@@ -416,6 +429,7 @@ mod tests {
             path: String::new(),
             signatures: vec![],
             mtime,
+            src: String::new(),
         };
         let r = Recency::Mtime(1_000, 2_000);
         assert_eq!(r.boost(&f(2_000)), MAX_RECENCY);
