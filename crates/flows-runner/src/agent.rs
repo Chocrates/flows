@@ -566,6 +566,53 @@ async fn dispatch_tool(
     }
 }
 
+/// Cap on the findings carried into a restarted forced reply.
+const FINDINGS_MAX_CHARS: usize = 60_000;
+
+/// The phase's tool calls and their results as plain text, for a forced reply
+/// restarted without tool history. Identical results are kept once; past `max`
+/// characters the oldest are dropped.
+fn gathered_findings(messages: &[Message], max: usize) -> String {
+    let mut calls: HashMap<&str, String> = HashMap::new();
+    for m in messages {
+        for tc in &m.tool_calls {
+            calls.insert(tc.id.as_str(), format!("{} {}", tc.name, tc.arguments));
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut parts: Vec<String> = Vec::new();
+    for m in messages.iter().rev() {
+        if m.role != Role::Tool {
+            continue;
+        }
+        let result = m.content.as_deref().unwrap_or("");
+        if result.starts_with("Error:") || !seen.insert(hash_str(result)) {
+            continue;
+        }
+        let call = m
+            .tool_call_id
+            .as_deref()
+            .and_then(|id| calls.get(id))
+            .map_or("tool result", String::as_str);
+        parts.push(format!("### {call}\n{result}"));
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut used = 0;
+    for p in parts {
+        if used + p.len() > max {
+            break;
+        }
+        used += p.len();
+        out.push(p);
+    }
+    out.reverse();
+    if out.is_empty() {
+        "(nothing)".into()
+    } else {
+        out.join("\n\n")
+    }
+}
+
 /// A tool call the policy refused before anything ran (allowlist, sandbox scope,
 /// tool not enabled). It tells the model nothing about the task, so for the stall
 /// guard it is not new information — unlike a failing build or test.
@@ -1776,12 +1823,20 @@ starting — likely stuck in a build/search loop"
                     cost_usd: phase_cost,
                 };
             }
-            callbacks.on_note("⚠ stall guard: model replied with a tool call while tools are off");
-            messages.push(Message::assistant_text(completion.content.clone()));
-            messages.push(Message::user(
-                "Tools are switched off; that tool call was not run and will not be. Write \
-                 your final answer now as the artifact JSON, from what you already know.",
-            ));
+            callbacks.on_note(
+                "⚠ stall guard: model replied with a tool call while tools are off — \
+                 restarting the reply from its findings, without tool history",
+            );
+            // A history full of tool calls keeps the model calling tools. Start a
+            // fresh conversation: its findings as plain text, and no tools declared
+            // at all, so the chat template stops advertising tool syntax.
+            let findings = gathered_findings(&messages, FINDINGS_MAX_CHARS);
+            messages = vec![Message::user(format!(
+                "Idea: {idea}\n\nYour tool calls so far found the following:\n\n{findings}\n\n\
+                 Tools are switched off for the rest of this phase. Write your final answer \
+                 now as the artifact JSON, from what is above."
+            ))];
+            tool_defs.clear();
             continue;
         }
 

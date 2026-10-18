@@ -44,6 +44,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Shared per-model vector cache (`~/.flows/vectors/`): worktrees, clones and eval temp dirs reuse embeddings.
 - Agent stall guards: replies cut off at `max_tokens` are nudged, then fail; rounds that bring nothing new nudge, then force a tool-less reply (read-only) or abort; an unreachable search backend drops `web_search` for the phase.
 - Agent stall guards: `lookup` / `web_search` refuse queries under 3 letters or digits (a model walking the alphabet looked productive forever); refused absolute paths that exist in the repo get a repo-relative hint; policy refusals (allowlist, sandbox scope) count as stalls, and refused `ls`/`cat`/`grep` name the file tool to use.
+- A forced reply that comes back as a tool call restarts from the phase's findings, with no tool history and no tools declared.
 - Phases without a prompt file (custom templates) now see earlier phases' artifacts, the repo map and retrieved code; the repo tree marks directories as `name/`.
 - `thinking: false` turns reasoning off on local OpenAI-compatible servers (`chat_template_kwargs.enable_thinking`).
 - Repo map ranks files by BM25 over path + full source (path-free corpus MRR 0.34 → 0.72; fixtures 0.47 → 1.00).

@@ -1195,9 +1195,10 @@ async fn tool_call_written_as_text_after_tools_are_off_is_not_the_artifact() {
     .await;
     assert_eq!(art.content["ok"], true, "{art:?}");
     let seen = provider.seen();
+    // The retry starts over from the findings: no tool history, no tools at all.
     assert!(seen[7].no_tool_calls);
-    assert!(
-        seen[7].last.contains("that tool call was not run"),
-        "{seen:?}"
-    );
+    assert!(seen[7].tools.is_empty(), "{seen:?}");
+    assert!(seen[7].last.contains("found the following"), "{seen:?}");
+    assert!(seen[7].last.contains("alpha"), "file content carried over");
+    assert_eq!(seen[7].last.matches("alpha").count(), 1, "deduplicated");
 }
