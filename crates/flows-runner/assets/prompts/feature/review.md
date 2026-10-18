@@ -19,6 +19,13 @@ You are a senior software engineer with deep expertise across languages, framewo
 {{ prior_artifacts['implement'].get('content', {}).get('summary', '') }}
 {% endif %}
 
+{% if changes %}
+**Changes under review** (uncommitted, against the last commit):
+```diff
+{{ changes }}
+```
+{% endif %}
+
 **Repository structure:**
 ```
 {{ repo_tree }}
@@ -26,7 +33,7 @@ You are a senior software engineer with deep expertise across languages, framewo
 
 ## Your task
 
-Read the changed files. Check for:
+Review the changes above{% if not changes %} (read the changed files){% endif %}. Check for:
 
 1. **Test failures** — fix any failing tests shown above
 2. **Lint errors** — fix any errors shown above (warnings are optional)
@@ -35,6 +42,8 @@ Read the changed files. Check for:
 5. **Completeness** — any TODOs, placeholders, or missing error handling?
 
 Use `read_file` and `write_file` to fix issues directly. Use `bash` to re-run tests or lint to verify your fixes before responding.
+
+Keep the review proportionate: read the changed code, check it against the task, run the tests once more if you changed something, then give your verdict. Put any edge case worth checking into a real test in the project's test files, not a throwaway program. If you do create a scratch file, delete it before you answer — everything left in the working tree gets committed.
 
 ## Verdict guide
 

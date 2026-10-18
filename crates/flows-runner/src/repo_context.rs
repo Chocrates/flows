@@ -115,3 +115,44 @@ pub fn build_slim_tree(repo_root: &Path, max_files: usize, max_depth: usize) -> 
     }
     lines.join("\n")
 }
+
+/// The working tree's uncommitted changes: the untracked files (names only —
+/// the agent can read them), then a unified diff against `HEAD`,
+/// capped at `max_chars`. Empty outside a git repo, with no commit yet, or when
+/// nothing has changed. Lets a review phase start from what was changed instead
+/// of rediscovering it.
+pub fn working_changes(repo_root: &Path, max_chars: usize) -> String {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let Some(diff) = git(&["diff", "--no-color", "--no-ext-diff", "HEAD"]) else {
+        return String::new();
+    };
+    let untracked = git(&["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    // New files first, so a long diff can't truncate them away.
+    let mut out = String::new();
+    if !untracked.trim().is_empty() {
+        out.push_str("New files (not in the diff):\n");
+        for name in untracked.lines() {
+            out.push_str(&format!("- {name}\n"));
+        }
+        out.push('\n');
+    }
+    out.push_str(diff.trim_end());
+    if out.len() > max_chars {
+        let mut cut = max_chars;
+        while !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out.push_str("\n... (diff truncated — read the files for the rest)");
+    }
+    out.trim_end().to_string()
+}

@@ -279,7 +279,7 @@ All UI (TUI, foreground print, background notify) is implemented via `RunnerCall
 5. Resolve extended thinking and run the provider completion with a tool loop (tools enabled per phase config; a `supports_tools: false` model gets no schemas and no tool prompt sections)
 6. Clarification loop: up to `max_clarification_rounds`, then proceed with best guess
 7. Loop guards end a phase that has stopped making progress, each with a note in the output pane:
-   - identical failing calls (`MAX_REPEATED_TOOL_ERRORS`), unchanged rewrites of one file (nudge at 3, abort at 6), 30 rounds without a write once writing has started, and the round cap;
+   - identical failing calls (`MAX_REPEATED_TOOL_ERRORS`), unchanged rewrites of one file (nudge at 3, abort at 6), 30 rounds without a write once writing has started, and the round cap (with 3 rounds left, a phase whose budget is 6 or more gets `tool_choice: none` and must reply with its artifact, so a long review ends with its verdict instead of failing the run);
    - **empty replies**: nudged, the phase fails after 3;
    - **output cap**: a reply stopped by `max_tokens` (`length` / `max_tokens`) with no tool call is nudged to be brief rather than taken as the artifact; a second in a row fails the phase naming the limit;
    - **stalls**: rounds whose calls bring nothing new (deduplicated re-reads, identical repeats of a read-only call, dead or empty searches, failed or 4xx/5xx fetches) nudge at 3; at 5 a read-only phase gets `tool_choice: none` and must reply (a tool call written out as text in that reply is refused, not taken as the artifact); a write-capable phase aborts at 8;

@@ -67,6 +67,7 @@ fn fallback_prompt_carries_prior_artifacts_and_pushed_context() {
         "pushed_context": "# Reference code\nfunc lastDay() {}",
         "tools_enabled": true,
         "tools_list": "- `read_file`",
+        "changes": "+func lastDayOfMonth() {}",
     });
     let out = render_prompt(&raw, &ctx).expect("fallback prompt must render");
     assert!(
@@ -76,6 +77,28 @@ fn fallback_prompt_carries_prior_artifacts_and_pushed_context() {
     assert!(out.contains("func Parse(expr string)"), "repo map: {out}");
     assert!(out.contains("func lastDay()"), "pushed context: {out}");
     assert!(out.contains("`read_file`"), "tools: {out}");
+    assert!(out.contains("+func lastDayOfMonth() {}"), "changes: {out}");
+}
+
+#[test]
+fn feature_review_shows_the_changes() {
+    let repo = tempfile::tempdir().unwrap();
+    let no_overrides = tempfile::tempdir().unwrap();
+    let phase = flows_core::models::PhaseConfig::new("review");
+    let raw = load_prompt(&phase, "feature", repo.path(), Some(no_overrides.path()));
+    let ctx = json!({"idea": "add L", "repo_tree": "cron.go", "prior_artifacts": {},
+                     "changes": "+func lastDayOfMonth() {}"});
+    let out = render_prompt(&raw, &ctx).unwrap();
+    assert!(
+        out.contains("Changes under review") && out.contains("+func lastDayOfMonth() {}"),
+        "{out}"
+    );
+    let bare = render_prompt(
+        &raw,
+        &json!({"idea": "add L", "repo_tree": "", "prior_artifacts": {}}),
+    )
+    .unwrap();
+    assert!(!bare.contains("Changes under review") && bare.contains("read the changed files"));
 }
 
 #[test]

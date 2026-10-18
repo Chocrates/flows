@@ -295,6 +295,7 @@ the builtins to `~/.flows/prompts/` so you can edit them.
 | `repo_tree` | gitignore-aware file tree of the repo |
 | `phase_name` | the current phase's name |
 | `prior_artifacts` | map of `{phase_name: artifact}` for all completed phases |
+| `changes` | uncommitted work: untracked file names, then `git diff HEAD` (≤ 20k chars; empty outside git or on a clean tree) |
 | `tools_list` | rendered list of the phase's enabled tools |
 
 Same MiniJinja idioms as above. To pass a prior phase's artifact forward cleanly,

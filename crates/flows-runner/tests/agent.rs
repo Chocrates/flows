@@ -1067,6 +1067,33 @@ async fn stalled_read_only_phase_is_nudged_then_forced_to_reply() {
 }
 
 #[tokio::test]
+async fn round_cap_in_sight_forces_the_artifact() {
+    let repo = repo_with_files();
+    let mut phase = files_phase();
+    phase.max_clarification_rounds = 0;
+    phase.max_tool_rounds = Some(8);
+    // Productive rounds (a new file each) right up to the cap.
+    let mut script: Vec<Completion> = (0..5)
+        .map(|i| {
+            tool(
+                "write_file",
+                &format!(r#"{{"path": "f{i}.txt", "content": "{i}"}}"#),
+            )
+        })
+        .collect();
+    script.push(artifact_json(r#"{"verdict": "approved"}"#));
+    let provider = Recorder::new(script);
+    let art = run_with(&phase, repo.path(), &provider, &WebSearchConfig::default()).await;
+    assert_eq!(art.content["verdict"], "approved", "{art:?}");
+    let seen = provider.seen();
+    assert_eq!(seen.len(), 6);
+    assert!(seen[..5].iter().all(|s| !s.no_tool_calls));
+    // Three rounds left: tools off, artifact requested.
+    assert!(seen[5].no_tool_calls);
+    assert!(seen[5].last.contains("round limit"), "{seen:?}");
+}
+
+#[tokio::test]
 async fn stalled_write_capable_phase_is_aborted() {
     let repo = repo_with_files();
     let script: Vec<Completion> = (0..9).map(|_| tool("read_file", READ_A)).collect();

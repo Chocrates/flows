@@ -195,6 +195,14 @@ const STALL_ABORT_ROUNDS: u32 = 8;
 /// a reply in phases that cannot write.
 const EXPLORE_NUDGE_ROUNDS: u32 = 6;
 const EXPLORE_FORCE_ROUNDS: u32 = 10;
+/// Rounds held back at the end of a phase's round budget: when only these are
+/// left, tools are switched off and the model must reply with its artifact, so
+/// a phase that ran long ends with its verdict instead of a bare "max rounds"
+/// failure (observed: a review that passed lint and tests ran out its 40 rounds
+/// probing edge cases and failed the run). Enough for one forced reply plus the
+/// restart after a tool call written as text. Phases with fewer than twice this
+/// many rounds keep the old hard cap.
+const FINAL_REPLY_ROUNDS: u32 = 3;
 /// Consecutive replies cut off at the output limit before the phase fails.
 const MAX_CAPPED_RESPONSES: u32 = 2;
 /// Most-recent messages budgeting never trims (keeps the live turn coherent).
@@ -565,6 +573,9 @@ async fn dispatch_tool(
         }
     }
 }
+
+/// Cap on the uncommitted diff shown to a phase as `changes`.
+const CHANGES_MAX_CHARS: usize = 20_000;
 
 /// Cap on the findings carried into a restarted forced reply.
 const FINDINGS_MAX_CHARS: usize = 60_000;
@@ -1211,6 +1222,15 @@ pub async fn run_agent_phase(
     };
     ctx.insert("repo_map".into(), json!(repo_map));
     ctx.insert("phase_name".into(), json!(phase.name));
+    // Uncommitted changes (new files, then the diff against HEAD), so a review
+    // phase, or implement on a loop back, starts from what was changed.
+    ctx.insert(
+        "changes".into(),
+        json!(crate::repo_context::working_changes(
+            repo_root,
+            CHANGES_MAX_CHARS
+        )),
+    );
     // Pushed context: code delivered up front (not pulled via tools), so a model
     // that can't call tools still gets grounding. Two sources feed one variable:
     // the eval oracle (labeled reference files) and semantic retrieval (top-k
@@ -1354,6 +1374,24 @@ your context small.",
             "thinking...".to_string()
         };
         callbacks.on_status(&status);
+
+        // Round cap in sight: stop tool use and ask for the artifact.
+        if !forced_reply
+            && round_num >= FINAL_REPLY_ROUNDS
+            && round_num + FINAL_REPLY_ROUNDS >= total_rounds
+        {
+            forced_reply = true;
+            callbacks.on_note(&format!(
+                "⚠ round cap: {} of {total_rounds} rounds left — tools switched off, the model \
+                 must reply with its artifact",
+                total_rounds - round_num
+            ));
+            messages.push(Message::user(
+                "You have reached this phase's round limit and tools are now switched off. \
+                 Reply with the final artifact JSON from what you have done and found so far. \
+                 Name anything you could not finish or check in the artifact.",
+            ));
+        }
 
         // Context-window budgeting (2.4): before sending, trim old tool results if
         // the request approaches the window. Preserves system prompt, task, and the

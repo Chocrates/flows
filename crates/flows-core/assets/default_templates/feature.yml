@@ -79,6 +79,7 @@ phases:
           - "go*"
           - "python -m*"
           - "pytest*"
+          - "rm*"            # clean up scratch files, or they get committed
     on_failure: stop
     loop_back_to: implement
     loop_condition: "content.get('verdict') not in ('approved', 'approved_with_suggestions')"

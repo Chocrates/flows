@@ -47,6 +47,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Artifact JSON with unbalanced brackets (a dropped `}` or an array left open) is repaired before parsing.
 - A forced reply that comes back as a tool call restarts from the phase's findings, with no tool history and no tools declared.
 - Phases without a prompt file (custom templates) now see earlier phases' artifacts, the repo map and retrieved code; the repo tree marks directories as `name/`.
+- Agent phases reaching their round cap reply with their artifact (tools off for the last 3 rounds) instead of failing; prompts get `changes` (new files + uncommitted diff), shown to the feature review and on implement loop-backs; feature review may `rm` its scratch files.
 - `thinking: false` turns reasoning off on local OpenAI-compatible servers (`chat_template_kwargs.enable_thinking`).
 - Repo map ranks files by BM25 over path + full source (path-free corpus MRR 0.34 → 0.72; fixtures 0.47 → 1.00).
 - `retrieval_model: gemma` (EmbeddingGemma-300M, path-free MRR 0.83 vs 0.71 default) and `jina-code`; models embed with their trained prefixes, in batches of 8 (gemma 3.6 → 1.2 GB peak); unknown names warn.

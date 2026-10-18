@@ -148,8 +148,8 @@ pub fn load_prompt(
 /// Generic single-phase prompt used when no template/phase prompt is found. Uses
 /// Jinja placeholders (`{{ ... }}`) filled by [`render_prompt`]; single braces in
 /// the JSON examples are literal to Jinja. It carries what a shipped prompt
-/// would: earlier phases' artifacts (so `implement` sees the plan), pushed
-/// context (repo map, retrieved code) and the tool list.
+/// would: earlier phases' artifacts (so `implement` sees the plan), the
+/// uncommitted diff, pushed context (repo map, retrieved code) and the tool list.
 const FALLBACK_PROMPT: &str =
     "You are an expert assistant running the **__PHASE__** phase of a workflow.\n\n\
 # Task\n{{ idea }}\n\n\
@@ -159,6 +159,7 @@ Output of the phases that ran before this one; build on it.\n\n\
 ```json\n{{ (art.get('content', {}) | tojson(indent=2))[:6000] }}\n```\n\n\
 {% endfor %}{% endif %}\
 # Repository files\n{{ repo_tree }}\n\n\
+{% if changes %}# Uncommitted changes\n```diff\n{{ changes }}\n```\n\n{% endif %}\
 {% if repo_map %}# Repository symbol map\n{{ repo_map }}\n\n{% endif %}\
 {% if pushed_context %}{{ pushed_context }}\n\n{% endif %}\
 {% if tools_enabled %}# Tools available\n{{ tools_list }}\n\n\

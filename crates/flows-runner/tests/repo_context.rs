@@ -1,4 +1,4 @@
-use flows_runner::repo_context::{build_repo_tree, build_slim_tree};
+use flows_runner::repo_context::{build_repo_tree, build_slim_tree, working_changes};
 use tempfile::tempdir;
 
 #[test]
@@ -70,4 +70,45 @@ fn tree_truncates() {
     let tree = build_repo_tree(d.path(), 5);
     assert!(tree.contains("truncated"));
     assert!(tree.lines().count() <= 6);
+}
+
+fn git(repo: &std::path::Path, args: &[&str]) {
+    let ok = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+#[test]
+fn working_changes_lists_new_files_then_the_diff() {
+    let d = tempdir().unwrap();
+    let r = d.path();
+    assert_eq!(working_changes(r, 10_000), "", "not a repo yet");
+    git(r, &["init", "-q"]);
+    std::fs::write(r.join("a.go"), "package a\n").unwrap();
+    git(r, &["add", "."]);
+    git(r, &["commit", "-qm", "init"]);
+    assert_eq!(working_changes(r, 10_000), "", "clean tree");
+
+    std::fs::write(r.join("a.go"), "package a\n\nfunc Last() {}\n").unwrap();
+    std::fs::write(r.join("a_test.go"), "package a\n").unwrap();
+    let changes = working_changes(r, 10_000);
+    let new_at = changes.find("- a_test.go").expect("new file listed");
+    let diff_at = changes.find("+func Last() {}").expect("diff shown");
+    assert!(new_at < diff_at, "new files come first:\n{changes}");
+
+    let cut = working_changes(r, 40);
+    assert!(cut.contains("- a_test.go") && cut.contains("diff truncated"));
 }

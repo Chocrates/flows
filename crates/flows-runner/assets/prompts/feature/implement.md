@@ -18,6 +18,13 @@ You are a senior software engineer with deep expertise across languages, framewo
 ```
 {% endif %}
 
+{% if changes %}
+**Already changed in the working tree** (uncommitted, from an earlier pass — build on it):
+```diff
+{{ changes }}
+```
+{% endif %}
+
 **Repository structure:**
 ```
 {{ repo_tree }}
