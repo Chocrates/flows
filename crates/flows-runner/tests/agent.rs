@@ -549,6 +549,22 @@ async fn cost_cap_aborts() {
 // -- parse_response ----------------------------------------------------------
 
 #[test]
+fn artifact_missing_its_last_braces_is_recovered() {
+    // A long plan whose final `}` the model dropped, inside a fence.
+    let v = parse_response(
+        "```json\n{\"type\": \"artifact\", \"content\": {\"notes\": [\"a } in a string\"]}\n```",
+    )
+    .unwrap();
+    assert_eq!(v["content"]["notes"][0], "a } in a string");
+    // An array left open before the object closes (seen from a 27B model).
+    let v = parse_response(
+        r#"{"type": "artifact", "content": {"files": [{"path": "a.go", "changes": ["x"]}, "risks": ["y"]}}"#,
+    )
+    .unwrap();
+    assert_eq!(v["content"]["files"][0]["path"], "a.go");
+}
+
+#[test]
 fn parse_fenced_artifact() {
     let v =
         parse_response("prose\n```json\n{\"type\": \"artifact\", \"content\": {\"a\": 1}}\n```")

@@ -885,7 +885,10 @@ pub fn parse_response(content: &str) -> Option<Value> {
         }
     }
     for c in candidates {
-        if let Ok(v) = serde_json::from_str::<Value>(&c) {
+        let parsed = serde_json::from_str::<Value>(&c)
+            .ok()
+            .or_else(|| close_brackets(&c).and_then(|f| serde_json::from_str(&f).ok()));
+        if let Some(v) = parsed {
             if matches!(
                 v.get("type").and_then(Value::as_str),
                 Some("artifact") | Some("questions")
@@ -895,6 +898,78 @@ pub fn parse_response(content: &str) -> Option<Value> {
         }
     }
     None
+}
+
+/// `s` with its brackets balanced, or `None` when it already was (or ends inside
+/// a string). Local models drop closers in long artifacts — the last `}`, or a
+/// `]` before the `}` that follows it. A closer that skips over open brackets
+/// first closes them; a closer with no opener is dropped; whatever is still open
+/// at the end is closed.
+fn close_brackets(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut stack = Vec::new();
+    // Where in `out` the last element separator of the innermost array was.
+    let mut array_comma: Vec<usize> = Vec::new();
+    let (mut in_str, mut escaped, mut changed) = (false, false, false);
+    for ch in s.chars() {
+        if in_str {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_str = false,
+                _ => {}
+            }
+            out.push(ch);
+            continue;
+        }
+        match ch {
+            '"' => in_str = true,
+            '{' => stack.push('}'),
+            '[' => {
+                stack.push(']');
+                array_comma.push(usize::MAX);
+            }
+            ',' if stack.last() == Some(&']') => {
+                if let Some(c) = array_comma.last_mut() {
+                    *c = out.len();
+                }
+            }
+            // `"key":` inside an array: the array should have closed before the
+            // comma that led to this key.
+            ':' if stack.last() == Some(&']') => match array_comma.pop() {
+                Some(at) if at != usize::MAX => {
+                    stack.pop();
+                    out.insert(at, ']');
+                    changed = true;
+                }
+                _ => return None,
+            },
+            '}' | ']' if stack.contains(&ch) => {
+                while let Some(open) = stack.pop() {
+                    if open == ']' {
+                        array_comma.pop();
+                    }
+                    if open == ch {
+                        break;
+                    }
+                    out.push(open);
+                    changed = true;
+                }
+            }
+            '}' | ']' => {
+                changed = true;
+                continue;
+            }
+            _ => {}
+        }
+        out.push(ch);
+    }
+    if in_str || (stack.is_empty() && !changed) {
+        return None;
+    }
+    let mut out = out.trim_end().to_string();
+    out.extend(stack.iter().rev());
+    Some(out)
 }
 
 // ---------------------------------------------------------------------------
