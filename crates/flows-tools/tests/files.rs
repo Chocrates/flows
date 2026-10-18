@@ -72,6 +72,16 @@ fn absolute_path_blocked() {
     let d = tempdir().unwrap();
     let err = read_file(d.path(), "/etc/passwd").unwrap_err();
     assert!(err.0.contains("escapes repo root"));
+    assert!(!err.0.contains("repo-relative"), "{}", err.0);
+}
+
+#[test]
+fn absolute_form_of_a_repo_path_gets_a_hint() {
+    let d = tempdir().unwrap();
+    write_file(d.path(), "src/a.rs", "x").unwrap();
+    let err = read_file(d.path(), "/src/a.rs").unwrap_err();
+    assert!(err.0.contains("escapes repo root"), "{}", err.0);
+    assert!(err.0.contains("use \"src/a.rs\""), "{}", err.0);
 }
 
 #[test]

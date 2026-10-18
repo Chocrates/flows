@@ -975,6 +975,38 @@ async fn unreachable_search_backend_drops_the_tool() {
 }
 
 #[tokio::test]
+async fn one_letter_lookups_are_refused_and_stall_the_phase() {
+    let mut phase = read_only_phase();
+    phase.tools.lookup = true;
+    // A degenerating model walking the alphabet: every query is refused before
+    // any request goes out, so the stall guard nudges, then forces a reply.
+    let mut script: Vec<Completion> = ["x", "q", "p", "o", "n"]
+        .iter()
+        .map(|q| {
+            tool(
+                "lookup",
+                &format!(r#"{{"source": "crates_io", "query": "{q}"}}"#),
+            )
+        })
+        .collect();
+    script.push(artifact_json(r#"{"ok": true}"#));
+    let provider = Recorder::new(script);
+    let art = run_with(
+        &phase,
+        Path::new("/tmp"),
+        &provider,
+        &WebSearchConfig::default(),
+    )
+    .await;
+    assert_eq!(art.content["ok"], true, "{art:?}");
+    let seen = provider.seen();
+    assert_eq!(seen.len(), 6);
+    assert!(seen[1].last.contains("too short"), "{seen:?}");
+    assert!(seen[3].last.contains("nothing new"), "{seen:?}");
+    assert!(seen[5].no_tool_calls, "{seen:?}");
+}
+
+#[tokio::test]
 async fn stalled_read_only_phase_is_nudged_then_forced_to_reply() {
     let repo = repo_with_files();
     // One fresh read, then five re-reads of the unchanged file.

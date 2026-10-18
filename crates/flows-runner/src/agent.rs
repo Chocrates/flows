@@ -530,6 +530,7 @@ async fn dispatch_tool(
             }
             match str_arg(args, "query") {
                 None => "Error: web_search requires a non-empty 'query' string argument".into(),
+                Some(q) if vague_query(q) => vague_query_error("web_search", q),
                 Some(q) => match flows_tools::search::web_search(q, web_search_cfg).await {
                     Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| v.to_string()),
                     Err(e) => format!("Error: {}", e.0),
@@ -543,6 +544,7 @@ async fn dispatch_tool(
             match (str_arg(args, "source"), str_arg(args, "query")) {
                 (None, _) => "Error: lookup requires a 'source' argument".into(),
                 (_, None) => "Error: lookup requires a non-empty 'query' argument".into(),
+                (_, Some(q)) if vague_query(q) => vague_query_error("lookup", q),
                 (Some(source), Some(q)) => {
                     let max = args.get("max").and_then(Value::as_u64).unwrap_or(5) as usize;
                     match flows_tools::lookup::lookup(source, q, max).await {
@@ -562,6 +564,21 @@ async fn dispatch_tool(
             format!("Error: unknown tool {other:?}")
         }
     }
+}
+
+/// A search query too short to mean anything ("x", "qq"). A degenerating model
+/// can cycle through such queries indefinitely, and since every answer differs
+/// the stall guard would see each one as new; refusing them counts as a failure.
+fn vague_query(q: &str) -> bool {
+    q.chars().filter(|c| c.is_alphanumeric()).count() < 3
+}
+
+fn vague_query_error(tool: &str, q: &str) -> String {
+    format!(
+        "Error: {tool} query {q:?} is too short to search for. Describe what you need \
+         in words (e.g. a library name plus the feature), or stop searching and use \
+         what you already have."
+    )
 }
 
 fn summarize_tool_call(name: &str, args: &Value) -> String {

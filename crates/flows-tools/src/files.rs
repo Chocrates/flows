@@ -68,8 +68,19 @@ pub fn safe_path(repo_root: &Path, user_path: &str) -> ToolResult<PathBuf> {
     let root_real = real_path(repo_root);
     let target_real = real_path(&target);
     if !target_real.starts_with(&root_real) {
+        // Models often write repo paths as "/src/x.rs"; point at the fix.
+        let rel = user_path.trim_start_matches('/');
+        let hint = if user_path.starts_with('/')
+            && !rel.is_empty()
+            && repo_root.join(rel).exists()
+            && real_path(&repo_root.join(rel)).starts_with(&root_real)
+        {
+            format!(" — paths are repo-relative; use {rel:?}")
+        } else {
+            String::new()
+        };
         return Err(ToolError::new(format!(
-            "Path escapes repo root: {user_path:?}"
+            "Path escapes repo root: {user_path:?}{hint}"
         )));
     }
     Ok(lexical_normalize(&target))
