@@ -47,6 +47,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Artifact JSON with unbalanced brackets (a dropped `}` or an array left open) is repaired before parsing.
 - A forced reply that comes back as a tool call restarts from the phase's findings, with no tool history and no tools declared.
 - Phases without a prompt file (custom templates) now see earlier phases' artifacts, the repo map and retrieved code; the repo tree marks directories as `name/`.
+- Agent stall guards: a `web_search` / `lookup` query rewording an earlier one (≥ 50% shared words) counts as a stall; an implement pass that only verifies uncommitted work no longer trips the `files_written` guard.
 - `feature` review and `software` verify loop back to implement at most 3 times (was 30), matching the 3 fix cycles their prompts promise.
 - Fix: `loop_condition` never fired in installed builds — minijinja 2.24 renders booleans as `True` and the condition was compared as text; it is now evaluated as an expression. `make install` builds `--locked`.
 - `templates sync` records what it wrote (`~/.flows/synced.json`), updates unedited copies and keeps edited ones; `doctor` flags copies that hide a newer builtin.

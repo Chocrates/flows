@@ -647,6 +647,29 @@ fn vague_query(q: &str) -> bool {
     q.chars().filter(|c| c.is_alphanumeric()).count() < 3
 }
 
+/// Lowercased word set of a search query, for spotting rephrasings.
+fn query_terms(q: &str) -> HashSet<String> {
+    q.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Share of words two queries have in common (Jaccard) at or above which the
+/// later one counts as a rephrasing of the earlier. Observed: a plan phase sent
+/// 32 lookups that were all reorderings of "quartz cron L last day of month";
+/// each returned different hits, so none looked repeated.
+const REPHRASED_QUERY_OVERLAP: f64 = 0.5;
+
+fn rephrased(terms: &HashSet<String>, earlier: &[HashSet<String>]) -> bool {
+    !terms.is_empty()
+        && earlier.iter().any(|e| {
+            let union = terms.union(e).count();
+            union > 0
+                && terms.intersection(e).count() as f64 / union as f64 >= REPHRASED_QUERY_OVERLAP
+        })
+}
+
 fn vague_query_error(tool: &str, q: &str) -> String {
     format!(
         "Error: {tool} query {q:?} is too short to search for. Describe what you need \
@@ -1332,6 +1355,8 @@ your context small.",
     // Same for the other read-only tools, for the stall guard only: an identical
     // call returning an identical result brought nothing new.
     let mut seen_results: HashMap<String, u64> = HashMap::new();
+    // Word sets of the phase's web_search / lookup queries (see `rephrased`).
+    let mut past_queries: Vec<HashSet<String>> = Vec::new();
     // Paths the phase has read, listed or seen in a search hit, and the streak
     // of exploration rounds that added none (see EXPLORE_*).
     let mut known_paths: HashSet<String> = HashSet::new();
@@ -1722,7 +1747,19 @@ your context small.",
                 ) && seen_results
                     .insert(format!("{}|{}", tc.name, tc.arguments), hash_str(&result))
                     == Some(hash_str(&result));
-                let fresh = !(deduped || dry || failed_fetch || repeated || refused(&result));
+                // A web search or lookup that mostly repeats an earlier query's
+                // words is going round in circles, even when its hits differ.
+                let rephrase = matches!(tc.name.as_str(), "web_search" | "lookup")
+                    && serde_json::from_str::<Value>(&tc.arguments)
+                        .ok()
+                        .and_then(|a| a.get("query").and_then(Value::as_str).map(query_terms))
+                        .is_some_and(|terms| {
+                            let r = rephrased(&terms, &past_queries);
+                            past_queries.push(terms);
+                            r
+                        });
+                let fresh =
+                    !(deduped || dry || failed_fetch || repeated || rephrase || refused(&result));
                 if fresh {
                     new_info = true;
                 }
@@ -2020,7 +2057,14 @@ starting — likely stuck in a build/search loop"
                     .and_then(Value::as_array)
                     .map(|a| !a.is_empty())
                     .unwrap_or(false);
-                if can_write && claimed_files && !has_written && !inline_wrote {
+                // A pass that only verifies work already in the tree (implement
+                // after a review loop-back) legitimately writes nothing.
+                if can_write
+                    && claimed_files
+                    && !has_written
+                    && !inline_wrote
+                    && crate::repo_context::working_changes(repo_root, 1).is_empty()
+                {
                     let msg = "artifact reports files_written but no file was actually \
                                written — call write_file for each file; do not inline code \
                                in the response"
@@ -2103,6 +2147,32 @@ starting — likely stuck in a build/search loop"
     AgentResult {
         artifact: error_artifact(&phase.name, idea, "max rounds exceeded"),
         cost_usd: phase_cost,
+    }
+}
+
+#[cfg(test)]
+mod rephrase_tests {
+    use super::{query_terms, rephrased};
+
+    #[test]
+    fn reworded_queries_are_rephrasings() {
+        // From a real plan phase that sent 32 such lookups.
+        let past = vec![query_terms("Quartz cron L last day of month semantics")];
+        for q in [
+            "quartz cron L last day of month",
+            "cron L last day of month meaning",
+            "go cron \"L\" last day of month",
+        ] {
+            assert!(rephrased(&query_terms(q), &past), "{q}");
+        }
+        for q in [
+            "tokio spawn_blocking",
+            "serde rename_all enum",
+            "go time.Date normalization",
+        ] {
+            assert!(!rephrased(&query_terms(q), &past), "{q}");
+        }
+        assert!(!rephrased(&query_terms("anything"), &[]));
     }
 }
 

@@ -434,6 +434,58 @@ async fn artifact_claiming_files_without_writing_fails() {
 }
 
 #[tokio::test]
+async fn verify_only_pass_over_existing_changes_succeeds() {
+    // Implement after a review loop-back: the files are already changed in the
+    // working tree, so a pass that only re-checks them writes nothing.
+    let d = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(d.path())
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(d.path().join("cron.go"), "package a\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    std::fs::write(d.path().join("cron.go"), "package a\n\nfunc Last() {}\n").unwrap();
+    let provider = Mock::new(vec![artifact_json(
+        r#"{"files_written": ["cron.go"], "summary": "verified"}"#,
+    )]);
+    let art = run_agent_phase(
+        &files_phase(),
+        "idea",
+        d.path(),
+        &empty_artifacts(),
+        "feature",
+        &LLMConfig::default(),
+        &provider,
+        &NoopCallbacks,
+        None,
+        &ContextConfig::default(),
+        &WebSearchConfig::default(),
+        0.0,
+        0.0,
+        None,
+    )
+    .await
+    .artifact;
+    assert_eq!(art.content["summary"], "verified", "{art:?}");
+}
+
+#[tokio::test]
 async fn artifact_with_real_writes_succeeds() {
     // Same shape, but the model actually wrote a file first — must NOT trip the guard.
     let d = tempfile::tempdir().unwrap();
