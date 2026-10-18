@@ -202,8 +202,20 @@ fn check_segment(segment: &str, config: &BashConfig) -> ToolResult<()> {
             return Ok(());
         }
     }
+    // Models reach for coreutils to look around; the file tools do that job.
+    let hint = match exe_name.as_str() {
+        "ls" | "find" | "tree" => "\nTo list files use the `list_files` tool.",
+        "cat" | "head" | "tail" | "less" | "sed" | "awk" | "wc" => {
+            "\nTo read a file (or a line range) use the `read_file` tool."
+        }
+        "grep" | "rg" | "ag" => "\nTo search code use the `search_code` tool.",
+        "echo" | "printf" | "mkdir" | "touch" | "tee" => {
+            "\nTo create files use the `write_file` tool (it creates parent directories)."
+        }
+        _ => "",
+    };
     Err(ToolError::new(format!(
-        "Command not in allowlist: {executable:?}\nAllowed patterns: {:?}",
+        "Command not in allowlist: {executable:?}\nAllowed patterns: {:?}{hint}",
         config.allowed
     )))
 }

@@ -43,7 +43,7 @@ Status as of 2026-10. Shipped work is tracked in `openspec/specs/` and
 - Template registry: `flows templates install <git>[//path][@ref]` pins to a commit, reviews before writing, and confines untrusted templates (scripts sandboxed, no credential exposure).
 - Shared per-model vector cache (`~/.flows/vectors/`): worktrees, clones and eval temp dirs reuse embeddings.
 - Agent stall guards: replies cut off at `max_tokens` are nudged, then fail; rounds that bring nothing new nudge, then force a tool-less reply (read-only) or abort; an unreachable search backend drops `web_search` for the phase.
-- Agent stall guards: `lookup` / `web_search` refuse queries under 3 letters or digits (a model walking the alphabet looked productive forever); refused absolute paths that exist in the repo get a repo-relative hint.
+- Agent stall guards: `lookup` / `web_search` refuse queries under 3 letters or digits (a model walking the alphabet looked productive forever); refused absolute paths that exist in the repo get a repo-relative hint; policy refusals (allowlist, sandbox scope) count as stalls, and refused `ls`/`cat`/`grep` name the file tool to use.
 - `thinking: false` turns reasoning off on local OpenAI-compatible servers (`chat_template_kwargs.enable_thinking`).
 - Repo map ranks files by BM25 over path + full source (path-free corpus MRR 0.34 → 0.72; fixtures 0.47 → 1.00).
 - `retrieval_model: gemma` (EmbeddingGemma-300M, path-free MRR 0.83 vs 0.71 default) and `jina-code`; models embed with their trained prefixes, in batches of 8 (gemma 3.6 → 1.2 GB peak); unknown names warn.

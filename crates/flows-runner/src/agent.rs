@@ -566,6 +566,22 @@ async fn dispatch_tool(
     }
 }
 
+/// A tool call the policy refused before anything ran (allowlist, sandbox scope,
+/// tool not enabled). It tells the model nothing about the task, so for the stall
+/// guard it is not new information — unlike a failing build or test.
+fn refused(result: &str) -> bool {
+    const REFUSALS: &[&str] = &[
+        "Error: Command not in allowlist",
+        "Error: Command blocked by safety policy",
+        "Error: Network access from shell commands is blocked",
+        "Error: cd is only allowed",
+        "Error: Could not parse command",
+        "Error: Path escapes repo root",
+        "tool not enabled for this phase",
+    ];
+    result.starts_with("Error: ") && REFUSALS.iter().any(|r| result.contains(r))
+}
+
 /// A search query too short to mean anything ("x", "qq"). A degenerating model
 /// can cycle through such queries indefinitely, and since every answer differs
 /// the stall guard would see each one as new; refusing them counts as a failure.
@@ -1546,7 +1562,7 @@ your context small.",
                 ) && seen_results
                     .insert(format!("{}|{}", tc.name, tc.arguments), hash_str(&result))
                     == Some(hash_str(&result));
-                let fresh = !(deduped || dry || failed_fetch || repeated);
+                let fresh = !(deduped || dry || failed_fetch || repeated || refused(&result));
                 if fresh {
                     new_info = true;
                 }

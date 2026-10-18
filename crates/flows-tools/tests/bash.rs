@@ -131,6 +131,19 @@ fn cd_absolute_or_bare_rejected() {
 }
 
 #[test]
+fn blocked_coreutils_point_at_the_file_tools() {
+    let cfg = allowed(&["go*"]);
+    let err = check_allowlist("go build ./... | head -40", &cfg).unwrap_err();
+    assert!(err.0.contains("`read_file`"), "{}", err.0);
+    let err = check_allowlist("grep -rn Spec .", &cfg).unwrap_err();
+    assert!(err.0.contains("`search_code`"), "{}", err.0);
+    let err = check_allowlist("ls -la", &cfg).unwrap_err();
+    assert!(err.0.contains("`list_files`"), "{}", err.0);
+    let err = check_allowlist("curl x", &cfg).unwrap_err();
+    assert!(!err.0.contains("tool"), "{}", err.0);
+}
+
+#[test]
 fn every_segment_of_a_compound_is_checked() {
     let cfg = allowed(&["cargo*", "true*"]);
     // A leading allowed command must not smuggle an unlisted one past the check.

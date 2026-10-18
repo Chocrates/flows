@@ -1007,6 +1007,25 @@ async fn one_letter_lookups_are_refused_and_stall_the_phase() {
 }
 
 #[tokio::test]
+async fn refused_shell_commands_count_as_stalled() {
+    let repo = repo_with_files();
+    let mut phase = files_phase();
+    phase.tools.bash = Some(BashConfig {
+        allowed: vec!["go*".into()],
+        ..Default::default()
+    });
+    // Different commands each round, all refused by the allowlist.
+    let script: Vec<Completion> = (0..9)
+        .map(|i| tool("bash", &format!(r#"{{"command": "ls -la dir{i}"}}"#)))
+        .collect();
+    let provider = Recorder::new(script);
+    let art = run_with(&phase, repo.path(), &provider, &WebSearchConfig::default()).await;
+    let err = art.content["error"].as_str().unwrap_or("");
+    assert!(err.contains("nothing new"), "{art:?}");
+    assert!(provider.seen()[1].last.contains("`list_files`"));
+}
+
+#[tokio::test]
 async fn stalled_read_only_phase_is_nudged_then_forced_to_reply() {
     let repo = repo_with_files();
     // One fresh read, then five re-reads of the unchanged file.
