@@ -52,7 +52,7 @@ pub fn build_repo_tree(repo_root: &Path, max_files: usize) -> String {
         let indent = "  ".repeat(depth);
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let name = entry.file_name().to_string_lossy();
-        lines.push(format!("{indent}{}{name}", if is_dir { "/" } else { "" }));
+        lines.push(format!("{indent}{name}{}", if is_dir { "/" } else { "" }));
         count += 1;
     }
 
@@ -104,7 +104,7 @@ pub fn build_slim_tree(repo_root: &Path, max_files: usize, max_depth: usize) -> 
         let indent = "  ".repeat(depth);
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let name = entry.file_name().to_string_lossy();
-        lines.push(format!("{indent}{}{name}", if is_dir { "/" } else { "" }));
+        lines.push(format!("{indent}{name}{}", if is_dir { "/" } else { "" }));
         count += 1;
     }
 

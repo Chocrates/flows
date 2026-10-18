@@ -50,7 +50,11 @@ fn tree_lists_files_respects_gitignore_and_deny() {
 
     let tree = build_repo_tree(r, 500);
     assert!(tree.contains("main.rs"));
-    assert!(tree.contains("/src"));
+    assert!(tree.contains("src/"));
+    assert!(
+        !tree.contains("/src"),
+        "directories end with a slash, never start with one"
+    );
     assert!(tree.contains("lib.rs"));
     assert!(!tree.contains("secret.txt"), "gitignored file leaked");
     assert!(!tree.contains("node_modules"), "vendor dir leaked");

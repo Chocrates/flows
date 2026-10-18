@@ -46,6 +46,36 @@ fn fallback_prompt_includes_task_and_repo_tree() {
     assert!(out.contains("count the lines"), "task injected");
     assert!(out.contains("notes.txt"), "repo tree injected");
     assert!(out.contains("**run** phase"), "phase name filled");
+    assert!(
+        !out.contains("Earlier phases"),
+        "nothing before the first phase"
+    );
+}
+
+#[test]
+fn fallback_prompt_carries_prior_artifacts_and_pushed_context() {
+    // A custom template without prompt files: `implement` must still see the
+    // plan, and context features must still reach the model.
+    let repo = tempfile::tempdir().unwrap();
+    let phase = flows_core::models::PhaseConfig::new("implement");
+    let raw = load_prompt(&phase, "e2e", repo.path(), None);
+    let ctx = json!({
+        "idea": "add L",
+        "repo_tree": "cron.go",
+        "prior_artifacts": {"plan": {"content": {"steps": ["parse L in day-of-month"]}}},
+        "repo_map": "### cron.go\n- func Parse(expr string) (Spec, error)",
+        "pushed_context": "# Reference code\nfunc lastDay() {}",
+        "tools_enabled": true,
+        "tools_list": "- `read_file`",
+    });
+    let out = render_prompt(&raw, &ctx).expect("fallback prompt must render");
+    assert!(
+        out.contains("## plan") && out.contains("parse L in day-of-month"),
+        "{out}"
+    );
+    assert!(out.contains("func Parse(expr string)"), "repo map: {out}");
+    assert!(out.contains("func lastDay()"), "pushed context: {out}");
+    assert!(out.contains("`read_file`"), "tools: {out}");
 }
 
 #[test]
