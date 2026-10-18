@@ -83,7 +83,7 @@ phases:
     on_failure: stop
     loop_back_to: implement
     loop_condition: "content.get('verdict') not in ('approved', 'approved_with_suggestions')"
-    max_loop_iterations: 30
+    max_loop_iterations: 3            # matches the "at most 3 fix cycles" in review.md
 
   - name: approve
     type: human
