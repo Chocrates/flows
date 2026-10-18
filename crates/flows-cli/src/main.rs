@@ -19,7 +19,7 @@ use flows_core::models::{
 };
 use flows_core::pricing::format_cost;
 use flows_core::state::Store;
-use flows_core::templates::{builtin_files, list_templates, load_template};
+use flows_core::templates::{list_templates, load_template};
 use flows_runner::runner::{default_provider_factory, run_pipeline, RunnerCallbacks};
 
 mod eval;
@@ -659,6 +659,7 @@ fn cmd_doctor() -> Result<(), String> {
 
     check_endpoints(&llm, &profiles);
     check_web_search(&global);
+    check_synced_copies();
 
     let info = detect_stack(&cwd);
     println!(
@@ -986,47 +987,73 @@ fn cmd_templates_update(name: &str, trust: bool, yes: bool) -> Result<(), String
 }
 
 fn cmd_templates_sync(force: bool) -> Result<(), String> {
-    let dir = flows_dir().join("templates");
+    let dir = flows_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let (mut written, mut skipped) = (0, 0);
-    for (name, contents) in builtin_files() {
-        let path = dir.join(&name);
-        if path.exists() && !force {
-            skipped += 1;
-            continue;
-        }
-        std::fs::write(&path, contents).map_err(|e| e.to_string())?;
-        written += 1;
-    }
+    let r = flows_runner::sync::sync_builtins(&dir, force)?;
     println!(
-        "Synced templates to {} ({written} written, {skipped} skipped)",
-        dir.display()
+        "Synced templates + prompts to {} ({} written, {} updated)",
+        dir.display(),
+        r.written.len(),
+        r.updated.len()
     );
-
-    // Also sync the agent prompts so users can customize them.
-    let pdir = flows_dir().join("prompts");
-    let (mut pw, mut ps) = (0, 0);
-    for (rel, contents) in flows_runner::builtin_prompt_files() {
-        let path = pdir.join(&rel);
-        if path.exists() && !force {
-            ps += 1;
-            continue;
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(&path, contents).map_err(|e| e.to_string())?;
-        pw += 1;
+    for rel in &r.updated {
+        println!("  updated {rel}");
     }
-    println!(
-        "Synced prompts to {} ({pw} written, {ps} skipped)",
-        pdir.display()
-    );
-
-    if (skipped > 0 || ps > 0) && !force {
-        println!("  (some already present — use --force to overwrite)");
+    let kept = r.kept_edited.len() + r.kept_unrecorded.len();
+    if kept > 0 {
+        println!("  kept {kept} that differ from the builtin (edited by you, or copied before sync kept records):");
+        for rel in r.kept_edited.iter().chain(&r.kept_unrecorded) {
+            println!("    {rel}");
+        }
+        println!(
+            "  they hide the builtin's changes — `flows templates sync --force` replaces them"
+        );
     }
     Ok(())
+}
+
+/// Copies under `~/.flows/` that hide a newer builtin.
+fn check_synced_copies() {
+    use flows_runner::sync::CopyState;
+    let states = flows_runner::sync::copy_states(&flows_dir());
+    let of = |want: CopyState| -> Vec<&str> {
+        states
+            .iter()
+            .filter(|(_, s)| *s == want)
+            .map(|(rel, _)| rel.as_str())
+            .collect()
+    };
+    let (outdated, edited, unrecorded) = (
+        of(CopyState::Outdated),
+        of(CopyState::Edited),
+        of(CopyState::Unrecorded),
+    );
+    if outdated.is_empty() && edited.is_empty() && unrecorded.is_empty() {
+        println!("  ✓ builtin copies: none hide a newer builtin");
+        return;
+    }
+    if !outdated.is_empty() {
+        println!(
+            "  ⚠ builtin copies: {} outdated (never edited) — `flows templates sync` updates them: {}",
+            outdated.len(),
+            outdated.join(", ")
+        );
+    }
+    if !unrecorded.is_empty() {
+        println!(
+            "  ⚠ builtin copies: {} differ from the builtin with no sync record, so they may be stale — \
+             `flows templates sync --force` replaces them (keep any you customized): {}",
+            unrecorded.len(),
+            unrecorded.join(", ")
+        );
+    }
+    if !edited.is_empty() {
+        println!(
+            "  · builtin copies: {} customized, used instead of the builtin: {}",
+            edited.len(),
+            edited.join(", ")
+        );
+    }
 }
 
 /// A heavily-commented starter template — one of each phase type, every common

@@ -45,9 +45,23 @@ fn templates_sync_writes_builtins() {
     ] {
         assert!(tdir.join(name).exists(), "missing {name}");
     }
-    // second sync without --force skips
+    // An edited copy survives a second sync; --force replaces it.
+    std::fs::write(tdir.join("blank.yml"), "# mine\n").unwrap();
     let out2 = run(&["templates", "sync"], dir.path(), dir.path());
-    assert!(String::from_utf8_lossy(&out2.stdout).contains("skipped"));
+    let text = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        text.contains("0 written, 0 updated") && text.contains("templates/blank.yml"),
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(tdir.join("blank.yml")).unwrap(),
+        "# mine\n"
+    );
+    run(&["templates", "sync", "--force"], dir.path(), dir.path());
+    assert_ne!(
+        std::fs::read_to_string(tdir.join("blank.yml")).unwrap(),
+        "# mine\n"
+    );
 }
 
 #[test]
@@ -186,7 +200,7 @@ fn templates_sync_also_writes_prompts() {
     let out = run(&["templates", "sync"], dir.path(), dir.path());
     assert!(out.status.success());
     assert!(dir.path().join(".flows/prompts/feature/plan.md").exists());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("Synced prompts"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Synced templates + prompts"));
 }
 
 fn seed_run(home: &std::path::Path, id: &str, status: &str) {

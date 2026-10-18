@@ -11,7 +11,7 @@ builtin. Three ways to author one:
 
 ```bash
 flows templates list          # what's available (project → global → builtin)
-flows templates sync          # copy ALL builtins into ~/.flows/templates to edit
+flows templates sync          # copy ALL builtins into ~/.flows/ to edit (updates unedited copies)
 flows templates new <name>    # scaffold a fresh, heavily-commented template
 flows templates install <git> # install a shared template (see below)
 ```
@@ -286,6 +286,13 @@ An agent's system prompt is a MiniJinja template. Lookup order (first match wins
 `<repo>/.flows/prompts/<template>/<phase>.md` →
 `~/.flows/prompts/<template>/<phase>.md` → builtin. `flows templates sync` writes
 the builtins to `~/.flows/prompts/` so you can edit them.
+
+A copy under `~/.flows/` wins over the builtin, so an old copy hides later fixes
+to it. Sync records what it wrote in `~/.flows/synced.json`. Rerunning
+`flows templates sync` updates copies you haven't edited and keeps edited ones;
+`--force` replaces those too. `flows doctor` lists outdated copies, and copies
+that differ from the builtin with no sync record, such as ones made by an
+older flows.
 
 **Variables available in a prompt:**
 

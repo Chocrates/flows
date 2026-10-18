@@ -18,6 +18,7 @@ pub mod repo_map;
 pub mod retrieval;
 pub mod runner;
 pub mod script;
+pub mod sync;
 
 pub use agent::{run_agent_phase, AgentCallbacks, AgentResult, NoopCallbacks};
 pub use prompts::{builtin_prompt_files, load_prompt, render_prompt};
