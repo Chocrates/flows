@@ -37,12 +37,15 @@ pub fn eval_loop_condition(condition: &str, content: &Value) -> bool {
     if condition.trim().is_empty() {
         return false;
     }
+    // Evaluate as an expression and test its truth, rather than rendering it
+    // and comparing text: minijinja 2.24 renders booleans as `True`, which
+    // silently turned every loop condition false.
     let expr = tuples_to_lists(condition);
-    let template = format!("{{{{ {expr} }}}}");
-    match env().render_str(&template, context! { content => content }) {
-        Ok(s) => s.trim() == "true",
-        Err(_) => false,
-    }
+    let env = env();
+    env.compile_expression(&expr)
+        .and_then(|c| c.eval(context! { content => content }))
+        .map(|v| v.is_true())
+        .unwrap_or(false)
 }
 
 fn when_env() -> Environment<'static> {
@@ -105,6 +108,19 @@ mod tests {
             .iter()
             .map(|(k, c)| (k.clone(), json!({ "phase": k, "content": c })))
             .collect()
+    }
+
+    #[test]
+    fn loop_condition_is_evaluated_not_rendered() {
+        // The shipped feature/e2e review condition, both ways.
+        let cond = "content.get('verdict') not in ('approved', 'approved_with_suggestions')";
+        assert!(eval_loop_condition(
+            cond,
+            &json!({"verdict": "needs_fixes"})
+        ));
+        assert!(!eval_loop_condition(cond, &json!({"verdict": "approved"})));
+        assert!(eval_loop_condition("content.n > 2", &json!({"n": 3})));
+        assert!(!eval_loop_condition("content.n > 2", &json!({"n": 1})));
     }
 
     #[test]

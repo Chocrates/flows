@@ -4,7 +4,7 @@
 
 # Build + install the `flows` CLI to ~/.cargo/bin (quiet).
 install:
-	cargo install -q --path crates/flows-cli
+	cargo install -q --locked --path crates/flows-cli
 
 test:
 	cargo test --workspace
