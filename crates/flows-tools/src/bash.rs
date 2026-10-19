@@ -132,10 +132,47 @@ fn fnmatch(s: &str, pat: &str) -> bool {
 /// one** — otherwise `cargo build && curl evil` (or `cargo run & sleep 3 & kill`)
 /// smuggles unlisted commands past a check that only looked at the first token.
 /// Redirections (`2>&1`, `>`, …) are not separators and stay with their segment.
+/// Put spaces around unquoted `;`, `|` and `&` so shlex yields them as
+/// separate tokens: shlex only splits on whitespace, so `go test; curl x` would
+/// otherwise give the token `test;` and leave `curl` inside the `go` segment.
+/// `&` inside a redirection (`2>&1`, `>&2`, `&>log`) is left alone.
+fn space_operators(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len() + 8);
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    for (i, &c) in chars.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            out.push(c);
+            continue;
+        }
+        match c {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            ';' | '|' | '&' if !single && !double => {
+                let prev = i.checked_sub(1).map(|j| chars[j]);
+                let next = chars.get(i + 1).copied();
+                let redirect = c == '&' && (matches!(prev, Some('>' | '<')) || next == Some('>'));
+                if !redirect {
+                    out.push(' ');
+                    out.push(c);
+                    out.push(' ');
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn split_segments(command: &str) -> Vec<String> {
     let mut segs = Vec::new();
     // Newlines aren't preserved by shlex, so split on them first.
     for line in command.split(['\n', '\r']) {
+        let line = &space_operators(line);
         let Some(tokens) = shlex::split(line) else {
             // Unparseable line — keep it whole so the segment check reports the error.
             if !line.trim().is_empty() {
@@ -159,6 +196,16 @@ fn split_segments(command: &str) -> Vec<String> {
         }
     }
     segs
+}
+
+/// Whether any segment of `command` runs `program` (by name, ignoring a path
+/// prefix), e.g. `invokes("go test && rm -f x", "rm")`.
+pub fn invokes(command: &str, program: &str) -> bool {
+    split_segments(command).iter().any(|seg| {
+        shlex::split(seg)
+            .and_then(|t| t.into_iter().next())
+            .is_some_and(|exe| Path::new(&exe).file_name().is_some_and(|n| n == program))
+    })
 }
 
 pub fn check_allowlist(command: &str, config: &BashConfig) -> ToolResult<()> {

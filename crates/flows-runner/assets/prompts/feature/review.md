@@ -43,7 +43,7 @@ Review the changes above{% if not changes %} (read the changed files){% endif %}
 
 Use `read_file` and `write_file` to fix issues directly. Use `bash` to re-run tests or lint to verify your fixes before responding.
 
-Keep the review proportionate: read the changed code, check it against the task, run the tests once more if you changed something, then give your verdict. Put any edge case worth checking into a real test in the project's test files, not a throwaway program. If you do create a scratch file, delete it before you answer — everything left in the working tree gets committed.
+Keep the review proportionate: read the changed code, check it against the task, run the tests once more if you changed something, then give your verdict. Put any edge case worth checking into a real test in the project's test files, not a throwaway program. If you do create a scratch file, delete it before you answer — everything left in the working tree gets committed. Delete other files only when the change made them obsolete, one at a time, and list them under `files_deleted`. Never delete or recreate files to start clean: if a result looks impossible, read the file back and fix it in place. A shell command that deletes more than a few existing files is undone.
 
 ## Verdict guide
 
@@ -62,6 +62,7 @@ Choose `approved` or `approved_with_suggestions` once lint and tests pass. Use `
     "verdict": "approved | approved_with_suggestions | needs_fixes",
     "summary": "One sentence overall assessment",
     "fixes_applied": ["list of changes made, empty if none"],
+    "files_deleted": ["path — why it is no longer needed (omit if none)"],
     "remaining_issues": ["minor issues not worth blocking on, if any"]
   }
 }

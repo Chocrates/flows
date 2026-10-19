@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
+use crate::deletion_guard::{DeletionGuard, Verdict};
 use flows_core::models::{Artifact, ContextConfig, LLMConfig, PhaseConfig, ToolsConfig};
 use flows_core::pricing::calculate_cost;
 use flows_core::thinking::{model_supports_thinking, resolve_thinking};
@@ -631,6 +632,7 @@ fn refused(result: &str) -> bool {
     const REFUSALS: &[&str] = &[
         "Error: Command not in allowlist",
         "Error: Command blocked by safety policy",
+        "Error: Deletion limit exceeded",
         "Error: Network access from shell commands is blocked",
         "Error: cd is only allowed",
         "Error: Could not parse command",
@@ -1368,6 +1370,13 @@ your context small.",
     // has been switched to a tool-less reply, and consecutive capped replies.
     let mut stall_streak = 0u32;
     let mut forced_reply = false;
+    // Bounds what shell commands may delete (see `deletion_guard`). `None`
+    // outside git, where `rm` is refused instead.
+    let mut deletion_guard = phase
+        .tools
+        .bash
+        .as_ref()
+        .and_then(|_| DeletionGuard::start(repo_root));
     let mut capped_streak = 0u32;
     let mut tool_defs = tool_defs;
 
@@ -1689,16 +1698,41 @@ your context small.",
                 }
                 let mut deduped = false;
 
-                let mut result = dispatch_tool(
-                    &tc.name,
-                    &args,
-                    &phase.tools,
-                    context,
-                    web_search_cfg,
-                    repo_root,
-                    flows_dir,
-                )
-                .await;
+                let shell = tc.name == "bash" && phase.tools.bash.is_some();
+                let before = deletion_guard
+                    .as_ref()
+                    .filter(|_| shell)
+                    .and_then(DeletionGuard::before);
+                let unguarded_rm = shell
+                    && deletion_guard.is_none()
+                    && !phase.tools.bash.as_ref().is_some_and(|b| b.unrestricted)
+                    && str_arg(&args, "command").is_some_and(|c| bash::invokes(c, "rm"));
+                let mut result = if unguarded_rm {
+                    "Error: Command blocked by safety policy: rm is only allowed in a git \
+                     repository, where deleted files can be restored. Leave the file in place \
+                     and mention it in your artifact."
+                        .to_string()
+                } else {
+                    dispatch_tool(
+                        &tc.name,
+                        &args,
+                        &phase.tools,
+                        context,
+                        web_search_cfg,
+                        repo_root,
+                        flows_dir,
+                    )
+                    .await
+                };
+                if let (Some(guard), Some(before)) = (deletion_guard.as_mut(), before.as_deref()) {
+                    if let Verdict::Restored(paths) = guard.after(before) {
+                        callbacks.on_note(&format!(
+                            "⛔ deletion guard: restored {} file(s) a shell command deleted",
+                            paths.len()
+                        ));
+                        result = guard.restored_message(&paths);
+                    }
+                }
                 // Read dedup: local models frequently re-read the same unchanged
                 // file dozens of times (observed: 137 reads of 17 files), bloating
                 // context and burning rounds. Serve a re-read of identical content

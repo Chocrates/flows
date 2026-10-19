@@ -345,6 +345,8 @@ This is the *actual* containment boundary. An allowlist alone cannot confine a s
 
 - Blocked by default; opt-in with explicit allowlist (the `implement` phase in `feature.yml` allows `make*`/`python*`/`uv*`/`npm*`/`rm*` — `rm` is safe to grant because the sandbox confines it to the project directory).
 - Hardcoded blocks regardless of config (defense in depth, checked before the sandbox): `rm -rf /`, `curl|bash`, `sudo`, writes to `/etc/`, etc.
+- Control operators are split even without spaces (`go test;curl x`), so every command in a chain is checked against the allowlist.
+- **Deletion guard.** The sandbox keeps `rm` out of the rest of the system but not out of the repo, and no command filter can see every way to delete a file (`go run`, a Makefile target). So every bash call in an agent phase is bracketed by snapshots of the working tree: git tree objects written through a temporary copy of the index (untracked files included, ignored build output not, real index untouched; ~15 ms). Files made during the phase may be deleted freely; files present at phase start, at most 3 per command and 10 per phase. A command over either limit has everything it deleted restored with its pre-command contents, and gets an error that counts as a refusal for the stall guard. Outside git there is nothing to restore from, so `rm` is refused. (Observed failure it stops: a review phase ran `rm -rf .flows Makefile README.md cmd go.mod internal`, rebuilt one package from memory, approved, and the commit deleted 2480 lines.) Not covered: a `write_file` that guts a file, and plugin tools.
 
 ### File tool scoping
 
