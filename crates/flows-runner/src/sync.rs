@@ -195,4 +195,34 @@ mod tests {
             .iter()
             .all(|(_, s)| *s == CopyState::Current));
     }
+
+    #[test]
+    fn fan_out_prompts_ship_and_sync_into_an_older_copy() {
+        let rels: Vec<String> = builtin_copies().into_iter().map(|(r, _)| r).collect();
+        for want in [
+            "prompts/software/code.md",
+            "prompts/software/fix.md",
+            "prompts/feature/code.md",
+            "prompts/feature/fix.md",
+        ] {
+            assert!(rels.iter().any(|r| r == want), "{want} not a builtin");
+        }
+        // A flows dir synced before these prompts existed: they're written as
+        // missing, and the unedited old template is updated to the fan-out one.
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path();
+        sync_builtins(dir, false).unwrap();
+        std::fs::remove_file(dir.join("prompts/software/code.md")).unwrap();
+        let old = "phases:\n  - name: implement\n";
+        std::fs::write(dir.join("templates/software.yml"), old).unwrap();
+        let mut m = load_manifest(dir);
+        m.insert("templates/software.yml".into(), hash(old));
+        save_manifest(dir, &m).unwrap();
+
+        let r = sync_builtins(dir, false).unwrap();
+        assert_eq!(r.written, ["prompts/software/code.md"]);
+        assert_eq!(r.updated, ["templates/software.yml"]);
+        let synced = std::fs::read_to_string(dir.join("templates/software.yml")).unwrap();
+        assert!(synced.contains("for_each"));
+    }
 }

@@ -66,6 +66,20 @@ fn phase_names(store: &Store, run_id: &str) -> Vec<String> {
 /// Read new bytes of a file past `offset`, advancing it. Handles truncation.
 /// Mark the phases a run's state has recorded: completed → ✓, skipped → ⊘.
 pub fn mark_recorded_phases(panel: &mut crate::PhasePanel, st: &flows_core::models::RunState) {
+    // Fan-out items (ids only; titles live in the group artifact).
+    for (group, ids) in &st.fan_outs {
+        let want: Vec<String> = ids.iter().map(|id| format!("{group}.{id}")).collect();
+        let have: Vec<String> = panel
+            .names()
+            .into_iter()
+            .filter(|n| want.contains(n))
+            .collect();
+        if have != want {
+            let items: Vec<(String, String)> =
+                ids.iter().map(|id| (id.clone(), id.clone())).collect();
+            panel.set_items(group, &items);
+        }
+    }
     for done in &st.completed_phases {
         panel.set_status(done, PhaseStatus::Done);
     }

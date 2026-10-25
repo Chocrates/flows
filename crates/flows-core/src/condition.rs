@@ -97,6 +97,45 @@ pub fn eval_when_with_vars(
         .map_err(|e| e.to_string())
 }
 
+/// Evaluate a fan-out group's `for_each` expression to a list, in the same
+/// sandbox and context as `when` (`artifacts`, `idea`, `vars`). A non-list
+/// result (including undefined) is an error.
+pub fn eval_list(
+    expr: &str,
+    artifacts: &Map<String, Value>,
+    idea: &str,
+    vars: &Map<String, Value>,
+) -> Result<Vec<Value>, String> {
+    let src = tuples_to_lists(expr);
+    let env = when_env();
+    let compiled = env.compile_expression(&src).map_err(|e| e.to_string())?;
+    let contents: Map<String, Value> = artifacts
+        .iter()
+        .map(|(k, v)| (k.clone(), v.get("content").cloned().unwrap_or(Value::Null)))
+        .collect();
+    let out = compiled
+        .eval(context! { artifacts => contents, idea => idea, vars => vars })
+        .map_err(|e| e.to_string())?;
+    if out.is_undefined() {
+        return Err("expression is undefined (no such artifact or field)".into());
+    }
+    match serde_json::to_value(&out).map_err(|e| e.to_string())? {
+        Value::Array(items) => Ok(items),
+        other => Err(format!("expected a list, got {}", json_kind(&other))),
+    }
+}
+
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "a list",
+        Value::Object(_) => "an object",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +227,25 @@ mod tests {
     #[test]
     fn when_runtime_error_is_returned() {
         assert!(eval_when("no_such_function()", &Map::new(), "").is_err());
+    }
+
+    #[test]
+    fn eval_list_returns_items() {
+        let a = arts(json!({"design": {"tasks": [{"id": "1"}, {"id": "2"}]}}));
+        let got = eval_list("artifacts.design.tasks", &a, "", &Map::new()).unwrap();
+        assert_eq!(got, vec![json!({"id": "1"}), json!({"id": "2"})]);
+        // Expressions, not just paths.
+        let got = eval_list("artifacts.design.tasks[1:]", &a, "", &Map::new()).unwrap();
+        assert_eq!(got, vec![json!({"id": "2"})]);
+    }
+
+    #[test]
+    fn eval_list_rejects_non_lists() {
+        let a = arts(json!({"design": {"title": "x"}}));
+        let e = eval_list("artifacts.design.title", &a, "", &Map::new()).unwrap_err();
+        assert!(e.contains("a string"), "{e}");
+        let e = eval_list("artifacts.design.tasks", &a, "", &Map::new()).unwrap_err();
+        assert!(e.contains("undefined"), "{e}");
+        assert!(eval_list("artifacts.design.tasks ==", &a, "", &Map::new()).is_err());
     }
 }

@@ -15,6 +15,15 @@ pub fn validate_pipeline(phases: &[PhaseConfig]) -> Result<(), String> {
             crate::condition::check_when(cond)
                 .map_err(|e| format!("Phase {:?}: invalid when condition {cond:?}: {e}", p.name))?;
         }
+        if p.is_group() {
+            if is_dag {
+                return Err(format!(
+                    "Phase {:?}: for_each groups require a linear pipeline (no depends_on)",
+                    p.name
+                ));
+            }
+            validate_group(p, phases)?;
+        }
     }
 
     if is_dag {
@@ -51,6 +60,70 @@ pub fn validate_pipeline(phases: &[PhaseConfig]) -> Result<(), String> {
                         p.name, target
                     ));
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A fan-out group's own rules: see `flows_core::fan_out`.
+fn validate_group(g: &PhaseConfig, phases: &[PhaseConfig]) -> Result<(), String> {
+    let expr = g.for_each.as_deref().unwrap_or_default();
+    crate::condition::check_when(expr).map_err(|e| {
+        format!(
+            "Phase {:?}: invalid for_each expression {expr:?}: {e}",
+            g.name
+        )
+    })?;
+    let prefix = format!("{}.", g.name);
+    if let Some(p) = phases.iter().find(|p| p.name.starts_with(&prefix)) {
+        return Err(format!(
+            "Phase {:?}: name clashes with the phases of for_each group {:?}",
+            p.name, g.name
+        ));
+    }
+    let mut local = HashSet::new();
+    for n in &g.phases {
+        if n.name.is_empty() || n.name.contains('.') {
+            return Err(format!(
+                "Phase {:?} in group {:?}: nested phase names must be non-empty and contain no dots",
+                n.name, g.name
+            ));
+        }
+        if !local.insert(n.name.as_str()) {
+            return Err(format!(
+                "Group {:?}: nested phase {:?} appears more than once",
+                g.name, n.name
+            ));
+        }
+    }
+    for n in &g.phases {
+        if n.is_group() {
+            return Err(format!(
+                "Group {:?}: nested phase {:?} is itself a for_each group (not supported)",
+                g.name, n.name
+            ));
+        }
+        if !n.depends_on.is_empty() {
+            return Err(format!(
+                "Phase {:?} in group {:?}: depends_on is not supported inside a group",
+                n.name, g.name
+            ));
+        }
+        if let Some(cond) = &n.when {
+            crate::condition::check_when(cond)
+                .map_err(|e| format!("Phase {:?}: invalid when condition {cond:?}: {e}", n.name))?;
+        }
+        let retry = match &n.on_failure {
+            crate::models::OnFailure::Retry(t) => Some(t),
+            _ => None,
+        };
+        for (what, target) in [("loop_back_to", n.loop_back_to.as_ref()), ("retry", retry)] {
+            if let Some(t) = target.filter(|t| !local.contains(t.as_str())) {
+                return Err(format!(
+                    "Phase {:?} in group {:?}: {what} {t:?} must name a phase of the same group",
+                    n.name, g.name
+                ));
             }
         }
     }

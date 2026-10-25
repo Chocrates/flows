@@ -38,9 +38,65 @@ fn feature_has_expected_phase_shape() {
     // commit is a script phase
     let commit = phases.iter().find(|p| p.name == "commit").unwrap();
     assert_eq!(commit.phase_type, PhaseType::Script);
-    // implement got the raised tool-round budget
+    // implement fans out over the plan's tasks: a code agent + a test gate
+    // that retries only that task.
     let implement = phases.iter().find(|p| p.name == "implement").unwrap();
-    assert_eq!(implement.max_tool_rounds, Some(200));
+    assert_eq!(implement.for_each.as_deref(), Some("artifacts.plan.tasks"));
+    assert_eq!(implement.item_var(), "task");
+    let nested: Vec<_> = implement.phases.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(nested, ["code", "check"]);
+    assert_eq!(
+        implement.phases[1].on_failure,
+        flows_core::models::OnFailure::Retry("code".into())
+    );
+    // The YAML anchor shares the code tools with `fix`.
+    let fix = phases.iter().find(|p| p.name == "fix").unwrap();
+    assert_eq!(fix.tools, implement.phases[0].tools);
+    assert!(fix.tools.bash.is_some());
+    // Gates loop back to `fix`, never to the fan-out.
+    for name in ["review", "approve"] {
+        let p = phases.iter().find(|p| p.name == name).unwrap();
+        assert_eq!(p.loop_back_to.as_deref(), Some("fix"), "{name}");
+    }
+    flows_core::validate_pipeline(&phases).unwrap();
+}
+
+#[test]
+fn software_fans_out_over_design_tasks() {
+    let repo = tempdir().unwrap();
+    let flows = tempdir().unwrap();
+    let (phases, _) = load_template(Some("software"), repo.path(), Some(flows.path())).unwrap();
+    let names: Vec<_> = phases.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "requirements",
+            "spec",
+            "design",
+            "approve_design",
+            "implement",
+            "fix",
+            "lint",
+            "test",
+            "verify",
+            "approve",
+            "commit"
+        ]
+    );
+    let implement = &phases[4];
+    assert_eq!(
+        implement.for_each.as_deref(),
+        Some("artifacts.design.tasks")
+    );
+    for name in ["lint", "test"] {
+        let p = phases.iter().find(|p| p.name == name).unwrap();
+        assert_eq!(
+            p.on_failure,
+            flows_core::models::OnFailure::Retry("fix".into()),
+            "{name}"
+        );
+    }
+    flows_core::validate_pipeline(&phases).unwrap();
 }
 
 #[test]

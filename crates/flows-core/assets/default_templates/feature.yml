@@ -1,6 +1,6 @@
 # flows template: feature
 # Add a feature to an existing codebase.
-# The implement/review agents run the project's own build/test via bash — there's
+# The code/fix/review agents run the project's own build/test via bash — there's
 # no universal lint/test step. Run `flows init` to generate a project-specific
 # .flows.yml with concrete lint/test commands for your stack.
 template: feature
@@ -25,28 +25,51 @@ phases:
     loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'y', 'yes', 'lgtm', 'approve', 'approved')"
     max_loop_iterations: 5
 
+  # Implement the approved plan one task at a time: each task gets its own agent
+  # and the project's tests run after it; a failing test retries that task
+  # alone. Phases are named implement.<task-id>.code / implement.<task-id>.check.
   - name: implement
-    type: agent
-    tools:
-      files: true
-      http_get: true      # read docs pages
-      web_search: true    # backend from ~/.flows/config.yml
-      lookup: true         # crates.io / docs.rs / stackexchange / wikipedia / github
-      bash:
-        allowed:
-          - "make*"
-          - "cargo*"
-          - "npm*"
-          - "yarn*"
-          - "pnpm*"
-          - "go*"
-          - "python -m*"
-          - "pytest*"
-          - "uv*"
-          - "ruff*"
-          - "rm*"
+    for_each: "artifacts.plan.tasks"
+    as: task
+    max_items: 20
     on_failure: stop
-    max_tool_rounds: 200
+    phases:
+      - name: code
+        type: agent
+        tools: &code_tools
+          files: true
+          http_get: true      # read docs pages
+          web_search: true    # backend from ~/.flows/config.yml
+          lookup: true         # crates.io / docs.rs / stackexchange / wikipedia / github
+          bash:
+            allowed:
+              - "make*"
+              - "cargo*"
+              - "npm*"
+              - "yarn*"
+              - "pnpm*"
+              - "go*"
+              - "python -m*"
+              - "pytest*"
+              - "uv*"
+              - "ruff*"
+              - "rm*"
+        max_tool_rounds: 80
+        max_clarification_rounds: 0
+      - name: check
+        type: script
+        command: "@auto:test"
+        on_failure: retry:code
+
+  # Targeted fixes for whatever lint/test/review/approve flagged. Skipped on the
+  # first pass (nothing has failed yet); the gates below loop back here, so a
+  # failure never re-runs every task.
+  - name: fix
+    type: agent
+    tools: *code_tools
+    when: "artifacts.review or artifacts.approve or artifacts.lint.exit_code or artifacts.test.exit_code"
+    on_failure: stop
+    max_tool_rounds: 120
     max_clarification_rounds: 0
 
   # @auto resolves the command in the runner (no LLM): a `make lint`/`make test`
@@ -55,12 +78,12 @@ phases:
   - name: lint
     type: script
     command: "@auto:lint"
-    on_failure: retry:implement
+    on_failure: retry:fix
 
   - name: test
     type: script
     command: "@auto:test"
-    on_failure: retry:implement
+    on_failure: retry:fix
 
   - name: review
     type: agent
@@ -81,14 +104,14 @@ phases:
           - "pytest*"
           - "rm*"            # clean up scratch files, or they get committed
     on_failure: stop
-    loop_back_to: implement
+    loop_back_to: fix
     loop_condition: "content.get('verdict') not in ('approved', 'approved_with_suggestions')"
     max_loop_iterations: 3            # matches the "at most 3 fix cycles" in review.md
 
   - name: approve
     type: human
     instructions: "Review the implementation. Type feedback to request changes, or press Enter to accept."
-    loop_back_to: implement
+    loop_back_to: fix
     loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'y', 'yes', 'lgtm', 'approve', 'approved')"
     max_loop_iterations: 5
 

@@ -21,6 +21,19 @@ pub enum UiEvent {
         index: usize,
         total: usize,
     },
+    /// A `for_each` group expanded into `(id, title)` items.
+    FanOut {
+        group: String,
+        items: Vec<(String, String)>,
+    },
+    /// A fan-out item started (`index` is 1-based).
+    FanOutItem {
+        group: String,
+        id: String,
+        title: String,
+        index: usize,
+        count: usize,
+    },
     Token {
         text: String,
     },
@@ -227,6 +240,23 @@ impl RunnerCallbacks for ChannelCallbacks {
     fn on_phase_end(&self, phase: &str, _artifact: Option<&Artifact>) {
         self.send(UiEvent::PhaseEnd { name: phase.into() });
     }
+    fn on_fan_out(&self, group: &str, items: &[(String, String)]) {
+        self.log("m", &format!("{group}: {} items", items.len()));
+        self.send(UiEvent::FanOut {
+            group: group.into(),
+            items: items.to_vec(),
+        });
+    }
+    fn on_fan_out_item(&self, group: &str, id: &str, title: &str, index: usize, count: usize) {
+        self.log("m", &format!("◆ {group} {index}/{count} · {id} {title}"));
+        self.send(UiEvent::FanOutItem {
+            group: group.into(),
+            id: id.into(),
+            title: title.into(),
+            index,
+            count,
+        });
+    }
     fn on_phase_skipped(&self, phase: &str, reason: &str) {
         self.log("m", &format!("⊘ {phase} skipped — {reason}"));
         self.send(UiEvent::PhaseSkipped {
@@ -349,6 +379,20 @@ impl App {
                 self.output.push_line(Category::Meta, format!("▶ {name}"));
                 self.status = format!("running {name}");
                 self.round.clear();
+            }
+            UiEvent::FanOut { group, items } => self.phases.set_items(&group, &items),
+            UiEvent::FanOutItem {
+                group,
+                id,
+                title,
+                index,
+                count,
+            } => {
+                self.output.push_line(
+                    Category::Meta,
+                    format!("◆ {group} {index}/{count} · {id} {title}"),
+                );
+                self.status = format!("{group} {index}/{count} · {title}");
             }
             UiEvent::Token { text } => self.output.push_token(Category::Normal, &text),
             UiEvent::Json { text } => self.output.push_token(Category::Json, &text),

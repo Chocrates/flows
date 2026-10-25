@@ -34,6 +34,7 @@ fn state(run_id: &str) -> RunState {
         error: None,
         completed_phases: vec![],
         skipped_phases: vec![],
+        fan_outs: Default::default(),
     }
 }
 
@@ -146,4 +147,20 @@ fn delete_run_removes_dir_idempotently() {
     store.delete_run("r1").unwrap();
     assert!(!store.run_dir("r1").exists());
     store.delete_run("r1").unwrap(); // idempotent
+}
+
+#[test]
+fn state_without_fan_outs_loads_and_round_trips() {
+    // A state.json written before fan-out groups existed.
+    let old = r#"{"run_id":"r1","status":"running","current_phase":"plan",
+                  "current_phase_index":0,"completed_phases":[]}"#;
+    let st: RunState = serde_json::from_str(old).unwrap();
+    assert!(st.fan_outs.is_empty());
+    // Empty map stays off disk; a filled one round-trips.
+    assert!(!serde_json::to_string(&st).unwrap().contains("fan_outs"));
+    let mut st = st;
+    st.fan_outs
+        .insert("implement".into(), vec!["1".into(), "2".into()]);
+    let back: RunState = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
+    assert_eq!(back.fan_outs["implement"], ["1", "2"]);
 }

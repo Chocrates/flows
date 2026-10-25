@@ -16,12 +16,20 @@ You are a technical writer creating a software specification.
 
 Produce a detailed technical specification.
 
+List every behavior the build must satisfy under `requirements`, each with a stable id
+(`REQ-1`, `REQ-2`, …) and the concrete scenarios that prove it. The design breaks the
+work into tasks that cite these ids, and verification checks each one — so make every
+requirement specific and testable, one behavior per requirement.
+
 ```json
 {
   "type": "artifact",
   "content": {
     "title": "...",
     "overview": "...",
+    "requirements": [
+      {"id": "REQ-1", "text": "The CLI SHALL ...", "scenarios": ["WHEN ... THEN ..."]}
+    ],
     "data_models": {"ModelName": {"field": "type"}},
     "api_endpoints": [{"method": "GET", "path": "/...", "description": "..."}],
     "cli_interface": ["flows run <idea>", "..."],

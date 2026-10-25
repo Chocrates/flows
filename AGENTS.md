@@ -33,6 +33,7 @@ flows/
 │   │   ├── src/config.rs         — 3-tier config loader + merge, `context` block
 │   │   ├── src/templates.rs      — template lookup (project → global → embedded builtin)
 │   │   ├── src/state.rs          — atomic run state, signal files (`Store`)
+│   │   ├── src/fan_out.rs        — `for_each` groups: item normalization/ordering, expansion
 │   │   ├── src/{pricing,usage,estimate,dryrun,detect,notify,llm_log,thinking,pipeline,json}.rs
 │   │   └── assets/default_templates/*.yml — builtin templates (embedded)
 │   ├── flows-llm/                — `Provider` trait; anthropic.rs, openai.rs, stream.rs, retry.rs
@@ -102,7 +103,7 @@ The `context` block gates context-delivery features (all off by default). Projec
 1. Validates the pipeline and writes `RunMeta` / `RunState` to `~/.flows/runs/{run_id}/`
 2. Merges LLM config (global → project) and resolves per-phase model profiles
 3. Detects execution mode:
-   - **Linear**: no phase has `depends_on` → sequential, with `loop_back_to` and `on_failure: retry:X`
+   - **Linear**: no phase has `depends_on` → sequential, with `loop_back_to` and `on_failure: retry:X`; `for_each` groups (`flows-core/src/fan_out.rs`) expand at run time into `<group>.<id>.<phase>` phases spliced after the group
    - **DAG**: any phase has `depends_on` → ready phases run concurrently. `loop_back_to` / `retry:X` are rejected at validation. Human phases wait for in-flight tasks (serialized).
 4. Runs each phase (agent / script / human)
 5. Fires `RunnerCallbacks` events throughout
@@ -160,7 +161,7 @@ State files are written atomically (temp file + rename).
 
 ## Specs (OpenSpec)
 
-Capabilities live in `openspec/specs/` (agent-loop-guards, code-search, conditional-phases, context-eval, eval-harness, model-io, model-profiles, pipeline-composition, repo-context, security-model, semantic-retrieval, template-registry, web-search). New features go through a change under `openspec/changes/` (propose → apply → archive). Use the `opsx:*` / `openspec-*` skills.
+Capabilities live in `openspec/specs/` (agent-loop-guards, code-search, conditional-phases, context-eval, eval-harness, model-io, model-profiles, phase-fan-out, pipeline-composition, repo-context, security-model, semantic-retrieval, template-registry, web-search). New features go through a change under `openspec/changes/` (propose → apply → archive). Use the `opsx:*` / `openspec-*` skills.
 
 ## Hard constraints
 

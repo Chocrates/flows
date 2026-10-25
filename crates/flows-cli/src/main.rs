@@ -1177,8 +1177,12 @@ fn preflight_run(
 ) -> Result<(), String> {
     // The run default (a phase with no `model:` falls back to this).
     preflight_llm(&resolve_llm("", llm, profiles))?;
-    for phase in phases {
-        if !matches!(phase.phase_type, PhaseType::Agent) {
+    // A fan-out group's nested phases run too.
+    let all = phases
+        .iter()
+        .flat_map(|p| std::iter::once(p).chain(p.phases.iter()));
+    for phase in all {
+        if phase.is_group() || !matches!(phase.phase_type, PhaseType::Agent) {
             continue;
         }
         let sel = phase.model.as_deref().unwrap_or("");
@@ -1303,6 +1307,15 @@ fn cmd_plan(idea: &str, template: Option<&str>, repo: Option<&str>) -> Result<()
 
 struct Foreground;
 
+/// `implement 3/7 · 1.3 Add token refresh` — a fan-out item starting.
+fn fan_out_item_line(group: &str, id: &str, title: &str, index: usize, count: usize) -> String {
+    if title == id {
+        format!("{group} {index}/{count} · {id}")
+    } else {
+        format!("{group} {index}/{count} · {id} {title}")
+    }
+}
+
 fn read_line(prompt: &str) -> String {
     use std::io::Write;
     print!("{prompt} ");
@@ -1326,6 +1339,15 @@ impl RunnerCallbacks for Foreground {
     }
     fn on_phase_start(&self, phase: &str, index: usize, total: usize) {
         println!("\n▶ [{}/{}] {phase}", index + 1, total);
+    }
+    fn on_fan_out(&self, group: &str, items: &[(String, String)]) {
+        println!("    {group}: {} items", items.len());
+        for (id, title) in items {
+            println!("      · {id} {title}");
+        }
+    }
+    fn on_fan_out_item(&self, group: &str, id: &str, title: &str, index: usize, count: usize) {
+        println!("\n◆ {}", fan_out_item_line(group, id, title, index, count));
     }
     fn on_status(&self, _phase: &str, message: &str) {
         println!("    {message}");
@@ -1496,6 +1518,15 @@ impl RunnerCallbacks for Waiting {
     }
     fn on_phase_skipped(&self, phase: &str, reason: &str) {
         self.emit("m", &format!("⊘ {phase} skipped — {reason}"));
+    }
+    fn on_fan_out(&self, group: &str, items: &[(String, String)]) {
+        self.emit("m", &format!("{group}: {} items", items.len()));
+    }
+    fn on_fan_out_item(&self, group: &str, id: &str, title: &str, index: usize, count: usize) {
+        self.emit(
+            "m",
+            &format!("◆ {}", fan_out_item_line(group, id, title, index, count)),
+        );
     }
     fn on_token(&self, _phase: &str, token: &str) {
         self.emit("n", token);
@@ -1671,6 +1702,7 @@ fn spawn_background(
         error: None,
         completed_phases: vec![],
         skipped_phases: vec![],
+        fan_outs: Default::default(),
     });
 
     let log = store.run_dir(run_id).join("worker.log");
@@ -2061,9 +2093,48 @@ fn cmd_runs() -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod fan_out_line_tests {
+    use super::fan_out_item_line;
+
+    #[test]
+    fn shows_progress_id_and_title() {
+        assert_eq!(
+            fan_out_item_line("implement", "1.3", "Add token refresh", 3, 7),
+            "implement 3/7 · 1.3 Add token refresh"
+        );
+        // A title that just repeats the id isn't printed twice.
+        assert_eq!(fan_out_item_line("g", "2", "2", 2, 2), "g 2/2 · 2");
+    }
+}
+
+#[cfg(test)]
 mod preflight_tests {
-    use super::preflight_llm;
-    use flows_core::models::LLMConfig;
+    use super::{preflight_llm, preflight_run};
+    use flows_core::models::{LLMConfig, PhaseConfig};
+
+    #[test]
+    fn nested_group_phase_profiles_are_checked() {
+        let llm = LLMConfig {
+            model: "claude-x".into(),
+            api_key: "sk".into(),
+            ..Default::default()
+        };
+        let mut profiles = std::collections::HashMap::new();
+        profiles.insert(
+            "coder".to_string(),
+            LLMConfig {
+                model: "local-coder".into(),
+                ..Default::default()
+            },
+        );
+        let mut code = PhaseConfig::new("code");
+        code.model = Some("coder".into());
+        let mut g = PhaseConfig::new("implement");
+        g.for_each = Some("artifacts.design.tasks".into());
+        g.phases = vec![code];
+        let err = preflight_run(&llm, &profiles, &[g]).unwrap_err();
+        assert!(err.contains("\"code\""), "{err}");
+    }
 
     #[test]
     fn empty_model_errors() {
@@ -2124,6 +2195,7 @@ mod waiting_tests {
                 error: None,
                 completed_phases: vec![],
                 skipped_phases: vec![],
+                fan_outs: Default::default(),
             })
             .unwrap();
     }

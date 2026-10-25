@@ -198,6 +198,7 @@ mod tests {
             local_name: "review".into(),
             prefix: "second.".into(),
             vars: Default::default(),
+            fan_out: None,
         });
         let got = load_prompt(&p, "my-template", repo.path(), Some(flows.path()));
         let want = BUILTIN

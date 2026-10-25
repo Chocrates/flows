@@ -6,6 +6,7 @@ pub mod config;
 pub mod detect;
 pub mod dryrun;
 pub mod estimate;
+pub mod fan_out;
 pub mod include;
 pub mod json;
 pub mod llm_log;

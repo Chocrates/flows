@@ -477,8 +477,97 @@ fn attach_marks_skipped_from_state() {
         error: None,
         completed_phases: vec!["plan".into(), "implement".into()],
         skipped_phases: vec!["implement".into()],
+        fan_outs: Default::default(),
     };
     flows_tui::attach::mark_recorded_phases(&mut a.phases, &st);
     assert_eq!(a.phases.status_of("plan"), Some(PhaseStatus::Done));
     assert_eq!(a.phases.status_of("implement"), Some(PhaseStatus::Skipped));
+}
+
+#[test]
+fn fan_out_shows_item_rows_and_progress() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    let mut a = app_with(&["design", "implement", "verify"]);
+    a.handle_ui_event(UiEvent::FanOut {
+        group: "implement".into(),
+        items: vec![
+            ("1".into(), "Parser".into()),
+            ("2".into(), "Token refresh".into()),
+        ],
+    });
+    a.handle_ui_event(UiEvent::FanOutItem {
+        group: "implement".into(),
+        id: "2".into(),
+        title: "Token refresh".into(),
+        index: 2,
+        count: 2,
+    });
+    a.handle_ui_event(UiEvent::PhaseStart {
+        name: "implement.2.code".into(),
+        index: 4,
+        total: 6,
+    });
+    assert_eq!(
+        a.phases.status_of("implement.2"),
+        Some(PhaseStatus::Running)
+    );
+    assert_eq!(
+        a.phases.status_of("implement.1"),
+        Some(PhaseStatus::Pending)
+    );
+
+    let mut term = Terminal::new(TestBackend::new(100, 14)).unwrap();
+    term.draw(|f| a.render(f)).unwrap();
+    let buf = term.backend().buffer();
+    let lines: Vec<String> = (0..buf.area.height)
+        .map(|y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect();
+    let screen = lines.join("\n");
+    assert!(screen.contains("· 1 Parser"), "{screen}");
+    assert!(screen.contains("· 2 Token refresh"), "{screen}");
+    assert!(screen.contains("implement 2/2"), "{screen}");
+}
+
+#[test]
+fn attach_rebuilds_item_rows_from_state() {
+    let mut a = app_with(&["design", "implement", "verify"]);
+    let mut fan_outs = std::collections::BTreeMap::new();
+    fan_outs.insert("implement".to_string(), vec!["1".into(), "2".into()]);
+    let st = flows_core::models::RunState {
+        run_id: "r".into(),
+        status: Default::default(),
+        current_phase: String::new(),
+        current_phase_index: 0,
+        round: 0,
+        questions: vec![],
+        error: None,
+        completed_phases: vec![
+            "design".into(),
+            "implement".into(),
+            "implement.1.code".into(),
+        ],
+        skipped_phases: vec![],
+        fan_outs,
+    };
+    flows_tui::attach::mark_recorded_phases(&mut a.phases, &st);
+    assert_eq!(
+        a.phases.names(),
+        [
+            "design",
+            "implement",
+            "implement.1",
+            "implement.2",
+            "verify"
+        ]
+    );
+    assert_eq!(a.phases.status_of("implement.1"), Some(PhaseStatus::Done));
+    assert_eq!(
+        a.phases.status_of("implement.2"),
+        Some(PhaseStatus::Pending)
+    );
 }

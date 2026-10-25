@@ -607,6 +607,8 @@ pub fn mark_untrusted(
                 b.expose_credentials = false;
             }
         }
+        // A fan-out group's nested phases are defined by the same template.
+        mark_untrusted(&mut p.phases, defining, installed_untrusted);
     }
 }
 

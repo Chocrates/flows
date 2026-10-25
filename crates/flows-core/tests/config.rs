@@ -525,3 +525,86 @@ fn parse_phase_bash_offline_and_expose() {
     let bash = p.tools.bash.unwrap();
     assert!(!bash.offline && !bash.expose_credentials);
 }
+
+// ── fan-out groups ──────────────────────────────────────────────────────────
+
+#[test]
+fn for_each_group_parses_nested_phases() {
+    let p = parse_phase_yaml(
+        r#"
+name: implement
+for_each: "artifacts.design.tasks"
+as: task
+max_items: 20
+phases:
+  - name: code
+    tools: research_and_code
+    max_tool_rounds: 60
+  - name: check
+    type: script
+    command: "@auto:test"
+    on_failure: retry:code
+"#,
+    )
+    .unwrap();
+    assert!(p.is_group());
+    assert_eq!(p.item_var(), "task");
+    assert_eq!(p.max_items, Some(20));
+    assert_eq!(p.phases.len(), 2);
+    assert_eq!(p.phases[0].max_tool_rounds, Some(60));
+    assert_eq!(p.phases[1].phase_type, PhaseType::Script);
+    assert_eq!(
+        p.phases[1].on_failure,
+        flows_core::models::OnFailure::Retry("code".into())
+    );
+    // Round-trips through meta.json serialization.
+    let back: flows_core::PhaseConfig =
+        serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+    assert_eq!(back, p);
+}
+
+#[test]
+fn ordinary_phase_serialization_is_unchanged() {
+    let p = parse_phase_yaml("name: plan\n").unwrap();
+    let v = serde_json::to_value(&p).unwrap();
+    for k in ["for_each", "as", "phases", "max_items"] {
+        assert!(v.get(k).is_none(), "{k} serialized on a plain phase");
+    }
+    assert_eq!(p.item_var(), "item");
+}
+
+#[test]
+fn bad_groups_are_load_errors() {
+    let cases = [
+        ("name: g\nfor_each: x\n", "non-empty `phases:`"),
+        ("name: g\nfor_each: x\nphases: []\n", "non-empty `phases:`"),
+        (
+            "name: g\nfor_each: x\ntype: script\nphases: [{name: a}]\n",
+            "cannot set `type`",
+        ),
+        (
+            "name: g\nfor_each: x\ntools: files\nphases: [{name: a}]\n",
+            "cannot set `tools`",
+        ),
+        (
+            "name: g\nfor_each: x\nas: 'a-b'\nphases: [{name: a}]\n",
+            "identifier",
+        ),
+        (
+            "name: g\nfor_each: x\nmax_items: 0\nphases: [{name: a}]\n",
+            "max_items",
+        ),
+        (
+            "name: g\nphases: [{name: a}]\n",
+            "only allowed on a `for_each`",
+        ),
+        (
+            "name: g\nfor_each: x\nphases: [{include: checks}]\n",
+            "`include:` is not supported",
+        ),
+    ];
+    for (yaml, want) in cases {
+        let e = parse_phase_yaml(yaml).unwrap_err().to_string();
+        assert!(e.contains(want), "{yaml:?}: {e}");
+    }
+}

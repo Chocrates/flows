@@ -8,7 +8,7 @@ llm:
   # api_key: ${ANTHROPIC_API_KEY}
 
 # Optional: run different phases on different models (and endpoints). Define
-# named profiles here, then set `model:` on a phase (see design/implement below).
+# named profiles here, then set `model:` on a phase (see design/implement.code below).
 # models:
 #   reasoner:                          # cloud reasoner for spec/design
 #     model: claude-opus-4-8
@@ -42,41 +42,65 @@ phases:
     loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'y', 'yes', 'lgtm', 'approve', 'approved')"
     max_loop_iterations: 5
 
+  # Build the design one task at a time: each task gets its own agent (with only
+  # that task's requirements in context) and the project's tests run after it;
+  # a failing test retries that task alone. Phases are named
+  # implement.<task-id>.code / implement.<task-id>.check.
   - name: implement
+    for_each: "artifacts.design.tasks"
+    as: task
+    max_items: 20
+    on_failure: stop
+    phases:
+      - name: code
+        type: agent
+        tools: research_and_code
+        max_tool_rounds: 80
+        max_clarification_rounds: 0
+        # model: coder                 # fast/local coder for implementation
+      - name: check
+        type: script
+        command: "@auto:test"
+        on_failure: retry:code
+
+  # Targeted fixes for whatever lint/test/verify/approve flagged. Skipped on the
+  # first pass (nothing has failed yet); the gates below loop back here, so a
+  # failure never re-runs every task.
+  - name: fix
     type: agent
     tools: research_and_code
+    when: "artifacts.verify or artifacts.approve or artifacts.lint.exit_code or artifacts.test.exit_code"
     on_failure: stop
-    max_tool_rounds: 200
+    max_tool_rounds: 120
     max_clarification_rounds: 0
-    # model: coder                     # fast/local coder for implementation
 
   # Resolved in the runner (no LLM): make lint/test target, else the language's
   # tool. Stops the run if no tool can be detected.
   - name: lint
     type: script
     command: "@auto:lint"
-    on_failure: retry:implement
+    on_failure: retry:fix
 
   - name: test
     type: script
     command: "@auto:test"
-    on_failure: retry:implement
+    on_failure: retry:fix
 
   # Spec-driven: verify the implementation satisfies every requirement in the
-  # signed-off spec (and that tests/lint pass); loop back to implement if not.
+  # signed-off spec (and that tests/lint pass); loop back to fix if not.
   - name: verify
     type: agent
     max_clarification_rounds: 0
     tools: files_and_test
     on_failure: stop
-    loop_back_to: implement
+    loop_back_to: fix
     loop_condition: "content.get('verdict') not in ('approved', 'approved_with_suggestions')"
     max_loop_iterations: 3            # matches the "at most 3 cycles" in verify.md
 
   - name: approve
     type: human
     instructions: "Review the implementation. Type feedback to request changes, or press Enter to accept."
-    loop_back_to: implement
+    loop_back_to: fix
     loop_condition: "content.get('answer', '').strip() not in ('', 'ok', 'y', 'yes', 'lgtm', 'approve', 'approved')"
     max_loop_iterations: 5
 

@@ -11,9 +11,10 @@ use regex::Regex;
 use serde_json::{json, Map, Value};
 
 use flows_core::config::{merge_llm, merge_profiles, resolve_llm};
+use flows_core::fan_out::Item;
 use flows_core::models::{
-    Artifact, GlobalConfig, LLMConfig, OnFailure, PhaseConfig, PhaseType, ProjectConfig, RunMeta,
-    RunState, RunStatus,
+    Artifact, FanOutItem, GlobalConfig, LLMConfig, OnFailure, PhaseConfig, PhaseType,
+    ProjectConfig, RunMeta, RunState, RunStatus,
 };
 use flows_core::pipeline::{is_dag, validate_pipeline};
 use flows_core::state::Store;
@@ -73,6 +74,11 @@ pub trait RunnerCallbacks: Send + Sync {
     /// `on_phase_start` / `on_phase_end`.
     fn on_phase_skipped(&self, _phase: &str, _reason: &str) {}
     fn on_loop_back(&self, _from: &str, _to: &str, _iteration: u32, _max: u32) {}
+    /// A `for_each` group expanded into these `(id, title)` items, in run order.
+    fn on_fan_out(&self, _group: &str, _items: &[(String, String)]) {}
+    /// A fan-out item is starting (`index` is 1-based).
+    fn on_fan_out_item(&self, _group: &str, _id: &str, _title: &str, _index: usize, _count: usize) {
+    }
     fn on_script_result(&self, _phase: &str, _exit_code: i32, _stdout: &str, _stderr: &str) {}
     fn on_run_complete(&self, _run_id: &str, _completed_phases: &[String]) {}
     fn on_run_failed(&self, _run_id: &str, _phase: &str, _error: &str) {}
@@ -447,6 +453,7 @@ pub async fn run_pipeline(
         error: None,
         completed_phases: vec![],
         skipped_phases: vec![],
+        fan_outs: Default::default(),
     };
     let _ = store.write_state(&state);
 
@@ -495,16 +502,52 @@ async fn run_linear(
     state: &mut RunState,
     start_idx: usize,
 ) -> Result<Vec<String>, RunError> {
-    let phases = ctx.phases;
-    let total = phases.len();
+    // Owned: fan-out groups splice their expanded phases in at run time.
+    let mut phases: Vec<PhaseConfig> = ctx.phases.to_vec();
     let mut prior_artifacts = Map::new();
     let mut completed: Vec<String> = Vec::new();
     let mut loop_counts: HashMap<String, u32> = HashMap::new();
     let mut total_cost = 0.0f64;
     let mut idx = start_idx;
+    let mut groups: HashMap<String, GroupRun> = HashMap::new();
+    // The fan-out item the previous phase belonged to.
+    let mut cur_item: Option<FanOutItem> = None;
 
     while idx < phases.len() {
-        let phase = &phases[idx];
+        let here = phases[idx].fan_out().cloned();
+        if here != cur_item {
+            if let Some(prev) = cur_item.take() {
+                finish_item(ctx, &mut groups, &mut prior_artifacts, &prev);
+            }
+            if let Some(f) = &here {
+                if let Some(g) = groups.get(&f.group) {
+                    if let Some(reason) = g.blocked_reason(&f.id) {
+                        let p = phases[idx].clone();
+                        record_skip(ctx, &mut prior_artifacts, state, &p, &reason);
+                        if !completed.contains(&p.name) {
+                            completed.push(p.name.clone());
+                        }
+                        state.completed_phases = completed.clone();
+                        let _ = ctx.store.write_state(state);
+                        idx += 1;
+                        continue;
+                    }
+                    if let Some((i, it)) = g.items.iter().enumerate().find(|(_, it)| it.id == f.id)
+                    {
+                        ctx.callbacks.on_fan_out_item(
+                            &f.group,
+                            &it.id,
+                            &it.title,
+                            i + 1,
+                            g.items.len(),
+                        );
+                    }
+                }
+            }
+            cur_item = here;
+        }
+        let total = phases.len();
+        let phase = &with_done_vars(&phases[idx], &groups);
         match when_skip(ctx, phase, &prior_artifacts) {
             Err(error) => {
                 state.current_phase = phase.name.clone();
@@ -513,6 +556,10 @@ async fn run_linear(
             }
             Ok(Some(reason)) => {
                 record_skip(ctx, &mut prior_artifacts, state, phase, &reason);
+                if phase.is_group() {
+                    // A skipped group must not run an expansion from an earlier pass.
+                    phases.retain(|p| p.fan_out().map_or(true, |f| f.group != phase.name));
+                }
                 if !completed.contains(&phase.name) {
                     completed.push(phase.name.clone());
                 }
@@ -544,6 +591,50 @@ async fn run_linear(
                 ctx.global_cfg.max_cost_usd, total_cost
             );
             return fail_run(ctx, state, &phase.name, error);
+        }
+
+        if phase.is_group() {
+            let run = match start_group(ctx, phase, &prior_artifacts, groups.get(&phase.name)) {
+                Ok(run) => run,
+                Err(error) => return fail_run(ctx, state, &phase.name, error),
+            };
+            // Re-entry: drop the previous expansion and its bookkeeping.
+            let prefix = format!("{}.", phase.name);
+            phases.retain(|p| p.fan_out().map_or(true, |f| f.group != phase.name));
+            completed.retain(|n| !n.starts_with(&prefix));
+            state.skipped_phases.retain(|n| !n.starts_with(&prefix));
+            loop_counts.retain(|n, _| !n.starts_with(&prefix));
+            state.fan_outs.insert(
+                phase.name.clone(),
+                run.items.iter().map(|i| i.id.clone()).collect(),
+            );
+            let listed: Vec<(String, String)> = run
+                .items
+                .iter()
+                .map(|i| (i.id.clone(), i.title.clone()))
+                .collect();
+            ctx.callbacks.on_fan_out(&phase.name, &listed);
+            if run.items.is_empty() {
+                record_skip(
+                    ctx,
+                    &mut prior_artifacts,
+                    state,
+                    phase,
+                    "for_each yielded no items",
+                );
+            } else {
+                persist(ctx, &mut prior_artifacts, &run.artifact(ctx, &phase.name));
+                let expanded = flows_core::fan_out::expand(phase, &run.items, ctx.template_name);
+                phases.splice(idx + 1..idx + 1, expanded);
+            }
+            groups.insert(phase.name.clone(), run);
+            if !completed.contains(&phase.name) {
+                completed.push(phase.name.clone());
+            }
+            state.completed_phases = completed.clone();
+            let _ = ctx.store.write_state(state);
+            idx += 1;
+            continue;
         }
 
         let (artifact, cost, failed_error, fatal) =
@@ -578,12 +669,30 @@ async fn run_linear(
 
         if let Some(error) = failed_error {
             match &phase.on_failure {
-                OnFailure::Stop => return fail_run(ctx, state, &phase.name, error),
+                OnFailure::Stop => {
+                    // In a group with `on_failure: continue`, a stopping failure
+                    // fails only the item (and skips the items depending on it).
+                    let item = phase.fan_out().cloned();
+                    let run = item.as_ref().and_then(|f| groups.get_mut(&f.group));
+                    match (item, run) {
+                        (Some(f), Some(run)) if run.continue_on_failure => {
+                            run.fail(&f.id);
+                            write_group_artifact(ctx, &mut prior_artifacts, &f.group, run);
+                            ctx.callbacks
+                                .on_note(&phase.name, &format!("✗ item {} failed: {error}", f.id));
+                            while idx < phases.len() && phases[idx].fan_out() == Some(&f) {
+                                idx += 1;
+                            }
+                            continue;
+                        }
+                        _ => return fail_run(ctx, state, &phase.name, error),
+                    }
+                }
                 OnFailure::Continue => {
                     idx += 1;
                     continue;
                 }
-                OnFailure::Retry(target) => match index_of(phases, target) {
+                OnFailure::Retry(target) => match index_of(&phases, target) {
                     Some(t) => {
                         idx = t;
                         continue;
@@ -608,7 +717,7 @@ async fn run_linear(
                         *count,
                         phase.max_loop_iterations,
                     );
-                    if let Some(t) = index_of(phases, target) {
+                    if let Some(t) = index_of(&phases, target) {
                         // The phases in [target..=current] are about to re-run — drop
                         // them from completed_phases so the UI doesn't show a stale ✓
                         // (e.g. a rejected design must un-check as it loops back).
@@ -627,11 +736,211 @@ async fn run_linear(
 
         idx += 1;
     }
+    if let Some(prev) = cur_item.take() {
+        finish_item(ctx, &mut groups, &mut prior_artifacts, &prev);
+    }
 
     state.status = RunStatus::Completed;
     let _ = ctx.store.write_state(state);
     ctx.callbacks.on_run_complete(ctx.run_id, &completed);
     Ok(completed)
+}
+
+// ---------------------------------------------------------------------------
+// Fan-out groups
+// ---------------------------------------------------------------------------
+
+/// Run-time bookkeeping for one `for_each` group.
+struct GroupRun {
+    items: Vec<Item>,
+    /// The group's item variable (`as:`).
+    var: String,
+    /// Nested phase names, in order (to find an item's agent summaries).
+    nested: Vec<String>,
+    continue_on_failure: bool,
+    completed: Vec<String>,
+    failed: Vec<String>,
+    /// Items skipped because an item they depend on failed → that item.
+    skipped: Vec<(String, String)>,
+    /// Finished item → its last agent `content` (`summary`, `files_written`).
+    results: HashMap<String, Value>,
+}
+
+impl GroupRun {
+    /// Why item `id` must not run, if it mustn't.
+    fn blocked_reason(&self, id: &str) -> Option<String> {
+        if self.failed.iter().any(|f| f == id) {
+            return Some(format!("item {id} failed"));
+        }
+        self.skipped
+            .iter()
+            .find(|(s, _)| s == id)
+            .map(|(_, cause)| format!("depends on failed item {cause}"))
+    }
+
+    fn fail(&mut self, id: &str) {
+        if !self.failed.iter().any(|f| f == id) {
+            self.failed.push(id.to_string());
+        }
+        for d in flows_core::fan_out::dependents(&self.items, id) {
+            if !self.skipped.iter().any(|(s, _)| *s == d) {
+                self.skipped.push((d, id.to_string()));
+            }
+        }
+    }
+
+    fn artifact(&self, ctx: &Ctx<'_>, group: &str) -> Artifact {
+        let ids = |v: &[String]| -> Vec<String> {
+            // Run order, not completion order.
+            self.items
+                .iter()
+                .filter(|i| v.contains(&i.id))
+                .map(|i| i.id.clone())
+                .collect()
+        };
+        let skipped: Vec<String> = self.skipped.iter().map(|(s, _)| s.clone()).collect();
+        // Roll the items' results up, so prompts reading `<group>.summary` /
+        // `.files_written` (as for a single implement phase) still work.
+        let mut summary = Vec::new();
+        let mut files: Vec<Value> = Vec::new();
+        for it in &self.items {
+            let Some(r) = self.results.get(&it.id) else {
+                continue;
+            };
+            if let Some(s) = r.get("summary").and_then(Value::as_str) {
+                summary.push(format!("[{} {}] {s}", it.id, it.title));
+            }
+            for f in r
+                .get("files_written")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if !files.contains(f) {
+                    files.push(f.clone());
+                }
+            }
+        }
+        Artifact {
+            phase: group.to_string(),
+            idea: ctx.idea.into(),
+            content: json!({
+                "items": self.items.iter().map(|i| i.value.clone()).collect::<Vec<_>>(),
+                "completed": ids(&self.completed),
+                "failed": ids(&self.failed),
+                "skipped": ids(&skipped),
+                "summary": summary.join("\n"),
+                "files_written": files,
+            }),
+            ..Artifact::default()
+        }
+    }
+
+    /// The content of item `id`'s last agent phase that produced a `summary`.
+    fn item_result(&self, group: &str, id: &str, prior: &Map<String, Value>) -> Option<Value> {
+        let prefix = flows_core::fan_out::item_prefix(group, id);
+        self.nested.iter().rev().find_map(|n| {
+            let content = prior.get(&format!("{prefix}{n}"))?.get("content")?;
+            content.get("summary")?;
+            Some(content.clone())
+        })
+    }
+}
+
+/// Evaluate (or, once any item completed, reuse) a group's items.
+fn start_group(
+    ctx: &Ctx<'_>,
+    group: &PhaseConfig,
+    artifacts: &Map<String, Value>,
+    previous: Option<&GroupRun>,
+) -> Result<GroupRun, String> {
+    let items = match previous {
+        Some(prev) if !prev.completed.is_empty() => prev.items.clone(),
+        _ => {
+            let expr = group.for_each.as_deref().unwrap_or_default();
+            let scoped = flows_core::include::scoped_artifacts(group, artifacts);
+            let raw = flows_core::condition::eval_list(expr, &scoped, ctx.idea, &group.vars())
+                .map_err(|e| format!("Group {:?}: for_each {expr:?}: {e}", group.name))?;
+            flows_core::fan_out::items(raw, flows_core::fan_out::max_items(group))
+                .map_err(|e| format!("Group {:?}: for_each {expr:?}: {e}", group.name))?
+        }
+    };
+    Ok(GroupRun {
+        items,
+        var: group.item_var().to_string(),
+        nested: group.phases.iter().map(|p| p.name.clone()).collect(),
+        continue_on_failure: matches!(group.on_failure, OnFailure::Continue),
+        completed: Vec::new(),
+        failed: Vec::new(),
+        skipped: Vec::new(),
+        results: HashMap::new(),
+    })
+}
+
+/// Record an updated group artifact (no phase-end event: the group already
+/// ended when it expanded).
+fn write_group_artifact(
+    ctx: &Ctx<'_>,
+    prior: &mut Map<String, Value>,
+    group: &str,
+    run: &GroupRun,
+) {
+    let mut artifact = run.artifact(ctx, group);
+    artifact.run_id = ctx.run_id.to_string();
+    prior.insert(
+        group.to_string(),
+        serde_json::to_value(&artifact).unwrap_or(Value::Null),
+    );
+    write_artifact_file(ctx.store, ctx.run_id, group, &artifact);
+}
+
+/// The run left item `item`: unless it failed, it completed.
+fn finish_item(
+    ctx: &Ctx<'_>,
+    groups: &mut HashMap<String, GroupRun>,
+    prior: &mut Map<String, Value>,
+    item: &FanOutItem,
+) {
+    let Some(run) = groups.get_mut(&item.group) else {
+        return;
+    };
+    if run.blocked_reason(&item.id).is_some() || run.completed.contains(&item.id) {
+        return;
+    }
+    run.completed.push(item.id.clone());
+    if let Some(r) = run.item_result(&item.group, &item.id, prior) {
+        run.results.insert(item.id.clone(), r);
+    }
+    write_group_artifact(ctx, prior, &item.group, run);
+}
+
+/// `phase` with `vars.<as>_done` filled in when it belongs to a fan-out item:
+/// `{id, title, summary}` for each item of its group finished so far, where
+/// `summary` is that item's last `content.summary`.
+fn with_done_vars(phase: &PhaseConfig, groups: &HashMap<String, GroupRun>) -> PhaseConfig {
+    let mut phase = phase.clone();
+    let Some(run) = phase.fan_out().and_then(|f| groups.get(&f.group)) else {
+        return phase;
+    };
+    let done: Vec<Value> = run
+        .items
+        .iter()
+        .filter(|i| run.completed.contains(&i.id))
+        .map(|i| {
+            let summary = run
+                .results
+                .get(&i.id)
+                .and_then(|r| r.get("summary"))
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+            json!({ "id": i.id, "title": i.title, "summary": summary })
+        })
+        .collect();
+    if let Some(o) = &mut phase.origin {
+        o.vars
+            .insert(format!("{}_done", run.var), Value::Array(done));
+    }
+    phase
 }
 
 fn fail_run(

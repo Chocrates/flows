@@ -3,7 +3,7 @@
 //! Serde derives keep the on-disk JSON/YAML shape identical to the Python
 //! implementation (state.json, meta.json, artifacts/*.yml, llm.jsonl).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value;
@@ -385,7 +385,23 @@ pub struct PhaseConfig {
     /// from YAML (see `flows_core::registry`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub untrusted: bool,
+    /// Makes this entry a fan-out group: `phases` run once per item of the list
+    /// this expression yields at run time (see `flows_core::fan_out`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_each: Option<String>,
+    /// The group's item variable name (`vars.<as>`); default `item`.
+    #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+    pub as_var: Option<String>,
+    /// A fan-out group's nested phases (empty for ordinary phases).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<PhaseConfig>,
+    /// A fan-out group's item cap; default [`DEFAULT_MAX_ITEMS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<u32>,
 }
+
+/// Item cap for a fan-out group without `max_items`.
+pub const DEFAULT_MAX_ITEMS: u32 = 50;
 
 /// Where an included phase came from, and what it needs at run time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -400,9 +416,34 @@ pub struct IncludeOrigin {
     /// `with:` values, exposed to prompts, commands and `when` as `vars`.
     #[serde(default)]
     pub vars: serde_json::Map<String, serde_json::Value>,
+    /// Set on a phase expanded from a fan-out group: which group and item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_out: Option<FanOutItem>,
+}
+
+/// The fan-out group and item an expanded phase belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanOutItem {
+    pub group: String,
+    pub id: String,
 }
 
 impl PhaseConfig {
+    /// Whether this entry is a fan-out group (`for_each`).
+    pub fn is_group(&self) -> bool {
+        self.for_each.is_some()
+    }
+
+    /// A fan-out group's item variable name.
+    pub fn item_var(&self) -> &str {
+        self.as_var.as_deref().unwrap_or("item")
+    }
+
+    /// The fan-out group and item this phase was expanded for, if any.
+    pub fn fan_out(&self) -> Option<&FanOutItem> {
+        self.origin.as_ref().and_then(|o| o.fan_out.as_ref())
+    }
+
     /// The include's `with:` values (empty for phases not from an include).
     pub fn vars(&self) -> serde_json::Map<String, serde_json::Value> {
         self.origin
@@ -433,6 +474,10 @@ impl PhaseConfig {
             when: None,
             origin: None,
             untrusted: false,
+            for_each: None,
+            as_var: None,
+            phases: Vec::new(),
+            max_items: None,
         }
     }
 }
@@ -808,6 +853,9 @@ pub struct RunState {
     /// Phases whose `when` condition was false (also in `completed_phases`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_phases: Vec<String>,
+    /// Fan-out group → its frozen item ids, in run order.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fan_outs: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

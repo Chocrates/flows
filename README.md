@@ -17,7 +17,8 @@ supervise. `flows` makes agent work **structured, safe, and observable**:
 - **Structured** — a run is a pipeline of named *phases* (agent / script / human)
   with loop-backs, retries, and human gates. The same `feature` or `software` flow
   runs the same way every time; lint/test commands adapt to your stack (cargo,
-  pytest, npm, go).
+  pytest, npm, go). Implementation runs **one task at a time** from the generated
+  plan, with the tests run after each task and a failing task retried on its own.
 - **Safe** — the agent's shell runs in a filesystem sandbox (bubblewrap / Seatbelt):
   **write only inside the repo**, credential stores (`~/.ssh`, `~/.aws`, API keys, …)
   hidden, no host IPC, fail-closed if no sandbox. File tools can't escape the repo; web access is SSRF-guarded.

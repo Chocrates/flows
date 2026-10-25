@@ -59,10 +59,23 @@ withheld this phase — plan only.
 
 2. **Then produce a concrete plan** covering:
    - Which files to create or modify (with reasoning) — *describe* them, don't create them
-   - Step-by-step implementation order (dependencies first)
+   - The work broken into **tasks** (below), dependencies first
    - Edge cases and failure modes to handle
    - Tests that must pass when done — target 100% coverage of new code where practical
    - Any external dependencies needed
+
+## Tasks
+
+Each task is implemented by a separate agent, one at a time, in order, and the
+project's tests run after every task — a failing task is retried on its own. So:
+
+- **1–8 tasks**, each a coherent slice (a small feature may be a single task).
+- **Every task leaves the tests passing** and adds tests for what it changes. Never
+  write a test for code a later task adds.
+- Order foundations first; use `depends_on` (task ids) when a task needs another
+  that is listed later.
+- `files` are the files the task creates or changes; `done_when` is a concrete
+  check (e.g. "`cargo test parser` passes").
 
 ## Constraints to check (in the plan, not by doing them)
 
@@ -87,10 +100,14 @@ Or produce plan (when ready):
     "approach": "Brief description of the technical approach",
     "files_to_create": ["path/to/new.py"],
     "files_to_modify": ["path/to/existing.py"],
-    "steps": [
-      "1. Read existing X to understand interface",
-      "2. Add Y to module Z",
-      "3. Update tests"
+    "tasks": [
+      {
+        "id": "1",
+        "title": "Add Y to module Z",
+        "files": ["path/to/existing.py", "tests/test_existing.py"],
+        "depends_on": [],
+        "done_when": "pytest tests/test_existing.py passes"
+      }
     ],
     "tests": ["What must pass when done"],
     "risks": ["Any unknowns or risks"],

@@ -2,7 +2,9 @@
 
 A **template** defines a pipeline of **phases**. Shipped: `feature` (plan → build →
 review), `software` (spec-driven, from scratch), `research`, `review`, `plan`
-(planning/analysis only), `implement`, `blank`.
+(planning/analysis only), `implement`, `blank`. `feature` and `software` build
+task by task: the plan/design emits a `tasks` list and the `implement` step is a
+[`for_each` group](#one-step-per-task-for_each) over it.
 
 ## Getting your own templates
 
@@ -277,6 +279,58 @@ phases:
   `depends_on` in a linear pipeline is an error.
 - Includes nest up to 8 deep; cycles are errors. `flows plan` shows the
   flattened pipeline.
+
+## One step per task (`for_each`)
+
+A phase entry with `for_each:` is a **fan-out group**: when the run reaches it,
+the expression is evaluated against the artifacts so far, and the group's nested
+`phases:` run once per item of the resulting list.
+
+```yaml
+- name: design                # emits content.tasks: [{id, title, …}, …]
+  type: agent
+
+- name: implement
+  for_each: "artifacts.design.tasks"
+  as: task                    # default: item
+  max_items: 20               # default 50; more is an error
+  on_failure: stop            # or continue: fail the item, skip its dependents
+  phases:
+    - name: code              # → implement.<id>.code
+      type: agent
+      tools: research_and_code
+    - name: check             # → implement.<id>.check
+      type: script
+      command: "@auto:test"
+      on_failure: retry:code  # retries this task only
+```
+
+- **Items.** The expression must yield a list (same sandbox and context as
+  `when:`). An object item's id is its `id` field, else its position; a string
+  item `s` becomes `{id: <position>, title: s}`. Ids must be unique and use
+  letters, digits, `.`, `-`, `_`. An empty list skips the group.
+- **Order.** Items run one at a time, in listed order, except that an item with
+  `depends_on: [<ids>]` runs after those items. Unknown ids and cycles stop the
+  run at the group.
+- **Variables.** Each expanded phase sees `vars.<as>` (the item, with `id` and
+  `title` filled in), `vars.<as>_index` (1-based), `vars.<as>_count`, and
+  `vars.<as>_done` (`[{id, title, summary}]` for items already finished) in its
+  prompt, script command and `when:`. Within an item, `artifacts.check` (or
+  `prior_artifacts['check']`) is that item's `check`.
+- **Retries and loops** inside the group name sibling phases and stay within the
+  item; each item has its own `max_loop_iterations` budget. Phases outside the
+  group may loop back to the group itself, but not into it.
+- **Group artifact.** `artifacts.<group>` holds `items`, `completed`, `failed`,
+  `skipped`, plus a rolled-up `summary` (`[<id> <title>] <item summary>` lines)
+  and the union of the items' `files_written` — so a later prompt reading
+  `prior_artifacts['implement'].summary` keeps working.
+- **Frozen items.** The list is evaluated once. If a later loop-back re-enters
+  the group after any item finished, the same items run again even if the source
+  artifact changed. They are recorded in `state.json` (`fan_outs`).
+- A group can't set `type`, `prompt`, `tools`, `command`, `loop_back_to` or
+  `depends_on` (set those on its nested phases). Groups don't nest and aren't
+  allowed in DAG pipelines. Nested phase prompts are looked up by the nested
+  name: `prompts/<template>/code.md`. `flows plan` prices one item.
 
 ---
 

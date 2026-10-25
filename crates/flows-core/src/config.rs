@@ -37,6 +37,8 @@ pub enum ConfigError {
     },
     #[error("{0}")]
     Include(String),
+    #[error("Phase {name:?}: {reason}")]
+    Group { name: String, reason: String },
 }
 
 type Result<T> = std::result::Result<T, ConfigError>;
@@ -304,8 +306,96 @@ pub fn parse_phases_from_yaml_with(
     }
 }
 
+/// Keys a fan-out group may not set: it runs its nested phases, not itself.
+const GROUP_FORBIDDEN: &[&str] = &[
+    "type",
+    "prompt",
+    "tools",
+    "command",
+    "loop_back_to",
+    "loop_condition",
+    "depends_on",
+];
+
+/// A fan-out group's `for_each`, `as`, `max_items` and nested `phases`.
+type GroupParts = (
+    Option<String>,
+    Option<String>,
+    Option<u32>,
+    Vec<PhaseConfig>,
+);
+
+fn parse_group(p: &Value, name: &str) -> Result<GroupParts> {
+    let bad = |reason: String| ConfigError::Group {
+        name: name.to_string(),
+        reason,
+    };
+    let Some(for_each) = get_str(p, "for_each").filter(|e| !e.trim().is_empty()) else {
+        if p.get("for_each").is_some() {
+            return Err(bad("`for_each` must be a non-empty expression".into()));
+        }
+        if p.get("phases").is_some() || p.get("as").is_some() || p.get("max_items").is_some() {
+            return Err(bad(
+                "`phases`, `as` and `max_items` are only allowed on a `for_each` group".into(),
+            ));
+        }
+        return Ok((None, None, None, Vec::new()));
+    };
+    if let Some(k) = GROUP_FORBIDDEN.iter().find(|k| p.get(**k).is_some()) {
+        return Err(bad(format!(
+            "a `for_each` group cannot set `{k}` (set it on its nested phases)"
+        )));
+    }
+    let as_var = match p.get("as") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let a = v.as_str().unwrap_or_default();
+            let ok = a
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !ok {
+                return Err(bad(format!(
+                    "`as:` must be an identifier (letters, digits, `_`), got {a:?}"
+                )));
+            }
+            Some(a.to_string())
+        }
+    };
+    let max_items = match p.get("max_items") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+                .ok_or_else(|| bad("`max_items` must be a positive integer".into()))?
+                as u32,
+        ),
+    };
+    let nested = match p.get("phases") {
+        Some(Value::Sequence(seq)) if !seq.is_empty() => seq
+            .iter()
+            .map(|e| {
+                if e.get("include").is_some() {
+                    return Err(bad(
+                        "`include:` is not supported inside a `for_each` group".into()
+                    ));
+                }
+                parse_phase(e)
+            })
+            .collect::<Result<Vec<_>>>()?,
+        _ => {
+            return Err(bad(
+                "a `for_each` group needs a non-empty `phases:` list".into()
+            ))
+        }
+    };
+    Ok((Some(for_each), as_var, max_items, nested))
+}
+
 pub(crate) fn parse_phase(p: &Value) -> Result<PhaseConfig> {
     let name = get_str(p, "name").ok_or(ConfigError::MissingName)?;
+    let (for_each, as_var, max_items, nested) = parse_group(p, &name)?;
 
     let max_loop = match p.get("max_loop_iterations") {
         None | Some(Value::Null) => 3,
@@ -355,6 +445,10 @@ pub(crate) fn parse_phase(p: &Value) -> Result<PhaseConfig> {
         when: get_str(p, "when").filter(|w| !w.trim().is_empty()),
         origin: None,
         untrusted: false,
+        for_each,
+        as_var,
+        phases: nested,
+        max_items,
     })
 }
 

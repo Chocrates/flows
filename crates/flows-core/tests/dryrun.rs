@@ -157,3 +157,121 @@ fn plan_lines_show_when() {
     assert!(lines[1].contains("when: artifacts.review.bad"), "{lines:?}");
     assert!(!lines[0].contains("when:"));
 }
+
+// -- fan-out groups ----------------------------------------------------------
+
+fn group(name: &str, nested: Vec<PhaseConfig>) -> PhaseConfig {
+    let mut g = PhaseConfig::new(name);
+    g.for_each = Some("artifacts.design.tasks".into());
+    g.as_var = Some("task".into());
+    g.phases = nested;
+    g
+}
+
+fn script(name: &str) -> PhaseConfig {
+    let mut p = PhaseConfig::new(name);
+    p.phase_type = PhaseType::Script;
+    p.command = Some("true".into());
+    p
+}
+
+fn retrying(mut p: PhaseConfig, target: &str) -> PhaseConfig {
+    p.on_failure = OnFailure::Retry(target.into());
+    p
+}
+
+#[test]
+fn group_valid() {
+    let g = group(
+        "implement",
+        vec![agent("code"), retrying(script("check"), "code")],
+    );
+    assert!(validate_pipeline(&[agent("design"), g, agent("verify")]).is_ok());
+    // Outside phases may loop back to the group itself.
+    let mut verify = agent("verify");
+    verify.loop_back_to = Some("implement".into());
+    let g = group("implement", vec![agent("code")]);
+    assert!(validate_pipeline(&[agent("design"), g, verify]).is_ok());
+}
+
+#[test]
+fn group_errors() {
+    let err = |phases: &[PhaseConfig]| validate_pipeline(phases).unwrap_err();
+
+    let mut bad = group("implement", vec![agent("code")]);
+    bad.for_each = Some("artifacts.x ==".into());
+    assert!(err(&[bad]).contains("invalid for_each"));
+
+    let inner = group("inner", vec![agent("a")]);
+    let e = err(&[group("outer", vec![inner])]);
+    assert!(
+        e.contains("\"outer\"") && e.contains("\"inner\"") && e.contains("not supported"),
+        "{e}"
+    );
+
+    let e = err(&[group("g", vec![agent("a"), agent("a")])]);
+    assert!(e.contains("more than once"), "{e}");
+
+    let e = err(&[group("g", vec![agent("a.b")])]);
+    assert!(e.contains("no dots"), "{e}");
+
+    let e = err(&[
+        agent("design"),
+        group("g", vec![retrying(agent("a"), "design")]),
+    ]);
+    assert!(
+        e.contains("retry \"design\"") && e.contains("same group"),
+        "{e}"
+    );
+
+    let mut looping = agent("a");
+    looping.loop_back_to = Some("design".into());
+    let e = err(&[agent("design"), group("g", vec![looping])]);
+    assert!(e.contains("loop_back_to \"design\""), "{e}");
+
+    let e = err(&[group("g", vec![agent("a")]), agent("g.x")]);
+    assert!(e.contains("clashes"), "{e}");
+
+    // Expanded names aren't pipeline phases: an outside loop can't target them.
+    let mut verify = agent("verify");
+    verify.loop_back_to = Some("g.1.a".into());
+    let e = err(&[group("g", vec![agent("a")]), verify]);
+    assert!(e.contains("not found"), "{e}");
+}
+
+#[test]
+fn group_in_dag_rejected() {
+    let mut b = agent("b");
+    b.depends_on = vec!["a".into()];
+    let e = validate_pipeline(&[agent("a"), b, group("g", vec![agent("x")])]).unwrap_err();
+    assert!(e.contains("linear pipeline"), "{e}");
+}
+
+#[test]
+fn plan_lines_show_group_and_nested() {
+    let g = group("implement", vec![agent("code"), script("check")]);
+    let lines = build_plan_lines(&[agent("design"), g]);
+    assert_eq!(lines.len(), 4);
+    assert!(lines[1].contains("implement") && lines[1].contains("for_each"));
+    assert!(lines[1].contains("artifacts.design.tasks"));
+    assert!(lines[2].contains("code") && lines[2].contains("[agent]"));
+    assert!(lines[3].contains("check") && lines[3].contains("[script]"));
+}
+
+#[test]
+fn estimate_prices_one_item_of_a_group() {
+    let g = group("implement", vec![agent("code"), script("check")]);
+    let est = flows_core::estimate_pipeline(
+        &[agent("design"), g],
+        "idea",
+        "software",
+        Path::new("."),
+        &Default::default(),
+        &Default::default(),
+    );
+    let names: Vec<&str> = est.iter().map(|e| e.phase.as_str()).collect();
+    assert_eq!(
+        names,
+        ["design", "implement.<each>.code", "implement.<each>.check"]
+    );
+}

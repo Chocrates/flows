@@ -212,3 +212,94 @@ fn agent_docs_combines_global_and_project() {
     // project comes after global (wins on conflict)
     assert!(docs.find("GLOBAL").unwrap() < docs.find("PROJECT").unwrap());
 }
+
+#[test]
+fn builtin_fan_out_prompts_render() {
+    use flows_core::models::{FanOutItem, IncludeOrigin, PhaseConfig};
+    let repo = tempfile::tempdir().unwrap();
+    let task = json!({"id": "2", "title": "Token refresh", "requirements": ["REQ-2"],
+                      "files": ["src/auth.rs"]});
+    let vars = json!({
+        "task": task,
+        "task_index": 2,
+        "task_count": 3,
+        "task_done": [{"id": "1", "title": "Skeleton", "summary": "set up the crate"}],
+    });
+    let item_phase = |template: &str, local: &str| {
+        let mut p = PhaseConfig::new(format!("implement.2.{local}"));
+        p.origin = Some(IncludeOrigin {
+            template: template.into(),
+            local_name: local.into(),
+            prefix: "implement.2.".into(),
+            vars: vars.as_object().unwrap().clone(),
+            fan_out: Some(FanOutItem {
+                group: "implement".into(),
+                id: "2".into(),
+            }),
+        });
+        p
+    };
+    let failed_check =
+        json!({"stdout": "test auth::refresh FAILED", "stderr": "", "exit_code": 101});
+
+    // software/code.md: the task, only its requirements, done items, retry output.
+    let raw = load_prompt(
+        &item_phase("software", "code"),
+        "software",
+        repo.path(),
+        None,
+    );
+    let ctx = json!({
+        "idea": "x", "repo_tree": "src/", "vars": vars,
+        "prior_artifacts": {
+            "spec": {"content": {"requirements": [
+                {"id": "REQ-1", "text": "parse config", "scenarios": []},
+                {"id": "REQ-2", "text": "refresh tokens", "scenarios": ["WHEN expired THEN refresh"]}
+            ]}},
+            "design": {"content": {"architecture": "layered", "modules": []}},
+            "check": {"content": failed_check},
+        }
+    });
+    let out = render_prompt(&raw, &ctx).expect("software/code.md must render");
+    assert!(out.contains("2 of 3: Token refresh"), "{out}");
+    assert!(
+        out.contains("refresh tokens") && !out.contains("parse config"),
+        "{out}"
+    );
+    assert!(out.contains("set up the crate"));
+    assert!(out.contains("auth::refresh FAILED"));
+
+    // feature/code.md
+    let raw = load_prompt(&item_phase("feature", "code"), "feature", repo.path(), None);
+    let ctx = json!({
+        "idea": "x", "repo_tree": "src/", "vars": vars,
+        "prior_artifacts": {"plan": {"content": {"summary": "add auth", "approach": "middleware"}}}
+    });
+    let out = render_prompt(&raw, &ctx).expect("feature/code.md must render");
+    assert!(out.contains("Token refresh") && out.contains("add auth"));
+    assert!(!out.contains("tests FAILED"));
+
+    // fix.md (both templates): gate failures and feedback.
+    for template in ["software", "feature"] {
+        let raw = load_prompt(&PhaseConfig::new("fix"), template, repo.path(), None);
+        let ctx = json!({
+            "idea": "x", "repo_tree": "src/",
+            "prior_artifacts": {
+                "implement": {"content": {"summary": "[1 Skeleton] set up the crate"}},
+                "lint": {"content": {"stdout": "", "stderr": "", "exit_code": 0}},
+                "test": {"content": failed_check},
+                "verify": {"content": {"unmet_requirements": ["REQ-3 missing"]}},
+                "review": {"content": {"verdict": "needs_fixes"}},
+                "approve": {"content": {"answer": "rename the flag"}},
+            }
+        });
+        let out = render_prompt(&raw, &ctx)
+            .unwrap_or_else(|e| panic!("{template}/fix.md must render: {e}"));
+        assert!(out.contains("rename the flag"), "{template}");
+        assert!(
+            out.contains("`test` failed") && !out.contains("`lint` failed"),
+            "{template}"
+        );
+        assert!(out.contains("set up the crate"), "{template}");
+    }
+}

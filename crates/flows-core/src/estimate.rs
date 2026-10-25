@@ -100,6 +100,28 @@ pub fn estimate_pipeline(
     let mut results = Vec::with_capacity(phases.len());
 
     for phase in phases {
+        if phase.is_group() {
+            // The item count is only known at run time: estimate one item, named
+            // `<group>.<each>.<phase>` so the per-item nature is visible.
+            let per_item: Vec<PhaseConfig> = phase
+                .phases
+                .iter()
+                .map(|n| {
+                    let mut n = n.clone();
+                    n.name = format!("{}.<each>.{}", phase.name, n.name);
+                    n
+                })
+                .collect();
+            results.extend(estimate_pipeline(
+                &per_item,
+                idea,
+                _template_name,
+                _repo_root,
+                llm,
+                profiles,
+            ));
+            continue;
+        }
         if matches!(phase.phase_type, PhaseType::Script | PhaseType::Human) {
             results.push(PhaseEstimate {
                 phase: phase.name.clone(),

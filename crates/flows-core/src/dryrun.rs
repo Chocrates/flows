@@ -43,6 +43,24 @@ pub fn build_plan_lines(phases: &[PhaseConfig]) -> Vec<String> {
         }
     } else {
         for (i, p) in phases.iter().enumerate() {
+            if p.is_group() {
+                lines.push(format!(
+                    "  {}. {:<20} [for_each × N items, known at run time]  over: {}{}",
+                    i + 1,
+                    p.name,
+                    p.for_each.as_deref().unwrap_or_default(),
+                    phase_suffix(p)
+                ));
+                for n in &p.phases {
+                    lines.push(format!(
+                        "       · {:<17} [{}]{}",
+                        n.name,
+                        n.phase_type.as_str(),
+                        phase_suffix(n)
+                    ));
+                }
+                continue;
+            }
             lines.push(format!(
                 "  {}. {:<20} [{}]{}",
                 i + 1,

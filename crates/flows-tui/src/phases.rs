@@ -1,7 +1,7 @@
 //! Phases-pane model — the left sidebar showing each phase and its status.
 //! Port of the Textual `PhasePanel`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhaseStatus {
@@ -41,6 +41,11 @@ pub struct PhasePanel {
     phases: Vec<(String, PhaseStatus)>,
     loop_iters: HashMap<String, u32>,
     loops: Vec<LoopEdge>,
+    /// Fan-out item rows (`<group>.<id>`): an expanded phase
+    /// `<group>.<id>.<phase>` reports its status on its item's row.
+    items: HashSet<String>,
+    /// Display labels for item rows.
+    labels: HashMap<String, String>,
 }
 
 impl PhasePanel {
@@ -57,13 +62,61 @@ impl PhasePanel {
     }
 
     pub fn set_status(&mut self, name: &str, status: PhaseStatus) {
-        if let Some(p) = self.phases.iter_mut().find(|(n, _)| n == name) {
-            p.1 = status;
+        let exact = self.phases.iter().position(|(n, _)| n == name);
+        let Some(row) = exact.or_else(|| self.item_row(name)) else {
+            return;
+        };
+        // One skipped phase of an item doesn't make the whole item skipped.
+        if exact.is_none()
+            && status == PhaseStatus::Skipped
+            && self.phases[row].1 != PhaseStatus::Pending
+        {
+            return;
         }
+        self.phases[row].1 = status;
     }
 
     pub fn status_of(&self, name: &str) -> Option<PhaseStatus> {
-        self.phases.iter().find(|(n, _)| n == name).map(|(_, s)| *s)
+        self.phases
+            .iter()
+            .position(|(n, _)| n == name)
+            .or_else(|| self.item_row(name))
+            .map(|i| self.phases[i].1)
+    }
+
+    /// The item row an expanded phase name belongs to.
+    fn item_row(&self, name: &str) -> Option<usize> {
+        self.phases.iter().position(|(n, _)| {
+            self.items.contains(n)
+                && name
+                    .strip_prefix(n.as_str())
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
+    }
+
+    /// Show a fan-out group's items as rows under the group (replacing rows
+    /// from an earlier expansion).
+    pub fn set_items(&mut self, group: &str, items: &[(String, String)]) {
+        let prefix = format!("{group}.");
+        self.phases
+            .retain(|(n, _)| !(n.starts_with(&prefix) && self.items.contains(n)));
+        self.items.retain(|n| !n.starts_with(&prefix));
+        let Some(at) = self.row_of(group) else {
+            return;
+        };
+        let rows = items.iter().map(|(id, title)| {
+            let name = format!("{prefix}{id}");
+            let label = if title == id {
+                format!("  · {id}")
+            } else {
+                format!("  · {id} {title}")
+            };
+            self.labels.insert(name.clone(), label);
+            self.items.insert(name.clone());
+            (name, PhaseStatus::Pending)
+        });
+        let rows: Vec<_> = rows.collect();
+        self.phases.splice(at + 1..at + 1, rows);
     }
 
     pub fn set_loop_iteration(&mut self, name: &str, iter: u32) {
@@ -119,6 +172,8 @@ impl PhasePanel {
                 let label = if let Some(edge) = self.loops.iter().find(|e| &e.from == name) {
                     let it = self.loop_iters.get(name).copied().unwrap_or(0);
                     format!("{name} ↺{it}/{}", edge.max)
+                } else if let Some(label) = self.labels.get(name) {
+                    label.clone()
                 } else {
                     name.clone()
                 };
@@ -134,5 +189,52 @@ impl PhasePanel {
 
     pub fn names(&self) -> Vec<String> {
         self.phases.iter().map(|(n, _)| n.clone()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn items(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn items_appear_under_their_group_and_track_expanded_phases() {
+        let mut p = PhasePanel::new();
+        p.setup(&names(&["design", "implement", "verify"]));
+        p.set_items("implement", &items(&[("1", "Parser"), ("2", "2")]));
+        let rows = p.rows();
+        let labels: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["design", "implement", "  · 1 Parser", "  · 2", "verify"]
+        );
+
+        p.set_status("implement.1.code", PhaseStatus::Running);
+        assert_eq!(p.status_of("implement.1"), Some(PhaseStatus::Running));
+        p.set_status("implement.1.check", PhaseStatus::Done);
+        // A skipped later phase leaves a run item alone…
+        p.set_status("implement.1.extra", PhaseStatus::Skipped);
+        assert_eq!(p.status_of("implement.1"), Some(PhaseStatus::Done));
+        // …but marks a pending one (e.g. dependents of a failed item).
+        p.set_status("implement.2.code", PhaseStatus::Skipped);
+        assert_eq!(p.status_of("implement.2"), Some(PhaseStatus::Skipped));
+    }
+
+    #[test]
+    fn re_expansion_replaces_item_rows() {
+        let mut p = PhasePanel::new();
+        p.setup(&names(&["implement", "verify"]));
+        p.set_items("implement", &items(&[("1", "a"), ("2", "b")]));
+        p.set_items("implement", &items(&[("x", "c")]));
+        assert_eq!(p.names(), ["implement", "implement.x", "verify"]);
     }
 }

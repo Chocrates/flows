@@ -28,6 +28,10 @@ You are a senior software engineer verifying an implementation **against its sig
 **What was implemented:**
 {{ prior_artifacts['implement'].get('content', {}).get('summary', '') }}
 {% endif %}
+{% if prior_artifacts.get('fix') and not prior_artifacts['fix'].get('content', {}).get('skipped') %}
+**Latest fix pass:**
+{{ prior_artifacts['fix'].get('content', {}).get('summary', '') }}
+{% endif %}
 
 **Repository structure:**
 ```

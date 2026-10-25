@@ -227,6 +227,7 @@ fn include_entry(
                     local_name: p.name.clone(),
                     prefix: String::new(),
                     vars: with.clone(),
+                    fan_out: None,
                 })
             }
             Some(o) => {
