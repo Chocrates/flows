@@ -35,13 +35,16 @@ You are a software engineer building a system **one task at a time**. This phase
 {% endfor %}
 {% endif %}
 
-{% set check = prior_artifacts.get('check', {}).get('content', {}) %}
-{% if check and check.get('exit_code') %}
-**⚠ The tests FAILED after your previous attempt at this task (exit {{ check.get('exit_code') }}). Fix these failures first — in place, without starting over:**
-```
-{{ check.get('stdout', '') }}{{ check.get('stderr', '') }}
-```
+{% set previous = prior_artifacts.get('code', {}).get('content', {}) %}
+{% if previous.get('error') %}
+**⚠ Your previous attempt at this task stopped early: {{ previous.error }}.** Its files are on disk — read what is there and finish it; don't start over.
 {% endif %}
+{% for gate, label in [('lint', 'Lint'), ('check', 'The tests')] %}{% set out = prior_artifacts.get(gate, {}).get('content', {}) %}{% if out and out.get('exit_code') %}
+**⚠ {{ label }} FAILED after your previous attempt at this task (exit {{ out.get('exit_code') }}). Fix these failures first — in place, without starting over:**
+```
+{{ out.get('stdout', '') }}{{ out.get('stderr', '') }}
+```
+{% endif %}{% endfor %}
 
 **Repo structure:**
 ```
@@ -60,11 +63,12 @@ You are a software engineer building a system **one task at a time**. This phase
 ## Rules
 
 - **Implement this task only** — the files it names and the requirements it lists. Later tasks build the rest; do not start them.
-- **Leave the build green.** The project's tests run as soon as you finish. Add tests for what this task builds, and never write a test for code a later task adds.
+- **Leave the build green.** The project's lint and tests run as soon as you finish. Code that only a later task will use may trip unused-code lints — mark it allowed until then. Add tests for what this task builds, and never write a test for code a later task adds.
 - **Write each file to disk with `write_file` as you go** — one call per file. Never put file contents in your final response.
 - **Verify library APIs before coding against them** — `lookup(source="crates_io"|"docs_rs", query="<crate name only>")`, then `http_get` the docs page. Don't code from memory; versions drift.
 - **Act, don't deliberate.** Write the straightforward version first; every round ends in a tool call or the final artifact.
 - **Never delete the source tree or start over.** Fix build errors in place, from the compiler output.
+- **Stay inside the sandbox.** `bash` runs only the commands its description lists, from the repo root; file tools take repo-relative paths only (no `/tmp`, no `~/.cargo`). Put scratch files under the repo and delete them after.
 - **Create files at the repo root shown above** — do not nest the project in a new subdirectory.
 
 {% if tools_enabled %}

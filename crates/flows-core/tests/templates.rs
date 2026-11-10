@@ -38,17 +38,23 @@ fn feature_has_expected_phase_shape() {
     // commit is a script phase
     let commit = phases.iter().find(|p| p.name == "commit").unwrap();
     assert_eq!(commit.phase_type, PhaseType::Script);
-    // implement fans out over the plan's tasks: a code agent + a test gate
-    // that retries only that task.
+    // implement fans out over the plan's tasks: a code agent + lint and test
+    // gates that retry only that task; a code failure still reaches the gates.
     let implement = phases.iter().find(|p| p.name == "implement").unwrap();
     assert_eq!(implement.for_each.as_deref(), Some("artifacts.plan.tasks"));
     assert_eq!(implement.item_var(), "task");
     let nested: Vec<_> = implement.phases.iter().map(|p| p.name.as_str()).collect();
-    assert_eq!(nested, ["code", "check"]);
+    assert_eq!(nested, ["code", "lint", "check"]);
     assert_eq!(
-        implement.phases[1].on_failure,
-        flows_core::models::OnFailure::Retry("code".into())
+        implement.phases[0].on_failure,
+        flows_core::models::OnFailure::Continue
     );
+    for gate in &implement.phases[1..] {
+        assert_eq!(
+            gate.on_failure,
+            flows_core::models::OnFailure::Retry("code".into())
+        );
+    }
     // The YAML anchor shares the code tools with `fix`.
     let fix = phases.iter().find(|p| p.name == "fix").unwrap();
     assert_eq!(fix.tools, implement.phases[0].tools);
@@ -88,6 +94,9 @@ fn software_fans_out_over_design_tasks() {
         implement.for_each.as_deref(),
         Some("artifacts.design.tasks")
     );
+    let nested: Vec<_> = implement.phases.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(nested, ["code", "lint", "check"]);
+    assert_eq!(implement.phases[0].max_tool_rounds, Some(120));
     for name in ["lint", "test"] {
         let p = phases.iter().find(|p| p.name == name).unwrap();
         assert_eq!(

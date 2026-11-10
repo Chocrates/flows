@@ -269,6 +269,8 @@ async fn non_list_fails_at_the_group() {
                 error.contains("artifacts.design.tasks") && error.contains("a string"),
                 "{error}"
             );
+            // Points at what the producing phase actually emitted.
+            assert!(error.contains("produced fields [tasks]"), "{error}");
         }
         other => panic!("expected failure, got {other:?}"),
     }
@@ -369,6 +371,85 @@ async fn retry_reruns_only_the_failing_item() {
     );
     // The retry stays inside the item: one item event per item.
     assert_eq!(cb.items.lock().unwrap().len(), 2);
+}
+
+fn empty() -> Completion {
+    Completion {
+        content: String::new(),
+        reasoning: None,
+        tool_calls: vec![],
+        usage: Usage::default(),
+        stop_reason: None,
+    }
+}
+
+#[tokio::test]
+async fn failed_code_step_is_still_checked_and_retried() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    // The first code attempt fails (empty replies); the second succeeds.
+    let (mock, requests) = Mock::new(vec![
+        artifact(tasks(&["1"])),
+        empty(),
+        empty(),
+        empty(),
+        artifact(json!({"summary": "1 done"})),
+    ]);
+    let mut code = agent("code");
+    code.on_failure = OnFailure::Continue;
+    let mut check = script("check", "test -f retried || { touch retried; exit 1; }");
+    check.on_failure = OnFailure::Retry("code".into());
+    let cb = Cb::default();
+    let phases = [agent("design"), group("implement", vec![code, check])];
+    run(&phases, mock, &cb, d.path(), &store).await.unwrap();
+    assert_eq!(
+        started(&cb),
+        [
+            "design",
+            "implement",
+            "implement.1.code",
+            "implement.1.check",
+            "implement.1.code",
+            "implement.1.check",
+        ]
+    );
+    assert_eq!(requests.lock().unwrap().len(), 5);
+    assert_eq!(
+        group_artifact(&store, "implement")["completed"],
+        json!(["1"])
+    );
+}
+
+#[tokio::test]
+async fn item_retries_are_bounded() {
+    let d = tempdir().unwrap();
+    let store = Store::new(d.path().join(".flows"));
+    let (mock, _) = Mock::new(vec![
+        artifact(tasks(&["1"])),
+        artifact(json!({"summary": "a"})),
+        artifact(json!({"summary": "b"})),
+        artifact(json!({"summary": "c"})),
+    ]);
+    let mut check = script("check", "exit 1");
+    check.on_failure = OnFailure::Retry("code".into());
+    check.max_loop_iterations = 2;
+    let cb = Cb::default();
+    let phases = [
+        agent("design"),
+        group("implement", vec![agent("code"), check]),
+    ];
+    match run(&phases, mock, &cb, d.path(), &store).await {
+        Err(RunError::Failed { phase, error }) => {
+            assert_eq!(phase, "implement.1.check");
+            assert!(error.contains("still failing after 2 retries"), "{error}");
+        }
+        other => panic!("expected failure, got {other:?}"),
+    }
+    let codes = started(&cb)
+        .iter()
+        .filter(|p| *p == "implement.1.code")
+        .count();
+    assert_eq!(codes, 3, "initial attempt + 2 retries");
 }
 
 fn failing_two() -> Vec<PhaseConfig> {

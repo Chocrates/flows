@@ -10,7 +10,9 @@ use regex::Regex;
 use serde_json::{json, Map, Value};
 
 use crate::deletion_guard::{DeletionGuard, Verdict};
-use flows_core::models::{Artifact, ContextConfig, LLMConfig, PhaseConfig, ToolsConfig};
+use flows_core::models::{
+    Artifact, BashConfig, ContextConfig, LLMConfig, PhaseConfig, ToolsConfig,
+};
 use flows_core::pricing::calculate_cost;
 use flows_core::thinking::{model_supports_thinking, resolve_thinking};
 use flows_llm::types::{Completion, CompletionRequest, Message, Role, ToolCall, ToolDef};
@@ -328,6 +330,28 @@ fn tools_list_markdown(defs: &[ToolDef]) -> String {
     s.trim_end().to_string()
 }
 
+/// The bash allowlist as the model should read it (`cargo*` → `cargo`), or
+/// `None` when commands are unrestricted.
+fn allowed_commands(bash: &BashConfig) -> Option<String> {
+    if bash.unrestricted || bash.allowed.is_empty() {
+        return None;
+    }
+    let mut names: Vec<&str> = Vec::new();
+    for pattern in &bash.allowed {
+        let name = pattern.trim_end_matches('*').trim();
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    Some(
+        names
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
 pub fn build_tool_defs(tools: &ToolsConfig, ctx: &ContextConfig) -> Vec<ToolDef> {
     let mut defs = Vec::new();
     if tools.files {
@@ -390,6 +414,12 @@ pub fn build_tool_defs(tools: &ToolsConfig, ctx: &ContextConfig) -> Vec<ToolDef>
 root (your working directory) — use repo-relative paths and do NOT `cd` elsewhere \
 (e.g. never `cd /tmp`); each call starts fresh at the repo root."
             .to_string();
+        if let Some(allowed) = allowed_commands(bash) {
+            description.push_str(&format!(
+                " Only these commands run (anything else is refused): {allowed}. There \
+is no python, rustc or xargs unless listed — use the project's build tool."
+            ));
+        }
         if bash.offline {
             description.push_str(
                 " Commands have NO network access (only localhost): don't fetch \
@@ -2266,6 +2296,23 @@ mod tool_list_tests {
         // A questions envelope likewise.
         let questions = "{\"type\": \"questions\", \"questions\": [\"a?\", \"b?\"]}";
         assert!(extract_text_tool_calls(questions).is_empty());
+    }
+
+    #[test]
+    fn bash_description_lists_the_allowlist() {
+        let tools = resolve_preset("research_and_code").unwrap();
+        let defs = build_tool_defs(&tools, &ContextConfig::default());
+        let bash = defs.iter().find(|d| d.name == "bash").unwrap();
+        assert!(bash.description.contains("Only these commands run"));
+        assert!(bash.description.contains("`make`"), "{}", bash.description);
+        assert!(bash.description.contains("`cargo`"), "{}", bash.description);
+        assert!(!bash.description.contains('*'), "{}", bash.description);
+
+        let mut open = tools.clone();
+        open.bash.as_mut().unwrap().unrestricted = true;
+        let defs = build_tool_defs(&open, &ContextConfig::default());
+        let bash = defs.iter().find(|d| d.name == "bash").unwrap();
+        assert!(!bash.description.contains("Only these commands run"));
     }
 
     #[test]

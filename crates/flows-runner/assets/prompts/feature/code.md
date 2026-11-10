@@ -22,13 +22,16 @@ You are a senior software engineer with deep expertise across languages, framewo
 {% endfor %}
 {% endif %}
 
-{% set check = prior_artifacts.get('check', {}).get('content', {}) %}
-{% if check and check.get('exit_code') %}
-**⚠ The tests FAILED after your previous attempt at this task (exit {{ check.get('exit_code') }}). Fix these failures first — in place, without starting over:**
-```
-{{ check.get('stdout', '') }}{{ check.get('stderr', '') }}
-```
+{% set previous = prior_artifacts.get('code', {}).get('content', {}) %}
+{% if previous.get('error') %}
+**⚠ Your previous attempt at this task stopped early: {{ previous.error }}.** Its files are on disk — read what is there and finish it; don't start over.
 {% endif %}
+{% for gate, label in [('lint', 'Lint'), ('check', 'The tests')] %}{% set out = prior_artifacts.get(gate, {}).get('content', {}) %}{% if out and out.get('exit_code') %}
+**⚠ {{ label }} FAILED after your previous attempt at this task (exit {{ out.get('exit_code') }}). Fix these failures first — in place, without starting over:**
+```
+{{ out.get('stdout', '') }}{{ out.get('stderr', '') }}
+```
+{% endif %}{% endfor %}
 
 {% if changes %}
 **Already changed in the working tree** (uncommitted — build on it):
@@ -57,11 +60,13 @@ You are a senior software engineer with deep expertise across languages, framewo
 
 2. **Read before writing.** Use `read_file` to understand existing code before modifying it. Follow the existing style, naming, imports and patterns.
 
-3. **Leave the tests passing.** The project's tests run as soon as you finish. Add or update tests for what this task changes; never write a test for code a later task adds.
+3. **Leave lint and tests passing.** The project's lint and tests run as soon as you finish. Code that only a later task will use may trip unused-code lints — mark it allowed until then. Add or update tests for what this task changes; never write a test for code a later task adds.
 
 4. **Write complete files** with `write_file` as you go — one call per file. No TODOs or placeholders. Never put file contents in your final response.
 
 5. **Never delete the source tree or start over.** Fix build errors in place, from the compiler output. Delete a file only when it is a scratch file you made or your change made it obsolete, and list it under `files_deleted`. A shell command that deletes more than a few existing files is undone.
+
+6. **Stay inside the sandbox.** `bash` runs only the commands its description lists, from the repo root; file tools take repo-relative paths only (no `/tmp`, no `~/.cargo`). Put scratch files under the repo and delete them after.
 
 {% if tools_enabled %}
 ## Tools available

@@ -95,7 +95,7 @@ Phases can **loop back** on a condition (bounded by `max_loop_iterations`),
 |---|---|---|
 | `name` | *(required)* | phase id (used by `loop_back_to`, `depends_on`, `retry:`) |
 | `type` | `agent` | `agent` \| `script` \| `human` |
-| `on_failure` | `stop` | `stop` · `continue` · `retry:<phase>` |
+| `on_failure` | `stop` | `stop` · `continue` · `retry:<phase>` (at most `max_loop_iterations` retries in a row, then it stops) |
 | `depends_on` | `[]` | phases that must finish first — any presence makes the pipeline a **DAG** (parallel) |
 | `loop_back_to` | — | phase to jump back to when `loop_condition` is true |
 | `loop_condition` | — | MiniJinja expression over `content` (the phase's artifact); loop while true |
@@ -299,6 +299,11 @@ the expression is evaluated against the artifacts so far, and the group's nested
     - name: code              # → implement.<id>.code
       type: agent
       tools: research_and_code
+      on_failure: continue    # out of rounds? still run the checks below
+    - name: lint              # → implement.<id>.lint
+      type: script
+      command: "@auto:lint"
+      on_failure: retry:code
     - name: check             # → implement.<id>.check
       type: script
       command: "@auto:test"
@@ -318,7 +323,10 @@ the expression is evaluated against the artifacts so far, and the group's nested
   prompt, script command and `when:`. Within an item, `artifacts.check` (or
   `prior_artifacts['check']`) is that item's `check`.
 - **Retries and loops** inside the group name sibling phases and stay within the
-  item; each item has its own `max_loop_iterations` budget. Phases outside the
+  item; each item has its own `max_loop_iterations` budget. With
+  `on_failure: continue` on `code`, a task that runs out of rounds is still
+  linted and tested, and a failure there retries it with the output (and the
+  earlier attempt's `error`) in view. Phases outside the
   group may loop back to the group itself, but not into it.
 - **Group artifact.** `artifacts.<group>` holds `items`, `completed`, `failed`,
   `skipped`, plus a rolled-up `summary` (`[<id> <title>] <item summary>` lines)

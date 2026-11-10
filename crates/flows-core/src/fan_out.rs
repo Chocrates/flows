@@ -147,6 +147,28 @@ fn order(items: Vec<Item>) -> Result<Vec<Item>, String> {
     Ok(out)
 }
 
+/// A hint for a `for_each` that failed to yield a list: what the artifact it
+/// reads actually holds. A producing phase that emits another shape usually
+/// runs an older prompt (e.g. a stale copy under `~/.flows/prompts/`).
+pub fn missing_list_hint(expr: &str, artifacts: &Map<String, Value>) -> Option<String> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"artifacts\.([A-Za-z_][A-Za-z0-9_]*)").unwrap());
+    let phase = re.captures(expr)?.get(1)?.as_str();
+    let Some(artifact) = artifacts.get(phase) else {
+        return Some(format!("no `{phase}` artifact has been recorded"));
+    };
+    let fields: Vec<&str> = artifact
+        .get("content")
+        .and_then(Value::as_object)
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    Some(format!(
+        "`{phase}` produced fields [{}] — if its prompt should emit this list, it may be \
+         an outdated copy (`flows doctor` lists them; `flows templates sync` updates them)",
+        fields.join(", ")
+    ))
+}
+
 /// The cap for `group` (its `max_items`, else the default).
 pub fn max_items(group: &PhaseConfig) -> u32 {
     group.max_items.unwrap_or(DEFAULT_MAX_ITEMS)
@@ -347,6 +369,21 @@ mod tests {
                 id: "2".into()
             })
         );
+    }
+
+    #[test]
+    fn missing_list_hint_names_the_fields() {
+        let mut arts = Map::new();
+        arts.insert(
+            "design".into(),
+            json!({"content": {"architecture": "x", "implementation_order": []}}),
+        );
+        let h = missing_list_hint("artifacts.design.tasks", &arts).unwrap();
+        assert!(h.contains("[architecture, implementation_order]"), "{h}");
+        assert!(h.contains("flows doctor"), "{h}");
+        let h = missing_list_hint("artifacts.plan.tasks", &arts).unwrap();
+        assert!(h.contains("no `plan` artifact"), "{h}");
+        assert!(missing_list_hint("vars.list", &arts).is_none());
     }
 
     #[test]

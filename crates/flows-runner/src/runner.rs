@@ -507,6 +507,8 @@ async fn run_linear(
     let mut prior_artifacts = Map::new();
     let mut completed: Vec<String> = Vec::new();
     let mut loop_counts: HashMap<String, u32> = HashMap::new();
+    // Consecutive `retry:` failures per phase (reset when the phase passes).
+    let mut retry_counts: HashMap<String, u32> = HashMap::new();
     let mut total_cost = 0.0f64;
     let mut idx = start_idx;
     let mut groups: HashMap<String, GroupRun> = HashMap::new();
@@ -604,6 +606,7 @@ async fn run_linear(
             completed.retain(|n| !n.starts_with(&prefix));
             state.skipped_phases.retain(|n| !n.starts_with(&prefix));
             loop_counts.retain(|n, _| !n.starts_with(&prefix));
+            retry_counts.retain(|n, _| !n.starts_with(&prefix));
             state.fan_outs.insert(
                 phase.name.clone(),
                 run.items.iter().map(|i| i.id.clone()).collect(),
@@ -667,8 +670,22 @@ async fn run_linear(
         state.completed_phases = completed.clone();
         let _ = ctx.store.write_state(state);
 
-        if let Some(error) = failed_error {
-            match &phase.on_failure {
+        if let Some(mut error) = failed_error {
+            let mut action = phase.on_failure.clone();
+            if let OnFailure::Retry(target) = &action {
+                // `retry:` is bounded by `max_loop_iterations`: once that many
+                // retries in a row have failed, the phase stops like `stop`.
+                let count = retry_counts.entry(phase.name.clone()).or_insert(0);
+                *count += 1;
+                if *count > phase.max_loop_iterations {
+                    error = format!(
+                        "{error} (still failing after {} retries of {target:?})",
+                        phase.max_loop_iterations
+                    );
+                    action = OnFailure::Stop;
+                }
+            }
+            match &action {
                 OnFailure::Stop => {
                     // In a group with `on_failure: continue`, a stopping failure
                     // fails only the item (and skips the items depending on it).
@@ -705,6 +722,8 @@ async fn run_linear(
                 },
             }
         }
+
+        retry_counts.remove(&phase.name);
 
         if let Some(target) = &phase.loop_back_to {
             if eval_loop_condition(&phase.loop_condition, &artifact.content) {
@@ -860,7 +879,12 @@ fn start_group(
             let expr = group.for_each.as_deref().unwrap_or_default();
             let scoped = flows_core::include::scoped_artifacts(group, artifacts);
             let raw = flows_core::condition::eval_list(expr, &scoped, ctx.idea, &group.vars())
-                .map_err(|e| format!("Group {:?}: for_each {expr:?}: {e}", group.name))?;
+                .map_err(|e| {
+                    let hint = flows_core::fan_out::missing_list_hint(expr, &scoped)
+                        .map(|h| format!(" ({h})"))
+                        .unwrap_or_default();
+                    format!("Group {:?}: for_each {expr:?}: {e}{hint}", group.name)
+                })?;
             flows_core::fan_out::items(raw, flows_core::fan_out::max_items(group))
                 .map_err(|e| format!("Group {:?}: for_each {expr:?}: {e}", group.name))?
         }

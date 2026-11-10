@@ -217,6 +217,9 @@ fn agent_docs_combines_global_and_project() {
 fn builtin_fan_out_prompts_render() {
     use flows_core::models::{FanOutItem, IncludeOrigin, PhaseConfig};
     let repo = tempfile::tempdir().unwrap();
+    // An empty flows dir: global copies under the real ~/.flows must not shadow
+    // the builtins under test.
+    let home = tempfile::tempdir().unwrap();
     let task = json!({"id": "2", "title": "Token refresh", "requirements": ["REQ-2"],
                       "files": ["src/auth.rs"]});
     let vars = json!({
@@ -247,7 +250,7 @@ fn builtin_fan_out_prompts_render() {
         &item_phase("software", "code"),
         "software",
         repo.path(),
-        None,
+        Some(home.path()),
     );
     let ctx = json!({
         "idea": "x", "repo_tree": "src/", "vars": vars,
@@ -258,9 +261,16 @@ fn builtin_fan_out_prompts_render() {
             ]}},
             "design": {"content": {"architecture": "layered", "modules": []}},
             "check": {"content": failed_check},
+            "lint": {"content": {"stdout": "error: unused import", "stderr": "", "exit_code": 1}},
+            "code": {"content": {"error": "ran out of rounds"}},
         }
     });
     let out = render_prompt(&raw, &ctx).expect("software/code.md must render");
+    assert!(out.contains("stopped early: ran out of rounds"), "{out}");
+    assert!(
+        out.contains("Lint FAILED") && out.contains("unused import"),
+        "{out}"
+    );
     assert!(out.contains("2 of 3: Token refresh"), "{out}");
     assert!(
         out.contains("refresh tokens") && !out.contains("parse config"),
@@ -270,7 +280,12 @@ fn builtin_fan_out_prompts_render() {
     assert!(out.contains("auth::refresh FAILED"));
 
     // feature/code.md
-    let raw = load_prompt(&item_phase("feature", "code"), "feature", repo.path(), None);
+    let raw = load_prompt(
+        &item_phase("feature", "code"),
+        "feature",
+        repo.path(),
+        Some(home.path()),
+    );
     let ctx = json!({
         "idea": "x", "repo_tree": "src/", "vars": vars,
         "prior_artifacts": {"plan": {"content": {"summary": "add auth", "approach": "middleware"}}}
@@ -278,10 +293,16 @@ fn builtin_fan_out_prompts_render() {
     let out = render_prompt(&raw, &ctx).expect("feature/code.md must render");
     assert!(out.contains("Token refresh") && out.contains("add auth"));
     assert!(!out.contains("tests FAILED"));
+    assert!(!out.contains("stopped early") && !out.contains("Lint FAILED"));
 
     // fix.md (both templates): gate failures and feedback.
     for template in ["software", "feature"] {
-        let raw = load_prompt(&PhaseConfig::new("fix"), template, repo.path(), None);
+        let raw = load_prompt(
+            &PhaseConfig::new("fix"),
+            template,
+            repo.path(),
+            Some(home.path()),
+        );
         let ctx = json!({
             "idea": "x", "repo_tree": "src/",
             "prior_artifacts": {

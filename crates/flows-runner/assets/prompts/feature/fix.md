@@ -58,6 +58,7 @@ You are a senior software engineer fixing a feature that was implemented task by
 2. Re-run the tests with `bash` after your changes to confirm the fix.
 3. **Never delete the source tree or start over.** Delete a file only when it is a scratch file or obsolete, and list it under `files_deleted`.
 4. Write each file with `write_file`; never put file contents in your final response.
+5. **Stay inside the sandbox.** `bash` runs only the commands its description lists, from the repo root; file tools take repo-relative paths only (no `/tmp`, no `~/.cargo`). Put scratch files under the repo and delete them after.
 
 {% if tools_enabled %}
 ## Tools available

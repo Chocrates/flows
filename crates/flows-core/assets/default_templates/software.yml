@@ -43,9 +43,9 @@ phases:
     max_loop_iterations: 5
 
   # Build the design one task at a time: each task gets its own agent (with only
-  # that task's requirements in context) and the project's tests run after it;
-  # a failing test retries that task alone. Phases are named
-  # implement.<task-id>.code / implement.<task-id>.check.
+  # that task's requirements in context) and the project's lint and tests run
+  # after it; a failure retries that task alone. Phases are named
+  # implement.<task-id>.code / .lint / .check.
   - name: implement
     for_each: "artifacts.design.tasks"
     as: task
@@ -55,13 +55,20 @@ phases:
       - name: code
         type: agent
         tools: research_and_code
-        max_tool_rounds: 80
+        max_tool_rounds: 120
         max_clarification_rounds: 0
+        # A task that runs out of rounds still gets checked: if lint or the
+        # tests then fail, `retry:code` re-runs it with the failures in view.
+        on_failure: continue
         # model: coder                 # fast/local coder for implementation
+      - name: lint
+        type: script
+        command: "@auto:lint"
+        on_failure: retry:code
       - name: check
         type: script
         command: "@auto:test"
-        on_failure: retry:code
+        on_failure: retry:code       # up to max_loop_iterations (3) retries
 
   # Targeted fixes for whatever lint/test/verify/approve flagged. Skipped on the
   # first pass (nothing has failed yet); the gates below loop back here, so a
